@@ -29,6 +29,8 @@ const MAX_BACKOFF_SECS: i64 = 7 * 86400;
 const COUNT_BATCH: i64 = 20;
 /// Pause after a comment service refuses us (401/403/404).
 const COUNT_REFUSED_PAUSE_SECS: i64 = 30 * 86400;
+/// Blogs per profile / comment pass.
+const ENRICH_ROUND: i64 = 200;
 
 pub struct Crawler {
     pool: SqlitePool,
@@ -100,6 +102,11 @@ impl Crawler {
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error = %e, "crawl pass failed"),
             }
+            match self.enrich_due(ENRICH_ROUND).await {
+                Ok(n) if n > 0 => tracing::info!(blogs = n, "profile / comment pass finished"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, "profile / comment pass failed"),
+            }
             tokio::time::sleep(Duration::from_secs(self.c().tick_secs.max(5))).await;
         }
     }
@@ -166,7 +173,28 @@ impl Crawler {
             tracing::info!(?s, "crawl round finished");
             total.add(&s);
         }
+        while std::time::Instant::now() < deadline && self.enrich_due(ENRICH_ROUND).await? > 0 {}
         Ok(total)
+    }
+
+    /// Profiles and comment counts that are due, on their own schedule (not
+    /// only when a feed happens to be due), so a fresh install fills in within
+    /// minutes. Only blogs whose last contact succeeded. Returns how many ran.
+    pub async fn enrich_due(&self, limit: i64) -> anyhow::Result<usize> {
+        let blogs = db::due_for_enrich(
+            &self.pool,
+            now(),
+            self.c().profile_refresh_days as i64 * 86400,
+            self.c().comment_count_hours as i64 * 3600,
+            limit,
+        )
+        .await?;
+        let n = blogs.len();
+        let tasks = self.c().max_concurrency.max(1) * 16;
+        futures::stream::iter(blogs)
+            .for_each_concurrent(tasks, |b| async move { self.enrich(&b, None).await })
+            .await;
+        Ok(n)
     }
 
     pub async fn crawl_blogs(&self, blogs: Vec<BlogRow>) -> CrawlStats {
@@ -232,11 +260,15 @@ impl Crawler {
             }
         }
         let count_every = self.c().comment_count_hours as i64 * 3600;
-        if let Some(sys) = system.filter(|s| s.supports_counts())
-            && count_every > 0
-            && blog.comments_next_at <= t
-            && let Err(e) = self.refresh_comment_counts(blog, &sys, count_every).await
-        {
+        let Some(sys) = system.filter(|_| count_every > 0 && blog.comments_next_at <= t) else {
+            return;
+        };
+        if !sys.supports_counts() {
+            // Nothing to ask; look again after the next profile refresh.
+            let _ = db::save_comment_counts(&self.pool, blog.id, &[], t + profile_every.max(86400)).await;
+            return;
+        }
+        if let Err(e) = self.refresh_comment_counts(blog, &sys, count_every).await {
             tracing::debug!(blog = %blog.homepage_url, error = %e, "comment counts failed");
         }
     }
@@ -355,7 +387,14 @@ impl Crawler {
                     etag: blog.etag.clone(),
                     last_modified: blog.last_modified.clone(),
                 };
-                match self.http.get(&feed_url, ACCEPT_FEED, Some(&validators)).await {
+                // After a parser upgrade, fetch each feed in full once so stored
+                // posts pick up what the new parser extracts (e.g. comment counts).
+                let current = blog
+                    .content_hash
+                    .as_deref()
+                    .is_some_and(|h| h.starts_with(&hash_prefix()));
+                let validators = current.then_some(&validators);
+                match self.http.get(&feed_url, ACCEPT_FEED, validators).await {
                     Ok(f) => f,
                     Err(e) => {
                         // A vanished feed URL is re-discovered, unless it was set by hand.
@@ -541,13 +580,17 @@ impl Crawler {
     }
 }
 
-/// Change detector for feed bodies. `DefaultHasher` is stable within a build;
-/// after a toolchain upgrade each feed is simply parsed once more.
+fn hash_prefix() -> String {
+    format!("v{}-", feed::PARSER_VERSION)
+}
+
+/// Change detector for feed bodies, tagged with the parser version.
+/// `DefaultHasher` is stable within a build; after a toolchain upgrade each
+/// feed is simply parsed once more.
 fn content_hash(body: &[u8]) -> String {
     let mut h = DefaultHasher::new();
-    feed::PARSER_VERSION.hash(&mut h);
     body.hash(&mut h);
-    format!("{:016x}", h.finish())
+    format!("{}{:016x}", hash_prefix(), h.finish())
 }
 
 fn feed_full_text(item: &feed::ParsedItem) -> Option<String> {

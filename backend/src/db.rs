@@ -272,6 +272,33 @@ async fn reset_feed(tx: &mut sqlx::SqliteConnection, id: i64) -> sqlx::Result<()
     Ok(())
 }
 
+/// Blogs whose profile or comment counts are due. Only blogs we reached
+/// successfully last time; failing sites are left to the feed backoff.
+pub async fn due_for_enrich(
+    pool: &SqlitePool,
+    now: i64,
+    profile_every: i64,
+    count_every: i64,
+    limit: i64,
+) -> sqlx::Result<Vec<BlogRow>> {
+    sqlx::query_as(concat!(
+        "SELECT ",
+        blog_columns!(),
+        " FROM blogs
+         WHERE active = 1 AND excluded = 0 AND failures = 0 AND last_checked_at IS NOT NULL
+           AND ((?2 > 0 AND (profile_at IS NULL OR profile_at <= ?1 - ?2))
+             OR (?3 > 0 AND comment_system IS NOT NULL AND comments_next_at <= ?1))
+         ORDER BY profile_at IS NOT NULL, profile_at, comments_next_at
+         LIMIT ?4"
+    ))
+    .bind(now)
+    .bind(profile_every)
+    .bind(count_every)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
 pub async fn due_blogs(pool: &SqlitePool, now: i64, limit: i64) -> sqlx::Result<Vec<BlogRow>> {
     sqlx::query_as(concat!(
         "SELECT ",
@@ -595,6 +622,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(active, [("a.example".into(), true), ("b.example".into(), false)]);
+    }
+
+    #[tokio::test]
+    async fn enrichment_selects_due_reachable_blogs() {
+        let pool = connect_memory().await;
+        let entries: Vec<DirectoryEntry> = ["a", "b", "c", "d"].iter().map(|id| entry(id, &[])).collect();
+        save_directory(&pool, "d", &entries, 3600, 100).await.unwrap();
+        // a: never checked; b: reachable, profile due; c: reachable but failing;
+        // d: profile fresh, comment counts due.
+        sqlx::query(
+            "UPDATE blogs SET last_checked_at = 1000, failures = CASE site_key WHEN 'c.example' THEN 2 ELSE 0 END
+             WHERE site_key <> 'a.example'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"UPDATE blogs SET profile_at = 9000, comment_system = '{"kind":"halo"}', comments_next_at = 500
+               WHERE site_key = 'd.example'"#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let names = |rows: Vec<BlogRow>| rows.into_iter().map(|b| b.name).collect::<Vec<_>>();
+        let due = due_for_enrich(&pool, 10_000, 30 * 86400, 86400, 10).await.unwrap();
+        assert_eq!(names(due), ["Blog b", "Blog d"]);
+        let profiles_only = due_for_enrich(&pool, 10_000, 30 * 86400, 0, 10).await.unwrap();
+        assert_eq!(names(profiles_only), ["Blog b"]);
+        let nothing = due_for_enrich(&pool, 10_000, 0, 0, 10).await.unwrap();
+        assert!(nothing.is_empty());
     }
 
     #[tokio::test]

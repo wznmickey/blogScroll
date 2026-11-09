@@ -69,6 +69,16 @@ enum Command {
         #[arg(long, default_value_t = 90)]
         max_minutes: u64,
     },
+    /// Refresh blog profiles and comment counts that are due (normally done
+    /// by `serve` in the background).
+    Enrich {
+        /// Blogs per round.
+        #[arg(long, default_value_t = 200)]
+        limit: i64,
+        /// Keep going until nothing is due.
+        #[arg(long)]
+        all: bool,
+    },
     /// Write the site's data as static JSON (for GitHub Pages and similar).
     Export {
         /// Output directory, e.g. ../frontend/dist/data
@@ -134,6 +144,17 @@ async fn main() -> anyhow::Result<()> {
                 None => crawler.crawl_due(limit).await?,
             };
             println!("{stats:#?}");
+        }
+        Command::Enrich { limit, all } => {
+            let mut total = 0;
+            loop {
+                let n = crawler.enrich_due(limit).await?;
+                total += n;
+                if n == 0 || !all {
+                    break;
+                }
+            }
+            println!("refreshed {total} blogs");
         }
         Command::Export {
             out,
