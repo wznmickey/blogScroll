@@ -8,6 +8,9 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqlitePool};
 
+use crate::comments::{CommentSystem, EmbedConfig};
+use crate::profile::SocialLink;
+
 #[derive(Clone)]
 pub struct AppState {
     pub pool: SqlitePool,
@@ -274,6 +277,8 @@ struct PostRow {
     published_at: Option<i64>,
     sort_at: i64,
     has_full_text: bool,
+    comment_count: Option<i64>,
+    comments_url: Option<String>,
     blog_id: i64,
     blog_name: String,
     blog_homepage: String,
@@ -303,6 +308,9 @@ pub struct PostCard {
     published_at: Option<i64>,
     sort_at: i64,
     has_full_text: bool,
+    /// From the feed (`slash:comments`) or the blog's comment service.
+    comment_count: Option<i64>,
+    comments_url: Option<String>,
     blog: BlogRef,
 }
 
@@ -319,6 +327,8 @@ impl From<PostRow> for PostCard {
             published_at: r.published_at,
             sort_at: r.sort_at,
             has_full_text: r.has_full_text,
+            comment_count: r.comment_count,
+            comments_url: r.comments_url,
             blog: BlogRef {
                 id: r.blog_id,
                 name: r.blog_name,
@@ -339,8 +349,9 @@ pub struct Page<T> {
 macro_rules! post_columns {
     () => {
         "p.id, p.title, p.url, p.excerpt, p.cover_url, p.author, p.tags, p.published_at, p.sort_at,
-     (p.content_html IS NOT NULL) AS has_full_text,
-     b.id AS blog_id, b.name AS blog_name, b.homepage_url AS blog_homepage, b.icon_url AS blog_icon,
+     (p.content_html IS NOT NULL) AS has_full_text, p.comment_count, p.comments_url,
+     b.id AS blog_id, b.name AS blog_name, b.homepage_url AS blog_homepage,
+     COALESCE(b.avatar_url, b.icon_url) AS blog_icon,
      (SELECT json_group_array(DISTINCT bt.tag) FROM blog_tags bt WHERE bt.blog_id = b.id) AS blog_tags"
     };
 }
@@ -492,6 +503,15 @@ pub struct PostDetail {
     card: PostCard,
     /// Only present for blogs whose author allowed full text.
     content_html: Option<String>,
+    comments: Option<PostComments>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PostComments {
+    /// Display name of the blog's comment system, e.g. "Waline".
+    system: String,
+    /// Widget configuration; only for blogs whose author allowed embedding.
+    embed: Option<EmbedConfig>,
 }
 
 async fn get_post(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<PostDetail> {
@@ -500,11 +520,14 @@ async fn get_post(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<
         #[sqlx(flatten)]
         post: PostRow,
         content_html: Option<String>,
+        comment_system: Option<String>,
+        embed_comments: bool,
     }
     let row: Option<Row> = sqlx::query_as(concat!(
         "SELECT ",
         post_columns!(),
-        ", CASE WHEN b.content_policy = 'full_text' THEN p.content_html END AS content_html
+        ", CASE WHEN b.content_policy = 'full_text' THEN p.content_html END AS content_html,
+         b.comment_system, b.embed_comments
          FROM posts p JOIN blogs b ON b.id = p.blog_id
          WHERE p.id = ? AND b.excluded = 0"
     ))
@@ -512,9 +535,22 @@ async fn get_post(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<
     .fetch_optional(&st.pool)
     .await?;
     let row = row.ok_or_else(not_found)?;
+    let system: Option<CommentSystem> = row.comment_system.as_deref().and_then(|s| serde_json::from_str(s).ok());
+    let card: PostCard = row.post.into();
+    let comments = system.map(|sys| PostComments {
+        system: sys.label(),
+        embed: if row.embed_comments {
+            url::Url::parse(&card.url)
+                .ok()
+                .and_then(|u| crate::comments::embed_config(&sys, &u, &card.title))
+        } else {
+            None
+        },
+    });
     Ok(Json(PostDetail {
-        card: row.post.into(),
+        card,
         content_html: row.content_html,
+        comments,
     }))
 }
 
@@ -544,6 +580,7 @@ struct BlogSummaryRow {
     post_count: i64,
     last_post_at: Option<i64>,
     has_feed: bool,
+    description: Option<String>,
     tags: String,
 }
 
@@ -556,6 +593,8 @@ pub struct BlogSummary {
     post_count: i64,
     last_post_at: Option<i64>,
     has_feed: bool,
+    /// From the blog's own homepage (meta description).
+    description: Option<String>,
     tags: Vec<TagRef>,
 }
 
@@ -570,13 +609,15 @@ impl BlogSummary {
             post_count: r.post_count,
             last_post_at: r.last_post_at,
             has_feed: r.has_feed,
+            description: r.description,
         }
     }
 }
 
 macro_rules! blog_summary_sql {
     () => {
-        "SELECT b.id, b.name, b.homepage_url AS homepage, b.icon_url AS icon,
+        "SELECT b.id, b.name, b.homepage_url AS homepage, COALESCE(b.avatar_url, b.icon_url) AS icon,
+            b.description,
             (SELECT COUNT(*) FROM posts p WHERE p.blog_id = b.id) AS post_count,
             (SELECT MAX(p.sort_at) FROM posts p WHERE p.blog_id = b.id) AS last_post_at,
             (b.last_success_at IS NOT NULL) AS has_feed,
@@ -622,6 +663,14 @@ pub struct BlogDetail {
     summary: BlogSummary,
     full_text: bool,
     directories: Vec<BlogDirectory>,
+    about_url: Option<String>,
+    /// Short excerpt of the about page.
+    about_text: Option<String>,
+    social: Vec<SocialLink>,
+    /// Blog engine from `<meta name="generator">`, e.g. "Hexo 7.3.0".
+    generator: Option<String>,
+    /// Display name of the detected comment system.
+    comment_system: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -637,10 +686,23 @@ async fn get_blog(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<
             .fetch_optional(&st.pool)
             .await?;
     let summary = BlogSummary::from_row(&st, row.ok_or_else(not_found)?);
-    let full_text: bool = sqlx::query_scalar("SELECT content_policy = 'full_text' FROM blogs WHERE id = ?")
-        .bind(id)
-        .fetch_one(&st.pool)
-        .await?;
+    #[derive(FromRow)]
+    struct Extra {
+        full_text: bool,
+        about_url: Option<String>,
+        about_text: Option<String>,
+        social_links: String,
+        generator: Option<String>,
+        comment_system: Option<String>,
+    }
+    let extra: Extra = sqlx::query_as(
+        "SELECT content_policy = 'full_text' AS full_text, about_url, about_text, social_links,
+                generator, comment_system
+         FROM blogs WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_one(&st.pool)
+    .await?;
     let dirs: Vec<String> =
         sqlx::query_scalar("SELECT directory FROM directory_entries WHERE blog_id = ? AND active = 1")
             .bind(id)
@@ -655,8 +717,17 @@ async fn get_blog(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<
         .collect();
     Ok(Json(BlogDetail {
         summary,
-        full_text,
+        full_text: extra.full_text,
         directories,
+        about_url: extra.about_url,
+        about_text: extra.about_text,
+        social: serde_json::from_str(&extra.social_links).unwrap_or_default(),
+        generator: extra.generator,
+        comment_system: extra
+            .comment_system
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<CommentSystem>(s).ok())
+            .map(|s| s.label()),
     }))
 }
 
@@ -712,6 +783,8 @@ pub(crate) mod tests {
                     },
                     published: chrono::DateTime::from_timestamp(now - 86400 * 10 + (blog * 10 + n) * 3600, 0),
                     body_html: Some("<p>secret full text</p>".into()),
+                    comments_url: None,
+                    comment_count: (blog == 1 && n == 4).then_some(9),
                 };
                 crate::db::upsert_post(&pool, blog, &item, now, 0, None).await.unwrap();
             }
@@ -845,6 +918,47 @@ pub(crate) mod tests {
         assert_eq!(v["has_full_text"], false);
         let (status, _) = get_json(&st, "/api/posts/99999").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn comments_are_exposed_and_embedding_needs_permission() {
+        let st = seeded().await;
+        sqlx::query(
+            r#"UPDATE blogs SET comment_system = '{"kind":"waline","server_url":"https://w.example"}',
+                   description = '一个博客', about_text = '关于我',
+                   social_links = '[{"kind":"github","url":"https://github.com/x"}]', generator = 'Hexo 7.3.0'
+               WHERE id = 1"#,
+        )
+        .execute(&st.pool)
+        .await
+        .unwrap();
+
+        // Post 5 is blog 1's fifth post, which carries a feed comment count.
+        let (_, v) = get_json(&st, "/api/posts/5").await;
+        assert_eq!(v["comment_count"], 9);
+        assert_eq!(v["comments"]["system"], "Waline");
+        assert!(
+            v["comments"]["embed"].is_null(),
+            "no embed without the author's permission"
+        );
+
+        sqlx::query("UPDATE blogs SET embed_comments = 1 WHERE id = 1")
+            .execute(&st.pool)
+            .await
+            .unwrap();
+        let (_, v) = get_json(&st, "/api/posts/5").await;
+        assert_eq!(v["comments"]["embed"]["kind"], "waline");
+        assert_eq!(v["comments"]["embed"]["server_url"], "https://w.example");
+        assert_eq!(v["comments"]["embed"]["path"], "/p/4");
+
+        let (_, b) = get_json(&st, "/api/blogs/1").await;
+        assert_eq!(b["description"], "一个博客");
+        assert_eq!(b["about_text"], "关于我");
+        assert_eq!(b["comment_system"], "Waline");
+        assert_eq!(b["generator"], "Hexo 7.3.0");
+        assert_eq!(b["social"][0]["kind"], "github");
+        let (_, b2) = get_json(&st, "/api/blogs/2").await;
+        assert!(b2["comment_system"].is_null());
     }
 
     #[tokio::test]

@@ -104,6 +104,16 @@ docker compose up -d          # http://127.0.0.1:8080，前面再挂 Caddy / ngi
 
 以上都可在 `config.toml` 的 `[crawler]` 中调整。
 
+## 博主信息与评论
+
+- **简介**：每月读一次首页和关于页（每个博客 2 个请求）：meta 描述、头像（主题的作者头像位，否则 apple-touch-icon）、关于页链接与约 300 字摘要、社交链接（GitHub、B站、微博、知乎……与 `rel="me"`）、博客程序（generator）。
+- **评论系统识别**：只看首页和关于页里的配置值（Twikoo 的 `envId`、Waline 的 `serverURL`、Artalk 的 `server`、Giscus / Utterances 的仓库、Disqus、Halo、Valine），仅出现产品名不算；WordPress / Typecho 等按 generator 判断为内置评论。不读文章页。
+- **评论数**：
+  - RSS 自带的 `<slash:comments>` / `<thr:total>`，不需要额外请求；
+  - Twikoo（自建地址）、Waline、Artalk、Halo 2：每天最多一次批量请求（最新 20 篇）；401/403/404 视为博主不允许，30 天内不再请求；不伪造 Referer / Origin。
+  - Giscus、Utterances、Disqus 没有批量接口，只显示「去原文评论」。
+- **内嵌评论区**（`[[policy.embed_comments]]` 授权后）：详情页加载博客自己的评论组件，评论读写都在原博客的评论服务。组件脚本固定版本、只从 jsDelivr / giscus.app / utteranc.es 加载，从不加载博客站点本身的脚本；博主需要把本站域名加入评论服务的允许列表。静态版（Pages）只显示评论数和链接，不内嵌。
+
 ## 本站的缓存
 
 - API：内存缓存（条数上限 `api_cache_entries`，默认 512），列表 60 秒、标签 / 统计 / 博客主页 5 分钟、文章详情 10 分钟；响应带弱 `ETag` 和 `Cache-Control: max-age=…, stale-while-revalidate=…`，浏览器复查时返回 304。

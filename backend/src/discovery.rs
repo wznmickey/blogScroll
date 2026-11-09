@@ -27,16 +27,38 @@ pub struct Discovered {
     pub fresh_for: Option<Duration>,
 }
 
-/// `Ok(None)` means the site answered but has no feed we could find.
-/// `Err` means the homepage itself could not be fetched.
-pub async fn discover(http: &PoliteClient, homepage: &Url) -> Result<Option<Discovered>, FetchError> {
-    let (page_url, body) = match http.get(homepage, ACCEPT_HTML, None).await? {
-        Fetched::Ok { final_url, body, .. } => (final_url, body),
-        Fetched::NotModified { .. } => (homepage.clone(), Bytes::new()),
-    };
+/// A fetched HTML page; discovery hands the homepage on so the profile step
+/// does not request it a second time.
+pub struct Page {
+    pub url: Url,
+    pub html: String,
+}
 
-    let advertised = html::feed_links(&String::from_utf8_lossy(&body), &page_url);
-    let base = dir_url(&page_url);
+pub async fn fetch_page(http: &PoliteClient, url: &Url) -> Result<Page, FetchError> {
+    Ok(match http.get(url, ACCEPT_HTML, None).await? {
+        Fetched::Ok { final_url, body, .. } => Page {
+            url: final_url,
+            html: String::from_utf8_lossy(&body).into_owned(),
+        },
+        Fetched::NotModified { .. } => Page {
+            url: url.clone(),
+            html: String::new(),
+        },
+    })
+}
+
+/// `Ok((None, _))` means the site answered but has no feed we could find.
+/// `Err` means the homepage itself could not be fetched.
+pub async fn discover(http: &PoliteClient, homepage: &Url) -> Result<(Option<Discovered>, Page), FetchError> {
+    let page = fetch_page(http, homepage).await?;
+    let found = find_feed(http, &page).await;
+    Ok((found, page))
+}
+
+async fn find_feed(http: &PoliteClient, page: &Page) -> Option<Discovered> {
+    let page_url = &page.url;
+    let advertised = html::feed_links(&page.html, page_url);
+    let base = dir_url(page_url);
     let guessed = COMMON_PATHS.iter().filter_map(|p| base.join(p).ok());
 
     let mut tried = HashSet::new();
@@ -45,13 +67,13 @@ pub async fn discover(http: &PoliteClient, homepage: &Url) -> Result<Option<Disc
             continue;
         }
         match try_feed(http, candidate).await {
-            Probe::Found(found) => return Ok(Some(found)),
+            Probe::Found(found) => return Some(found),
             Probe::NotAFeed => {}
             // The server is struggling or refusing us; guessing more URLs would only add load.
             Probe::ServerTrouble => break,
         }
     }
-    Ok(None)
+    None
 }
 
 enum Probe {
@@ -90,7 +112,7 @@ async fn try_feed(http: &PoliteClient, url: Url) -> Probe {
 }
 
 /// `https://a.com/blog` -> `https://a.com/blog/`, `https://a.com/index.html` -> `https://a.com/`
-fn dir_url(url: &Url) -> Url {
+pub fn dir_url(url: &Url) -> Url {
     let mut u = url.clone();
     u.set_query(None);
     u.set_fragment(None);

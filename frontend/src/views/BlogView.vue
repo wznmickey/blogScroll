@@ -28,6 +28,25 @@ watch(
 )
 
 const load = (cursor: string | null) => api.posts({ mode: 'latest', blog: id.value, cursor })
+
+/** "Hexo 7.3.0" → "Hexo" */
+const engine = computed(() => blog.value?.generator?.split(/\s+/)[0] ?? null)
+
+const SOCIAL: Record<string, string> = {
+  github: 'GitHub',
+  gitee: 'Gitee',
+  bilibili: 'B站',
+  weibo: '微博',
+  zhihu: '知乎',
+  x: 'X',
+  telegram: 'Telegram',
+  instagram: 'Instagram',
+  youtube: 'YouTube',
+  douban: '豆瓣',
+  xiaohongshu: '小红书',
+  link: '个人主页',
+}
+const socialLabel = (kind: string) => SOCIAL[kind] ?? kind
 </script>
 
 <template>
@@ -37,6 +56,7 @@ const load = (cursor: string | null) => api.posts({ mode: 'latest', blog: id.val
       <div class="info">
         <h1>{{ blog.name }}</h1>
         <a :href="blog.homepage" target="_blank" rel="noopener" class="home">{{ hostOf(blog.homepage) }} ↗</a>
+        <p v-if="blog.description" class="desc">{{ blog.description }}</p>
         <p class="chips">
           <span v-for="d in blog.directories" :key="d.directory" class="chip source">收录于{{ d.name }}</span>
           <RouterLink
@@ -47,6 +67,13 @@ const load = (cursor: string | null) => api.posts({ mode: 'latest', blog: id.val
             >{{ t.label }}</RouterLink
           >
           <span v-if="blog.full_text" class="chip">作者已授权全文</span>
+          <span v-if="engine" class="chip">{{ engine }}</span>
+          <span v-if="blog.comment_system" class="chip">评论 · {{ blog.comment_system }}</span>
+        </p>
+        <p v-if="blog.social.length" class="social">
+          <a v-for="s in blog.social" :key="s.url" :href="s.url" target="_blank" rel="noopener me">{{
+            socialLabel(s.kind)
+          }}</a>
         </p>
         <p class="stats">
           <span><b>{{ blog.post_count }}</b> 篇文章</span>
@@ -54,6 +81,11 @@ const load = (cursor: string | null) => api.posts({ mode: 'latest', blog: id.val
           <span v-if="!blog.has_feed">暂未找到 RSS</span>
         </p>
       </div>
+    </section>
+    <section v-if="blog?.about_text" class="about">
+      <h2>关于</h2>
+      <p>{{ blog.about_text }}</p>
+      <a v-if="blog.about_url" :href="blog.about_url" target="_blank" rel="noopener">阅读完整介绍 ↗</a>
     </section>
     <p v-else-if="missing" class="missing">找不到这个博客</p>
 
@@ -97,6 +129,44 @@ h1 {
   background: var(--surface);
   color: var(--text-2);
   font-size: 12px;
+}
+.desc {
+  margin: 6px 0 0;
+  color: var(--text-2);
+  font-size: 14px;
+}
+.social {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 10px 0 0;
+  font-size: 13px;
+}
+.social a {
+  color: var(--link);
+}
+.about {
+  max-width: 880px;
+  margin: -12px auto 28px;
+  padding: 14px 18px;
+  border-radius: 14px;
+  background: var(--surface);
+}
+.about h2 {
+  margin: 0 0 4px;
+  font-size: 14px;
+}
+.about p {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 14px;
+  line-height: 1.7;
+}
+.about a {
+  display: inline-block;
+  margin-top: 6px;
+  color: var(--link);
+  font-size: 13px;
 }
 .chip.link:hover {
   color: var(--text);

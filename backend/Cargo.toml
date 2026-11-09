@@ -12,6 +12,7 @@ chrono = "0.4.45"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 feed-rs = "3.0.0"
 futures = "0.3.34"
+regex = "1.13.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "gzip", "brotli", "deflate", "json", "stream"] }
 scraper = "0.29.0"
 serde = { version = "1.0.229", features = ["derive"] }

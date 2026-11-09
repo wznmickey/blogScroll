@@ -133,17 +133,7 @@ impl PoliteClient {
                 fresh_for: freshness(resp.headers()),
             });
         }
-        if !status.is_success() {
-            let retry_after = resp
-                .headers()
-                .get(header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok())
-                .and_then(parse_retry_after);
-            return Err(FetchError::Status { status, retry_after });
-        }
-        if resp.content_length().is_some_and(|len| len as usize > self.max_body) {
-            return Err(FetchError::TooLarge(self.max_body));
-        }
+        check_status(&resp)?;
 
         let header_str = |name| {
             resp.headers()
@@ -157,7 +147,36 @@ impl PoliteClient {
         };
         let final_url = resp.url().clone();
         let fresh_for = freshness(resp.headers());
+        let body = self.read_body(&mut resp).await?;
+        Ok(Fetched::Ok {
+            final_url,
+            validators,
+            body,
+            fresh_for,
+        })
+    }
 
+    /// POST a JSON body and parse the JSON answer (`Null` if it is not JSON).
+    /// Same politeness rules as `get`; used for comment-count APIs.
+    pub async fn post_json(&self, url: &Url, body: &serde_json::Value) -> Result<serde_json::Value, FetchError> {
+        self.wait_for_host(url.host_str().unwrap_or_default()).await;
+        let _permit = self.global.acquire().await.expect("semaphore never closed");
+        let mut resp = self
+            .client
+            .post(url.clone())
+            .header(header::ACCEPT, ACCEPT_JSON)
+            .json(body)
+            .send()
+            .await?;
+        check_status(&resp)?;
+        let bytes = self.read_body(&mut resp).await?;
+        Ok(serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+    }
+
+    async fn read_body(&self, resp: &mut reqwest::Response) -> Result<Bytes, FetchError> {
+        if resp.content_length().is_some_and(|len| len as usize > self.max_body) {
+            return Err(FetchError::TooLarge(self.max_body));
+        }
         let mut body = Vec::new();
         while let Some(chunk) = resp.chunk().await? {
             if body.len() + chunk.len() > self.max_body {
@@ -165,13 +184,21 @@ impl PoliteClient {
             }
             body.extend_from_slice(&chunk);
         }
-        Ok(Fetched::Ok {
-            final_url,
-            validators,
-            body: body.into(),
-            fresh_for,
-        })
+        Ok(body.into())
     }
+}
+
+fn check_status(resp: &reqwest::Response) -> Result<(), FetchError> {
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let retry_after = resp
+        .headers()
+        .get(header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_retry_after);
+    Err(FetchError::Status { status, retry_after })
 }
 
 /// Freshness lifetime from `Cache-Control: max-age`, else `Expires`.

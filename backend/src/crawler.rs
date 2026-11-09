@@ -7,13 +7,15 @@ use reqwest::StatusCode;
 use sqlx::SqlitePool;
 use url::Url;
 
+use crate::comments::{self, CommentSystem};
 use crate::config::{Config, CrawlerConfig};
 use crate::db::{self, BlogRow, Success};
-use crate::discovery;
+use crate::discovery::{self, Page};
 use crate::feed;
 use crate::fulltext::FullTextExtractor;
 use crate::html;
 use crate::http::{ACCEPT_FEED, FetchError, Fetched, PoliteClient, Validators};
+use crate::profile;
 use crate::sources::{Directory, DirectoryFetch};
 use crate::util::{jitter, now};
 
@@ -23,6 +25,10 @@ const FULL_FEED_MIN_CHARS: usize = 500;
 /// Article pages fetched per blog per crawl, for full-text blogs only.
 const PAGES_PER_CRAWL: i64 = 3;
 const MAX_BACKOFF_SECS: i64 = 7 * 86400;
+/// Posts per batched comment-count request.
+const COUNT_BATCH: i64 = 20;
+/// Pause after a comment service refuses us (401/403/404).
+const COUNT_REFUSED_PAUSE_SECS: i64 = 30 * 86400;
 
 pub struct Crawler {
     pool: SqlitePool,
@@ -187,7 +193,8 @@ impl Crawler {
     }
 
     pub async fn crawl_blog(&self, blog: BlogRow) -> Outcome {
-        let outcome = match self.try_crawl_blog(&blog).await {
+        let mut homepage = None;
+        let outcome = match self.try_crawl_blog(&blog, &mut homepage).await {
             Ok(o) => o,
             Err(e) => {
                 let msg = format!("{e:#}");
@@ -198,13 +205,113 @@ impl Crawler {
                 Outcome::Failed(msg)
             }
         };
-        if let Outcome::Failed(msg) = &outcome {
-            tracing::debug!(blog = %blog.homepage_url, %msg, "crawl failed");
+        match &outcome {
+            Outcome::Failed(msg) => tracing::debug!(blog = %blog.homepage_url, %msg, "crawl failed"),
+            // Only touch a site again when it just answered normally.
+            _ => self.enrich(&blog, homepage).await,
         }
         outcome
     }
 
-    async fn try_crawl_blog(&self, blog: &BlogRow) -> anyhow::Result<Outcome> {
+    /// Profile (monthly: homepage + about page) and comment counts (daily, one request).
+    async fn enrich(&self, blog: &BlogRow, homepage: Option<Page>) {
+        let t = now();
+        let mut system = blog
+            .comment_system
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<CommentSystem>(s).ok());
+        let profile_every = self.c().profile_refresh_days as i64 * 86400;
+        if profile_every > 0 && blog.profile_at.is_none_or(|at| t - at >= profile_every) {
+            match self.refresh_profile(blog, homepage).await {
+                Ok(Some(found)) => system = Some(found),
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::debug!(blog = %blog.homepage_url, error = %e, "profile refresh failed");
+                    let _ = db::touch_profile(&self.pool, blog.id, t).await;
+                }
+            }
+        }
+        let count_every = self.c().comment_count_hours as i64 * 3600;
+        if let Some(sys) = system.filter(|s| s.supports_counts())
+            && count_every > 0
+            && blog.comments_next_at <= t
+            && let Err(e) = self.refresh_comment_counts(blog, &sys, count_every).await
+        {
+            tracing::debug!(blog = %blog.homepage_url, error = %e, "comment counts failed");
+        }
+    }
+
+    async fn refresh_profile(&self, blog: &BlogRow, homepage: Option<Page>) -> anyhow::Result<Option<CommentSystem>> {
+        let home = match homepage.filter(|p| !p.html.is_empty()) {
+            Some(p) => p,
+            None => discovery::fetch_page(&self.http, &Url::parse(&blog.homepage_url)?).await?,
+        };
+        let info = profile::from_home(&home.html, &home.url);
+        // Linked about page, else one guess at <site>/about/.
+        let about_url = info
+            .about
+            .clone()
+            .or_else(|| discovery::dir_url(&home.url).join("about/").ok());
+        let about = match about_url {
+            Some(u) => discovery::fetch_page(&self.http, &u)
+                .await
+                .ok()
+                .filter(|p| !p.html.is_empty()),
+            None => None,
+        };
+        let system = about
+            .as_ref()
+            .and_then(|p| comments::detect(&p.html))
+            .or_else(|| comments::detect(&home.html))
+            .or_else(|| comments::native(info.generator.as_deref()));
+
+        let about_text = about.as_ref().and_then(|p| profile::about_text(&p.html));
+        let social = serde_json::to_string(&info.social)?;
+        let system_json = system.as_ref().map(serde_json::to_string).transpose()?;
+        db::save_profile(
+            &self.pool,
+            blog.id,
+            now(),
+            &db::Profile {
+                description: info.description.as_deref(),
+                avatar_url: info.avatar.as_ref().map(|u| u.as_str()),
+                about_url: about.as_ref().map(|p| p.url.as_str()),
+                about_text: about_text.as_deref(),
+                social_json: &social,
+                generator: info.generator.as_deref(),
+                comment_system_json: system_json.as_deref(),
+            },
+        )
+        .await?;
+        Ok(system)
+    }
+
+    async fn refresh_comment_counts(&self, blog: &BlogRow, sys: &CommentSystem, every: i64) -> anyhow::Result<()> {
+        let t = now();
+        let posts: Vec<(i64, Url)> = db::recent_post_urls(&self.pool, blog.id, COUNT_BATCH)
+            .await?
+            .into_iter()
+            .filter_map(|(id, u)| Some((id, Url::parse(&u).ok()?)))
+            .collect();
+        if posts.is_empty() {
+            return Ok(db::save_comment_counts(&self.pool, blog.id, &[], t + every).await?);
+        }
+        let homepage = Url::parse(&blog.homepage_url)?;
+        match comments::fetch_counts(&self.http, sys, &homepage, &posts).await {
+            Ok(counts) => {
+                db::save_comment_counts(&self.pool, blog.id, &counts, t + jitter(every, 10, blog.id)).await?;
+                Ok(())
+            }
+            Err(e) => {
+                let refused = e.status().is_some_and(|s| matches!(s.as_u16(), 401 | 403 | 404 | 405));
+                let next = t + if refused { COUNT_REFUSED_PAUSE_SECS } else { every };
+                db::save_comment_counts(&self.pool, blog.id, &[], next).await?;
+                Err(e.into())
+            }
+        }
+    }
+
+    async fn try_crawl_blog(&self, blog: &BlogRow, homepage_out: &mut Option<Page>) -> anyhow::Result<Outcome> {
         let t = now();
         let retry = self.c().discovery_retry_secs as i64;
 
@@ -216,7 +323,11 @@ impl Crawler {
                     return Ok(Outcome::Waiting);
                 }
                 let homepage = Url::parse(&blog.homepage_url)?;
-                match discovery::discover(&self.http, &homepage).await {
+                let discovered = discovery::discover(&self.http, &homepage).await.map(|(found, page)| {
+                    *homepage_out = Some(page);
+                    found
+                });
+                match discovered {
                     Ok(Some(found)) => {
                         db::set_discovered_feed(&self.pool, blog.id, found.feed_url.as_str(), t).await?;
                         tracing::info!(blog = %blog.name, feed = %found.feed_url, "feed discovered");

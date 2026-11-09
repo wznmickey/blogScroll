@@ -21,12 +21,33 @@ export interface PostCard {
   published_at: number | null
   sort_at: number
   has_full_text: boolean
+  /** From the feed (slash:comments) or the blog's comment service. */
+  comment_count: number | null
+  comments_url: string | null
   blog: BlogRef
 }
+
+/** How to load a blog's own comment widget for one post (authorized blogs only). */
+export type EmbedConfig = { path: string; term: string | null; url: string; title: string } & (
+  | { kind: 'twikoo'; env_id: string }
+  | { kind: 'waline'; server_url: string }
+  | { kind: 'artalk'; server: string; site: string | null }
+  | {
+      kind: 'giscus'
+      repo: string
+      repo_id: string | null
+      category: string | null
+      category_id: string | null
+      mapping: string | null
+    }
+  | { kind: 'utterances'; repo: string; issue_term: string | null }
+)
 
 export interface PostDetail extends PostCard {
   /** Sanitised HTML, only for blogs whose author allowed full text. */
   content_html: string | null
+  /** Absent in static mode. */
+  comments?: { system: string; embed: EmbedConfig | null } | null
 }
 
 export interface Page<T> {
@@ -68,12 +89,24 @@ export interface BlogSummary {
   post_count: number
   last_post_at: number | null
   has_feed: boolean
+  /** The blog's own meta description. */
+  description: string | null
   tags: TagRef[]
+}
+
+export interface SocialLink {
+  kind: string
+  url: string
 }
 
 export interface BlogDetail extends BlogSummary {
   full_text: boolean
   directories: { directory: string; name: string }[]
+  about_url: string | null
+  about_text: string | null
+  social: SocialLink[]
+  generator: string | null
+  comment_system: string | null
 }
 
 export interface TagCount {

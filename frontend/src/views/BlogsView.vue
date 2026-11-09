@@ -121,6 +121,7 @@ onBeforeUnmount(() => {
           <div class="info">
             <h2>{{ b.name }}</h2>
             <p class="host">{{ hostOf(b.homepage) }}</p>
+            <p v-if="b.description" class="desc">{{ b.description }}</p>
             <p class="tags">
               <span v-for="t in b.tags" :key="t.directory + t.tag">{{ t.label }}</span>
             </p>
@@ -218,6 +219,17 @@ h2 {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.desc {
+  margin: 6px 0 0;
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
 }
 .tags {
   display: flex;

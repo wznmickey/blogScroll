@@ -749,6 +749,7 @@ dependencies = [
  "clap",
  "feed-rs",
  "futures",
+ "regex",
  "reqwest",
  "scraper",
  "serde",

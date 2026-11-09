@@ -2,7 +2,7 @@
 //! Only data present in the feed itself is used.
 
 use chrono::{DateTime, Utc};
-use feed_rs::model::{Entry, Feed, MediaObject};
+use feed_rs::model::{Entry, Feed, LinkTarget, MediaObject};
 use url::Url;
 
 use crate::html;
@@ -11,7 +11,7 @@ use crate::util::truncate_chars;
 pub const EXCERPT_CHARS: usize = 240;
 /// Bump when parsing changes, so stored posts are re-parsed once even if
 /// their feed did not change (it is part of the crawler's content hash).
-pub const PARSER_VERSION: u32 = 3;
+pub const PARSER_VERSION: u32 = 4;
 
 #[derive(Debug)]
 pub struct ParsedFeed {
@@ -34,6 +34,10 @@ pub struct ParsedItem {
     /// Raw HTML body from the feed (content, else summary). The crawler decides
     /// whether it may be stored, based on the blog's content policy.
     pub body_html: Option<String>,
+    /// Where comments live (RSS `<comments>`, Atom `rel="replies"`).
+    pub comments_url: Option<Url>,
+    /// From `<slash:comments>` / `<thr:total>`, when the feed carries it.
+    pub comment_count: Option<i64>,
 }
 
 pub fn parse(bytes: &[u8], feed_url: &Url) -> anyhow::Result<ParsedFeed> {
@@ -41,17 +45,27 @@ pub fn parse(bytes: &[u8], feed_url: &Url) -> anyhow::Result<ParsedFeed> {
         .base_uri(Some(feed_url.as_str()))
         .build()
         .parse(bytes)?;
-    Ok(convert(feed, feed_url))
+    let counts = crate::comments::feed_comment_counts(bytes, feed.entries.len());
+    Ok(convert(feed, feed_url, &counts))
 }
 
-fn convert(feed: Feed, feed_url: &Url) -> ParsedFeed {
+fn convert(feed: Feed, feed_url: &Url, comment_counts: &[Option<i64>]) -> ParsedFeed {
     let icon = feed
         .icon
         .as_ref()
         .or(feed.logo.as_ref())
         .and_then(|img| html::resolve(&img.uri, Some(feed_url)))
         .filter(|u| matches!(u.scheme(), "http" | "https"));
-    let items = feed.entries.iter().filter_map(|e| convert_entry(e, feed_url)).collect();
+    let items = feed
+        .entries
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| {
+            let mut item = convert_entry(e, feed_url)?;
+            item.comment_count = comment_counts.get(i).copied().flatten();
+            Some(item)
+        })
+        .collect();
     ParsedFeed {
         icon,
         ttl_minutes: feed.ttl,
@@ -118,6 +132,16 @@ fn convert_entry(entry: &Entry, feed_url: &Url) -> Option<ParsedItem> {
         entry.id.clone()
     };
 
+    let comments_url = entry
+        .links
+        .iter()
+        .find(|l| {
+            l.target == Some(LinkTarget::Comments)
+                || (l.rel.as_deref() == Some("replies") && l.media_type.as_deref().is_none_or(|t| t == "text/html"))
+        })
+        .and_then(|l| html::resolve(&l.href, Some(&url)))
+        .filter(|u| matches!(u.scheme(), "http" | "https"));
+
     Some(ParsedItem {
         guid,
         url,
@@ -132,6 +156,8 @@ fn convert_entry(entry: &Entry, feed_url: &Url) -> Option<ParsedItem> {
         tags,
         published: entry.published.or(entry.updated),
         body_html: content.or(summary),
+        comments_url,
+        comment_count: None,
     })
 }
 
@@ -156,7 +182,7 @@ mod tests {
     use super::*;
 
     const RSS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/" xmlns:slash="http://purl.org/rss/1.0/modules/slash/">
 <channel>
   <title>小明的博客</title>
   <link>https://ming.example/</link>
@@ -165,6 +191,8 @@ mod tests {
     <title>第一篇 &amp; 测试</title>
     <link>/posts/1/</link>
     <guid>post-1</guid>
+    <comments>https://ming.example/posts/1/#comments</comments>
+    <slash:comments>6</slash:comments>
     <pubDate>Mon, 02 Nov 2026 10:00:00 +0800</pubDate>
     <category>生活</category>
     <category>旅行</category>
@@ -206,6 +234,11 @@ mod tests {
         assert_eq!(a.excerpt, "今天去了海边，很开心。");
         assert_eq!(a.cover.as_ref().unwrap().as_str(), "https://ming.example/img/sea.jpg");
         assert_eq!(a.tags, ["生活", "旅行"]);
+        assert_eq!(a.comment_count, Some(6));
+        assert_eq!(
+            a.comments_url.as_ref().unwrap().as_str(),
+            "https://ming.example/posts/1/#comments"
+        );
         assert_eq!(a.published.unwrap().to_rfc3339(), "2026-11-02T02:00:00+00:00");
 
         let b = &f.items[1];

@@ -27,7 +27,7 @@ pub trait FullTextExtractor: Send + Sync {
 pub struct ArticleExtractor;
 
 /// Container selectors, most specific first (Butterfly, Hexo/NexT, WordPress, Hugo, ...).
-const SELECTORS: &[&str] = &[
+pub(crate) const SELECTORS: &[&str] = &[
     "[itemprop=articleBody]",
     "#article-container",
     ".post-content",

@@ -55,6 +55,9 @@ pub struct BlogRow {
     pub discovery_at: Option<i64>,
     pub failures: i64,
     pub content_hash: Option<String>,
+    pub profile_at: Option<i64>,
+    pub comment_system: Option<String>,
+    pub comments_next_at: i64,
 }
 
 impl BlogRow {
@@ -66,7 +69,8 @@ impl BlogRow {
 macro_rules! blog_columns {
     () => {
         "id, name, homepage_url, feed_url, feed_url_origin, content_policy, \
-         etag, last_modified, refresh_secs, discovery_at, failures, content_hash"
+         etag, last_modified, refresh_secs, discovery_at, failures, content_hash, \
+         profile_at, comment_system, comments_next_at"
     };
 }
 
@@ -189,12 +193,13 @@ pub async fn apply_policy(pool: &SqlitePool, cfg: &Config) -> sqlx::Result<()> {
     };
     let excluded = keys(cfg.policy.exclude.iter().collect());
     let full_text = keys(cfg.policy.full_text.iter().map(|g| &g.site).collect());
+    let embed = keys(cfg.policy.embed_comments.iter().map(|g| &g.site).collect());
     for g in &cfg.policy.full_text {
         tracing::info!(site = %g.site, note = %g.note, "full text allowed");
     }
 
     let mut tx = pool.begin().await?;
-    sqlx::query("UPDATE blogs SET excluded = 0, content_policy = 'summary'")
+    sqlx::query("UPDATE blogs SET excluded = 0, content_policy = 'summary', embed_comments = 0")
         .execute(&mut *tx)
         .await?;
     for k in &excluded {
@@ -205,6 +210,12 @@ pub async fn apply_policy(pool: &SqlitePool, cfg: &Config) -> sqlx::Result<()> {
     }
     for k in &full_text {
         sqlx::query("UPDATE blogs SET content_policy = 'full_text' WHERE site_key = ?")
+            .bind(k)
+            .execute(&mut *tx)
+            .await?;
+    }
+    for k in &embed {
+        sqlx::query("UPDATE blogs SET embed_comments = 1 WHERE site_key = ?")
             .bind(k)
             .execute(&mut *tx)
             .await?;
@@ -392,15 +403,18 @@ pub async fn upsert_post(
     let sort_at = published.unwrap_or(undated_sort_at).min(now);
     let first_seen: i64 = sqlx::query_scalar(
         "INSERT INTO posts (blog_id, guid, url, title, excerpt, cover_url, author, tags,
-                            published_at, first_seen_at, sort_at, content_html, content_source)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                            published_at, first_seen_at, sort_at, content_html, content_source,
+                            comments_url, comment_count)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
          ON CONFLICT(blog_id, guid) DO UPDATE SET
             url = excluded.url, title = excluded.title, excerpt = excluded.excerpt,
             cover_url = excluded.cover_url, author = excluded.author, tags = excluded.tags,
             published_at = excluded.published_at,
             sort_at = MIN(COALESCE(excluded.published_at, posts.sort_at), posts.first_seen_at),
             content_html = COALESCE(excluded.content_html, posts.content_html),
-            content_source = COALESCE(excluded.content_source, posts.content_source)
+            content_source = COALESCE(excluded.content_source, posts.content_source),
+            comments_url = COALESCE(excluded.comments_url, posts.comments_url),
+            comment_count = COALESCE(excluded.comment_count, posts.comment_count)
          RETURNING first_seen_at",
     )
     .bind(blog_id)
@@ -416,9 +430,85 @@ pub async fn upsert_post(
     .bind(sort_at)
     .bind(content.map(|c| c.0))
     .bind(content.map(|c| c.1))
+    .bind(item.comments_url.as_ref().map(|u| u.as_str()))
+    .bind(item.comment_count)
     .fetch_one(pool)
     .await?;
     Ok(first_seen == now)
+}
+
+pub struct Profile<'a> {
+    pub description: Option<&'a str>,
+    pub avatar_url: Option<&'a str>,
+    pub about_url: Option<&'a str>,
+    pub about_text: Option<&'a str>,
+    pub social_json: &'a str,
+    pub generator: Option<&'a str>,
+    /// `None` keeps a previously detected system (pages can change themes).
+    pub comment_system_json: Option<&'a str>,
+}
+
+pub async fn save_profile(pool: &SqlitePool, blog_id: i64, now: i64, p: &Profile<'_>) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE blogs SET description = ?1, avatar_url = ?2, about_url = ?3, about_text = ?4,
+                social_links = ?5, generator = ?6,
+                comment_system = COALESCE(?7, comment_system), profile_at = ?8
+         WHERE id = ?9",
+    )
+    .bind(p.description)
+    .bind(p.avatar_url)
+    .bind(p.about_url)
+    .bind(p.about_text)
+    .bind(p.social_json)
+    .bind(p.generator)
+    .bind(p.comment_system_json)
+    .bind(now)
+    .bind(blog_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Records a profile attempt that failed, so it is not retried before `profile_at` + interval.
+pub async fn touch_profile(pool: &SqlitePool, blog_id: i64, now: i64) -> sqlx::Result<()> {
+    sqlx::query("UPDATE blogs SET profile_at = ? WHERE id = ?")
+        .bind(now)
+        .bind(blog_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// The newest posts of a blog, for a batched comment-count request.
+pub async fn recent_post_urls(pool: &SqlitePool, blog_id: i64, limit: i64) -> sqlx::Result<Vec<(i64, String)>> {
+    sqlx::query_as("SELECT id, url FROM posts WHERE blog_id = ? ORDER BY sort_at DESC LIMIT ?")
+        .bind(blog_id)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+}
+
+pub async fn save_comment_counts(
+    pool: &SqlitePool,
+    blog_id: i64,
+    counts: &[(i64, i64)],
+    next_at: i64,
+) -> sqlx::Result<()> {
+    let mut tx = pool.begin().await?;
+    for (post_id, count) in counts {
+        sqlx::query("UPDATE posts SET comment_count = ? WHERE id = ? AND blog_id = ?")
+            .bind(count)
+            .bind(post_id)
+            .bind(blog_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    sqlx::query("UPDATE blogs SET comments_next_at = ? WHERE id = ?")
+        .bind(next_at)
+        .bind(blog_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await
 }
 
 /// Keeps only the newest `keep` posts of a blog, so storage stays bounded
@@ -522,6 +612,8 @@ mod tests {
                 tags: vec![],
                 published: chrono::DateTime::from_timestamp(1_000_000 + n * 60, 0),
                 body_html: None,
+                comments_url: None,
+                comment_count: None,
             };
             upsert_post(&pool, 1, &item, 2_000_000, 0, None).await.unwrap();
         }

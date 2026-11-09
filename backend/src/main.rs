@@ -1,5 +1,6 @@
 mod api;
 mod cache;
+mod comments;
 mod config;
 mod crawler;
 mod db;
@@ -9,6 +10,7 @@ mod feed;
 mod fulltext;
 mod html;
 mod http;
+mod profile;
 mod sources;
 mod util;
 

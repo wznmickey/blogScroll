@@ -29,6 +29,11 @@ max_refresh_secs = 86400    # 24h
 discovery_retry_secs = 604800  # 7 days
 directory_sync_secs = 86400
 tick_secs = 30
+# Blog profile: homepage + about page, re-read this often (2 requests per blog).
+profile_refresh_days = 30
+# Comment counts from the blog's comment service (Twikoo / Waline / Artalk / Halo):
+# one batched request per blog this often; 0 turns it off. A 401/403 pauses it for 30 days.
+comment_count_hours = 24
 max_items_per_feed = 20
 # Older posts beyond this many per blog are deleted (keeps the database bounded).
 max_posts_per_blog = 50
@@ -54,6 +59,13 @@ exclude = [
 # [[policy.full_text]]
 # site = "https://example.com"
 # note = "Permission by email, 2026-11-01"
+
+# Authors who allowed their own comment widget (Twikoo / Waline / Artalk /
+# Giscus / Utterances) to be shown under their posts here. They also need to
+# allow this site's domain in their comment service.
+# [[policy.embed_comments]]
+# site = "https://example.com"
+# note = "Permission by email, 2026-11-10"
 
 # Hand-set feed URLs (skips discovery for that blog).
 # [[policy.feed_overrides]]

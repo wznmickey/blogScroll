@@ -97,6 +97,11 @@ pub struct CrawlerConfig {
     pub directory_sync_secs: u64,
     /// How often the scheduler wakes up to look for due feeds.
     pub tick_secs: u64,
+    /// Re-read each blog's homepage and about page this often (days).
+    pub profile_refresh_days: u32,
+    /// Ask a blog's comment service for counts at most this often (hours).
+    /// One batched request per blog; 0 disables comment-service counts.
+    pub comment_count_hours: u32,
     /// Only the newest N entries of a feed are read on each fetch.
     pub max_items_per_feed: usize,
     /// Older posts beyond this many per blog are deleted, keeping the database bounded.
@@ -124,6 +129,8 @@ impl Default for CrawlerConfig {
             discovery_retry_secs: 7 * 86400,
             directory_sync_secs: 86400,
             tick_secs: 30,
+            profile_refresh_days: 30,
+            comment_count_hours: 24,
             max_items_per_feed: 20,
             max_posts_per_blog: 50,
             max_post_age_days: 365,
@@ -168,14 +175,17 @@ pub struct PolicyConfig {
     /// their sites are never requested.
     pub exclude: Vec<String>,
     /// Authors who explicitly allowed full-text fetching.
-    pub full_text: Vec<FullTextGrant>,
+    pub full_text: Vec<Grant>,
+    /// Authors who allowed their comment widget to be embedded in our post view
+    /// (they must also allow our domain in their comment service).
+    pub embed_comments: Vec<Grant>,
     /// Feed URLs set by hand (skips discovery).
     pub feed_overrides: Vec<FeedOverride>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FullTextGrant {
+pub struct Grant {
     pub site: String,
     /// Where/when the permission was given, for your own records.
     #[serde(default)]

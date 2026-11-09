@@ -50,7 +50,13 @@ function onLoad(e: Event) {
         <BlogAvatar :name="post.blog.name" :icon="post.blog.icon" :size="20" />
         <span class="name">{{ post.blog.name }}</span>
       </RouterLink>
-      <time class="time" :datetime="new Date(post.sort_at * 1000).toISOString()">{{ relativeTime(post.sort_at) }}</time>
+      <span v-if="post.comment_count" class="count" :title="`${post.comment_count} 条评论`">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z" stroke-linejoin="round" />
+        </svg>
+        {{ post.comment_count }}
+      </span>
+      <time v-else class="time" :datetime="new Date(post.sort_at * 1000).toISOString()">{{ relativeTime(post.sort_at) }}</time>
     </footer>
   </article>
 </template>
@@ -119,6 +125,13 @@ function onLoad(e: Event) {
 .time {
   flex: none;
   color: var(--text-3);
+}
+.count {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--text-2);
 }
 @media (max-width: 639px) {
   .title {

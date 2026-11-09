@@ -4,6 +4,7 @@ import { api, cachedPost } from '../api'
 import { fullDate, hostOf } from '../format'
 import type { PostCard, PostDetail } from '../types'
 import BlogAvatar from './BlogAvatar.vue'
+import CommentEmbed from './CommentEmbed.vue'
 import TextCover from './TextCover.vue'
 
 const props = defineProps<{ id: number }>()
@@ -15,6 +16,8 @@ const error = ref(false)
 const coverFailed = ref(false)
 const post = computed<PostCard | PostDetail | undefined>(() => detail.value ?? card.value)
 const hasCover = computed(() => !!post.value?.cover && !coverFailed.value)
+const comments = computed(() => detail.value?.comments ?? null)
+const commentsLink = computed(() => post.value?.comments_url ?? post.value?.url)
 
 onMounted(async () => {
   document.addEventListener('keydown', onKey)
@@ -96,6 +99,16 @@ function onKey(e: KeyboardEvent) {
               <template v-if="post.author && post.author !== post.blog.name"> · {{ post.author }}</template>
             </p>
             <p v-if="error" class="note">详情加载失败，可直接阅读原文。</p>
+
+            <section v-if="post.comment_count != null || comments" class="comments">
+              <header class="comments-head">
+                <span class="comments-title">评论</span>
+                <span v-if="post.comment_count != null" class="comments-count">{{ post.comment_count }}</span>
+                <span v-if="comments" class="comments-sys">{{ comments.system }}</span>
+                <a :href="commentsLink" target="_blank" rel="noopener" class="comments-go">去原文评论 ↗</a>
+              </header>
+              <CommentEmbed v-if="comments?.embed" :key="post.id" :config="comments.embed" />
+            </section>
           </div>
 
           <footer class="actions">
@@ -239,6 +252,36 @@ function onKey(e: KeyboardEvent) {
 .date {
   margin: 12px 0 0;
   color: var(--text-3);
+  font-size: 13px;
+}
+.comments {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.comments-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.comments-title {
+  font-weight: 600;
+}
+.comments-count {
+  margin-left: -4px;
+  color: var(--text-2);
+  font-weight: 600;
+}
+.comments-sys {
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-3);
+  font-size: 12px;
+}
+.comments-go {
+  margin-left: auto;
+  color: var(--link);
   font-size: 13px;
 }
 .actions {
