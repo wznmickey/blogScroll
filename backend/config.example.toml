@@ -1,0 +1,57 @@
+# Copy to config.toml and adjust. Every key is optional; defaults are shown.
+
+[server]
+listen = "127.0.0.1:8080"
+site_name = "博客漫游"
+# Built frontend; served at / when it exists.
+static_dir = "../frontend/dist"
+
+[database]
+path = "data/feed.db"
+
+[crawler]
+# Please identify yourself: site owners should be able to reach you.
+user_agent = "FeedWaterfall/0.1 (RSS reader; polite; +https://github.com/your-name/feed)"
+# Requests in flight at once, across all sites.
+max_concurrency = 4
+# Minimum seconds between two requests to the same host.
+per_host_interval_secs = 10
+request_timeout_secs = 20
+max_body_bytes = 4194304
+# Feed refresh interval adapts between min and max: feeds that rarely change
+# are polled less. A feed's <ttl> and HTTP Retry-After are respected.
+refresh_secs = 14400        # 4h
+min_refresh_secs = 7200     # 2h
+max_refresh_secs = 86400    # 24h
+# If no feed is found on a blog, wait this long before looking again.
+discovery_retry_secs = 604800  # 7 days
+directory_sync_secs = 86400
+tick_secs = 30
+max_items_per_feed = 20
+max_post_age_days = 365
+
+[sources.travellings]
+enabled = true
+api_url = "https://api.travellings.cn/all"
+fallback_url = "https://backup.api.travellings.cn/list.json"
+# RUN = all good, LOST = site up but webring badge missing.
+live_statuses = ["RUN", "LOST"]
+
+[policy]
+# Authors who asked to be left out. Their sites are never requested and
+# their stored posts are deleted on the next start / sync.
+exclude = [
+  # "https://example.com",
+]
+
+# Authors who explicitly allowed full-text fetching. Only these blogs ever have
+# article pages fetched or full content stored; everyone else gets an excerpt
+# and a link to the original.
+# [[policy.full_text]]
+# site = "https://example.com"
+# note = "Permission by email, 2026-11-01"
+
+# Hand-set feed URLs (skips discovery for that blog).
+# [[policy.feed_overrides]]
+# site = "https://example.com"
+# feed = "https://example.com/custom/rss.xml"
