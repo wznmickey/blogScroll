@@ -1,0 +1,10 @@
+# Used by .github/workflows/pages.yml (run from backend/). The database is
+# carried between runs in the Actions cache, so ETags, refresh intervals and
+# backoff survive exactly as on a long-running server.
+# Set the User-Agent with the FEED_USER_AGENT repository variable.
+
+[database]
+path = "data/feed.db"
+
+[crawler]
+user_agent = "FeedWaterfall/0.1 (RSS reader; low frequency; honours ETag, Cache-Control and Retry-After)"

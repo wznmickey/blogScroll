@@ -8,7 +8,7 @@ use futures::future::BoxFuture;
 use url::Url;
 
 use crate::config::Config;
-use crate::http::PoliteClient;
+use crate::http::{PoliteClient, Validators};
 
 pub mod travellings;
 
@@ -27,14 +27,32 @@ pub struct DirectoryEntry {
     pub alive: bool,
 }
 
+pub enum DirectoryFetch {
+    /// The list did not change since the validators we sent.
+    NotModified,
+    Fetched {
+        entries: Vec<DirectoryEntry>,
+        /// Stored and sent back next time for a conditional request.
+        validators: Validators,
+    },
+}
+
 pub trait Directory: Send + Sync {
     /// Short machine id, stored in the database (`travellings`).
     fn id(&self) -> &'static str;
     /// Human-readable name shown in the UI (`开往`).
     fn name(&self) -> &'static str;
     fn homepage(&self) -> &'static str;
+    /// Display names for this directory's tags, e.g. `("tech", "技术")`.
+    fn tag_labels(&self) -> &'static [(&'static str, &'static str)] {
+        &[]
+    }
     /// Fetches the complete member list. Called about once a day.
-    fn fetch<'a>(&'a self, http: &'a PoliteClient) -> BoxFuture<'a, anyhow::Result<Vec<DirectoryEntry>>>;
+    fn fetch<'a>(
+        &'a self,
+        http: &'a PoliteClient,
+        validators: Option<&'a Validators>,
+    ) -> BoxFuture<'a, anyhow::Result<DirectoryFetch>>;
 }
 
 pub fn enabled(cfg: &Config) -> Vec<Box<dyn Directory>> {

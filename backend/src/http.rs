@@ -4,6 +4,7 @@
 //! - a global cap on concurrent requests,
 //! - a minimum gap between two requests to the same host,
 //! - conditional GET (ETag / Last-Modified) so unchanged feeds cost a 304,
+//! - reporting the server's own freshness lifetime (Cache-Control / Expires),
 //! - a body size limit and timeouts,
 //! - an honest User-Agent.
 
@@ -20,7 +21,7 @@ use url::Url;
 
 use crate::config::CrawlerConfig;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Validators {
     pub etag: Option<String>,
     pub last_modified: Option<String>,
@@ -28,11 +29,15 @@ pub struct Validators {
 
 #[derive(Debug)]
 pub enum Fetched {
-    NotModified,
+    NotModified {
+        fresh_for: Option<Duration>,
+    },
     Ok {
         final_url: Url,
         validators: Validators,
         body: Bytes,
+        /// How long the server says the response stays fresh; we do not ask again sooner.
+        fresh_for: Option<Duration>,
     },
 }
 
@@ -124,7 +129,9 @@ impl PoliteClient {
         let mut resp = self.client.get(url.clone()).headers(headers).send().await?;
         let status = resp.status();
         if status == StatusCode::NOT_MODIFIED {
-            return Ok(Fetched::NotModified);
+            return Ok(Fetched::NotModified {
+                fresh_for: freshness(resp.headers()),
+            });
         }
         if !status.is_success() {
             let retry_after = resp
@@ -149,6 +156,7 @@ impl PoliteClient {
             last_modified: header_str(header::LAST_MODIFIED),
         };
         let final_url = resp.url().clone();
+        let fresh_for = freshness(resp.headers());
 
         let mut body = Vec::new();
         while let Some(chunk) = resp.chunk().await? {
@@ -161,8 +169,32 @@ impl PoliteClient {
             final_url,
             validators,
             body: body.into(),
+            fresh_for,
         })
     }
+}
+
+/// Freshness lifetime from `Cache-Control: max-age`, else `Expires`.
+/// `no-cache` / `no-store` mean "revalidate", so they give no lifetime.
+fn freshness(headers: &HeaderMap) -> Option<Duration> {
+    if let Some(cc) = headers.get(header::CACHE_CONTROL).and_then(|v| v.to_str().ok()) {
+        let mut max_age = None;
+        for directive in cc.split(',').map(|d| d.trim().to_ascii_lowercase()) {
+            if directive == "no-cache" || directive == "no-store" {
+                return None;
+            }
+            if let Some(v) = directive.strip_prefix("max-age=") {
+                max_age = v.trim_matches('"').parse::<u64>().ok();
+            }
+        }
+        if max_age.is_some() {
+            return max_age.map(Duration::from_secs);
+        }
+    }
+    let expires = headers.get(header::EXPIRES)?.to_str().ok()?;
+    let when = chrono::DateTime::parse_from_rfc2822(expires.trim()).ok()?;
+    let secs = when.timestamp() - chrono::Utc::now().timestamp();
+    (secs > 0).then(|| Duration::from_secs(secs as u64))
 }
 
 fn parse_retry_after(value: &str) -> Option<Duration> {
@@ -183,6 +215,27 @@ mod tests {
         assert_eq!(parse_retry_after("120"), Some(Duration::from_secs(120)));
         assert_eq!(parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT"), Some(Duration::ZERO));
         assert_eq!(parse_retry_after("soon"), None);
+    }
+
+    #[test]
+    fn freshness_from_headers() {
+        let h = |pairs: &[(header::HeaderName, &str)]| {
+            let mut m = HeaderMap::new();
+            for (k, v) in pairs {
+                m.insert(k.clone(), HeaderValue::from_str(v).unwrap());
+            }
+            freshness(&m)
+        };
+        assert_eq!(
+            h(&[(header::CACHE_CONTROL, "public, max-age=600")]),
+            Some(Duration::from_secs(600))
+        );
+        assert_eq!(h(&[(header::CACHE_CONTROL, "max-age=600, no-cache")]), None);
+        assert_eq!(h(&[(header::EXPIRES, "Wed, 21 Oct 2015 07:28:00 GMT")]), None);
+        let later = (chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc2822();
+        let fresh = h(&[(header::EXPIRES, &later)]).unwrap();
+        assert!(fresh > Duration::from_secs(7000) && fresh <= Duration::from_secs(7200));
+        assert_eq!(h(&[]), None);
     }
 
     #[tokio::test(start_paused = true)]

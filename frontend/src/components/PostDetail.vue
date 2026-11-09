@@ -89,7 +89,7 @@ function onKey(e: KeyboardEvent) {
               </p>
             </template>
             <p v-if="post.tags.length" class="tags">
-              <span v-for="t in post.tags" :key="t">#{{ t }}</span>
+              <RouterLink v-for="t in post.tags" :key="t" :to="{ path: '/', query: { category: t } }">#{{ t }}</RouterLink>
             </p>
             <p class="date">
               {{ fullDate(post.published_at ?? post.sort_at) }}

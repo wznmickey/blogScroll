@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { loadMeta } from './api'
+import { loadMeta, loadTags } from './api'
 import AppHeader from './components/AppHeader.vue'
 import PostDetail from './components/PostDetail.vue'
 
 const route = useRoute()
 const router = useRouter()
 loadMeta()
+loadTags()
 
 const openPost = computed(() => {
   const p = Number(route.query.p)
@@ -30,7 +31,7 @@ function closePost() {
   <AppHeader />
   <main>
     <RouterView v-slot="{ Component }">
-      <KeepAlive include="HomeView">
+      <KeepAlive :include="['HomeView', 'BlogsView']">
         <component :is="Component" />
       </KeepAlive>
     </RouterView>

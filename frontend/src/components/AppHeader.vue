@@ -1,12 +1,16 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { meta } from '../api'
+import { meta, tagsInfo } from '../api'
 
 const route = useRoute()
 const router = useRouter()
 const text = ref('')
+const focused = ref(false)
 const siteName = computed(() => meta.value?.site_name ?? '博客漫游')
+const logo = `${import.meta.env.BASE_URL}favicon.svg`
+const hot = computed(() => tagsInfo.value?.categories.slice(0, 24) ?? [])
+const showHot = computed(() => focused.value && !text.value.trim() && hot.value.length > 0)
 
 watch(
   () => route.query.q,
@@ -14,10 +18,19 @@ watch(
   { immediate: true },
 )
 
+function blur() {
+  ;(document.activeElement as HTMLElement | null)?.blur()
+}
+
 function submit() {
   const q = text.value.trim()
   router.push(q ? { path: '/', query: { q } } : { path: '/' })
-  ;(document.activeElement as HTMLElement | null)?.blur()
+  blur()
+}
+
+function pick(category: string) {
+  router.push({ path: '/', query: { category } })
+  blur()
 }
 </script>
 
@@ -25,21 +38,40 @@ function submit() {
   <header class="topbar">
     <div class="container inner">
       <RouterLink to="/" class="logo">
-        <img src="/favicon.svg" alt="" width="28" height="28" />
+        <img :src="logo" alt="" width="28" height="28" />
         <span>{{ siteName }}</span>
       </RouterLink>
       <form class="search" role="search" @submit.prevent="submit">
         <label class="visually-hidden" for="search-input">搜索</label>
-        <input id="search-input" v-model="text" type="search" placeholder="搜索文章或博客" enterkeyhint="search" />
+        <input
+          id="search-input"
+          v-model="text"
+          type="search"
+          placeholder="搜索文章或博客"
+          enterkeyhint="search"
+          autocomplete="off"
+          @focus="focused = true"
+          @blur="focused = false"
+          @keydown.esc="blur"
+        />
         <button type="submit" aria-label="搜索">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="11" cy="11" r="7" />
             <path d="m20 20-3.5-3.5" stroke-linecap="round" />
           </svg>
         </button>
+        <!-- mousedown.prevent keeps focus in the input until the click lands. -->
+        <div v-if="showHot" class="hot" @mousedown.prevent>
+          <p>热门标签</p>
+          <div class="hot-list">
+            <button v-for="c in hot" :key="c.name" type="button" @click="pick(c.name)">#{{ c.name }}</button>
+          </div>
+        </div>
       </form>
       <nav class="nav">
-        <RouterLink to="/about">关于</RouterLink>
+        <RouterLink to="/" class="desktop-only" exact-active-class="active">发现</RouterLink>
+        <RouterLink to="/blogs" active-class="active">博客</RouterLink>
+        <RouterLink to="/about" active-class="active">关于</RouterLink>
       </nav>
     </div>
   </header>
@@ -108,13 +140,49 @@ function submit() {
   color: var(--text-2);
 }
 .nav {
+  display: flex;
   flex: none;
+  gap: 20px;
   font-size: 14px;
   color: var(--text-2);
 }
 .nav a:hover,
-.nav a.router-link-active {
+.nav a.active {
   color: var(--text);
+}
+.nav a.active {
+  font-weight: 600;
+}
+.hot {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  padding: 12px 14px 14px;
+  border-radius: 16px;
+  background: var(--bg);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.16);
+  border: 1px solid var(--line);
+}
+.hot p {
+  margin: 0 0 8px;
+  color: var(--text-3);
+  font-size: 12px;
+}
+.hot-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+}
+.hot-list button {
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 13px;
+}
+.hot-list button:hover {
+  color: var(--link);
 }
 @media (max-width: 639px) {
   .inner {
@@ -127,6 +195,12 @@ function submit() {
   .search input {
     height: 34px;
     font-size: 13px;
+  }
+  .nav {
+    gap: 12px;
+  }
+  .desktop-only {
+    display: none;
   }
 }
 </style>

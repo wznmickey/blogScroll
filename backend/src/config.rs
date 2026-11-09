@@ -17,10 +17,24 @@ impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         if !path.exists() {
             tracing::warn!(path = %path.display(), "config file not found, using defaults");
-            return Ok(Self::default());
+            let mut cfg = Self::default();
+            cfg.apply_env();
+            return Ok(cfg);
         }
         let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+        let mut cfg: Config = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        cfg.apply_env();
+        Ok(cfg)
+    }
+
+    /// `FEED_USER_AGENT` overrides the configured User-Agent, so CI and
+    /// containers can set it without editing files.
+    fn apply_env(&mut self) {
+        if let Ok(ua) = std::env::var("FEED_USER_AGENT")
+            && !ua.trim().is_empty()
+        {
+            self.crawler.user_agent = ua.trim().to_string();
+        }
     }
 }
 
@@ -31,6 +45,8 @@ pub struct ServerConfig {
     pub site_name: String,
     /// Built frontend (`frontend/dist`). Served at `/` when present.
     pub static_dir: Option<PathBuf>,
+    /// API responses kept in memory (each lives 1–10 minutes).
+    pub api_cache_entries: usize,
 }
 
 impl Default for ServerConfig {
@@ -39,6 +55,7 @@ impl Default for ServerConfig {
             listen: "127.0.0.1:8080".into(),
             site_name: "博客漫游".into(),
             static_dir: Some("../frontend/dist".into()),
+            api_cache_entries: 512,
         }
     }
 }
@@ -80,8 +97,10 @@ pub struct CrawlerConfig {
     pub directory_sync_secs: u64,
     /// How often the scheduler wakes up to look for due feeds.
     pub tick_secs: u64,
-    /// Only the newest N entries of a feed are stored.
+    /// Only the newest N entries of a feed are read on each fetch.
     pub max_items_per_feed: usize,
+    /// Older posts beyond this many per blog are deleted, keeping the database bounded.
+    pub max_posts_per_blog: usize,
     /// Entries older than this are ignored (0 = keep everything).
     pub max_post_age_days: u32,
 }
@@ -106,6 +125,7 @@ impl Default for CrawlerConfig {
             directory_sync_secs: 86400,
             tick_secs: 30,
             max_items_per_feed: 20,
+            max_posts_per_blog: 50,
             max_post_age_days: 365,
         }
     }

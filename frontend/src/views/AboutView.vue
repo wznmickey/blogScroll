@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { meta } from '../api'
+import { isStatic, meta } from '../api'
 import { fullDate } from '../format'
 </script>
 
@@ -21,13 +21,14 @@ import { fullDate } from '../format'
         目前收录 {{ meta.stats.blogs }} 个博客，其中 {{ meta.stats.blogs_with_feed }} 个已成功读取 RSS，共
         {{ meta.stats.posts }} 篇文章。
         <template v-if="meta.stats.last_directory_sync">成员列表更新于 {{ fullDate(meta.stats.last_directory_sync) }}。</template>
+        <template v-if="isStatic">本页是定时生成的静态版本，数据生成于 {{ fullDate(meta.generated_at) }}。</template>
       </p>
 
       <h2>我们如何抓取</h2>
       <ul>
         <li>只读取各博客公开的 RSS / Atom 订阅源，不抓取文章页面。</li>
         <li>默认只保存标题、约 200 字摘要和头图链接；图片直接从原站加载，本站不存储。</li>
-        <li>每个订阅源通常几小时才请求一次，长期不更新的会逐渐降低频率，并使用条件请求（ETag / Last-Modified）节省流量。</li>
+        <li>每个订阅源通常几小时才请求一次，长期不更新的会逐渐降低频率；使用条件请求（ETag / Last-Modified），并遵守你在 Cache-Control、Expires 和 RSS ttl 里声明的缓存时间。</li>
         <li>同一网站的两次请求之间至少间隔数秒；遇到错误、429 或 Retry-After 会自动退避。</li>
       </ul>
 

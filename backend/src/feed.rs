@@ -9,6 +9,9 @@ use crate::html;
 use crate::util::truncate_chars;
 
 pub const EXCERPT_CHARS: usize = 240;
+/// Bump when parsing changes, so stored posts are re-parsed once even if
+/// their feed did not change (it is part of the crawler's content hash).
+pub const PARSER_VERSION: u32 = 3;
 
 #[derive(Debug)]
 pub struct ParsedFeed {
@@ -79,7 +82,8 @@ fn convert_entry(entry: &Entry, feed_url: &Url) -> Option<ParsedItem> {
         .filter(|s| !s.trim().is_empty());
 
     let excerpt_source = summary.as_deref().or(content.as_deref()).unwrap_or_default();
-    let excerpt = truncate_chars(&html::to_text(excerpt_source), EXCERPT_CHARS);
+    // Some feeds put raw Markdown in <description>; bold markers read as noise.
+    let excerpt = truncate_chars(&html::to_text(excerpt_source).replace("**", ""), EXCERPT_CHARS);
 
     let title = entry
         .title
@@ -87,7 +91,8 @@ fn convert_entry(entry: &Entry, feed_url: &Url) -> Option<ParsedItem> {
         .map(|t| html::to_text(&t.content))
         .filter(|t| !t.is_empty())
         .unwrap_or_else(|| truncate_chars(&excerpt, 40));
-    if title.is_empty() {
+    // Unrendered templates (`{{ post.title }}`) from misconfigured generators.
+    if title.is_empty() || (title.contains("{{") && title.contains("}}")) {
         return None;
     }
 
@@ -163,7 +168,7 @@ mod tests {
     <pubDate>Mon, 02 Nov 2026 10:00:00 +0800</pubDate>
     <category>生活</category>
     <category>旅行</category>
-    <description><![CDATA[<p>今天去了<b>海边</b>。</p><img src="/img/sea.jpg" alt="">]]></description>
+    <description><![CDATA[<p>今天去了<b>海边</b>，**很开心**。</p><img src="/img/sea.jpg" alt="">]]></description>
   </item>
   <item>
     <title>带缩略图</title>
@@ -180,6 +185,10 @@ mod tests {
   <item>
     <description>没有标题也没有链接的条目会被跳过</description>
   </item>
+  <item>
+    <title>{{ post.title | xml_escape }}</title>
+    <link>https://ming.example/{{ post.url }}</link>
+  </item>
 </channel>
 </rss>"#;
 
@@ -194,7 +203,7 @@ mod tests {
         assert_eq!(a.guid, "post-1");
         assert_eq!(a.title, "第一篇 & 测试");
         assert_eq!(a.url.as_str(), "https://ming.example/posts/1/");
-        assert_eq!(a.excerpt, "今天去了海边。");
+        assert_eq!(a.excerpt, "今天去了海边，很开心。");
         assert_eq!(a.cover.as_ref().unwrap().as_str(), "https://ming.example/img/sea.jpg");
         assert_eq!(a.tags, ["生活", "旅行"]);
         assert_eq!(a.published.unwrap().to_rfc3339(), "2026-11-02T02:00:00+00:00");

@@ -67,7 +67,7 @@ impl FullTextExtractor for ArticleExtractor {
                 Fetched::Ok { body, final_url, .. } => {
                     Ok(Self::extract_from_html(&String::from_utf8_lossy(&body), &final_url))
                 }
-                Fetched::NotModified => Ok(None),
+                Fetched::NotModified { .. } => Ok(None),
             }
         }
         .boxed()

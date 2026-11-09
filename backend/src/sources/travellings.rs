@@ -9,9 +9,9 @@ use futures::future::BoxFuture;
 use serde::Deserialize;
 use url::Url;
 
-use super::{Directory, DirectoryEntry};
+use super::{Directory, DirectoryEntry, DirectoryFetch};
 use crate::config::TravellingsConfig;
-use crate::http::{ACCEPT_JSON, Fetched, PoliteClient};
+use crate::http::{ACCEPT_JSON, Fetched, PoliteClient, Validators};
 use crate::util::parse_http_url;
 
 pub struct Travellings {
@@ -44,13 +44,20 @@ impl Travellings {
         Self { cfg }
     }
 
-    async fn fetch_list(&self, http: &PoliteClient, url: &str) -> anyhow::Result<Vec<DirectoryEntry>> {
+    async fn fetch_list(
+        &self,
+        http: &PoliteClient,
+        url: &str,
+        validators: Option<&Validators>,
+    ) -> anyhow::Result<DirectoryFetch> {
         let url = Url::parse(url)?;
-        let body = match http.get(&url, ACCEPT_JSON, None).await? {
-            Fetched::Ok { body, .. } => body,
-            Fetched::NotModified => anyhow::bail!("unexpected 304"),
-        };
-        self.parse(&body)
+        match http.get(&url, ACCEPT_JSON, validators).await? {
+            Fetched::Ok { body, validators, .. } => Ok(DirectoryFetch::Fetched {
+                entries: self.parse(&body)?,
+                validators,
+            }),
+            Fetched::NotModified { .. } => Ok(DirectoryFetch::NotModified),
+        }
     }
 
     fn parse(&self, body: &[u8]) -> anyhow::Result<Vec<DirectoryEntry>> {
@@ -102,16 +109,33 @@ impl Directory for Travellings {
         "https://www.travellings.cn"
     }
 
-    fn fetch<'a>(&'a self, http: &'a PoliteClient) -> BoxFuture<'a, anyhow::Result<Vec<DirectoryEntry>>> {
+    fn tag_labels(&self) -> &'static [(&'static str, &'static str)] {
+        &[
+            ("blog", "博客"),
+            ("tech", "技术"),
+            ("life", "生活"),
+            ("hybrid", "综合"),
+            ("site", "网站"),
+            ("forum", "论坛"),
+            ("normal", "其他"),
+        ]
+    }
+
+    fn fetch<'a>(
+        &'a self,
+        http: &'a PoliteClient,
+        validators: Option<&'a Validators>,
+    ) -> BoxFuture<'a, anyhow::Result<DirectoryFetch>> {
         async move {
-            match self.fetch_list(http, &self.cfg.api_url).await {
+            match self.fetch_list(http, &self.cfg.api_url, validators).await {
                 Ok(list) => Ok(list),
                 Err(e) => {
                     let Some(fallback) = &self.cfg.fallback_url else {
                         return Err(e);
                     };
                     tracing::warn!(error = %e, "travellings API failed, trying mirror");
-                    self.fetch_list(http, fallback).await
+                    // The mirror has its own validators; fetch it in full.
+                    self.fetch_list(http, fallback, None).await
                 }
             }
         }

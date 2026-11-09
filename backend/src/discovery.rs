@@ -6,6 +6,7 @@
 //! found is not retried for `discovery_retry_secs` (a week by default).
 
 use std::collections::HashSet;
+use std::time::Duration;
 
 use bytes::Bytes;
 use url::Url;
@@ -23,6 +24,7 @@ pub struct Discovered {
     pub feed_url: Url,
     pub validators: Validators,
     pub body: Bytes,
+    pub fresh_for: Option<Duration>,
 }
 
 /// `Ok(None)` means the site answered but has no feed we could find.
@@ -30,7 +32,7 @@ pub struct Discovered {
 pub async fn discover(http: &PoliteClient, homepage: &Url) -> Result<Option<Discovered>, FetchError> {
     let (page_url, body) = match http.get(homepage, ACCEPT_HTML, None).await? {
         Fetched::Ok { final_url, body, .. } => (final_url, body),
-        Fetched::NotModified => (homepage.clone(), Bytes::new()),
+        Fetched::NotModified { .. } => (homepage.clone(), Bytes::new()),
     };
 
     let advertised = html::feed_links(&String::from_utf8_lossy(&body), &page_url);
@@ -60,15 +62,21 @@ enum Probe {
 
 async fn try_feed(http: &PoliteClient, url: Url) -> Probe {
     match http.get(&url, ACCEPT_FEED, None).await {
-        Ok(Fetched::Ok { body, validators, .. }) => match feed::parse(&body, &url) {
+        Ok(Fetched::Ok {
+            body,
+            validators,
+            fresh_for,
+            ..
+        }) => match feed::parse(&body, &url) {
             Ok(_) => Probe::Found(Discovered {
                 feed_url: url,
                 validators,
                 body,
+                fresh_for,
             }),
             Err(_) => Probe::NotAFeed,
         },
-        Ok(Fetched::NotModified) => Probe::NotAFeed,
+        Ok(Fetched::NotModified { .. }) => Probe::NotAFeed,
         Err(e) => {
             tracing::debug!(%url, error = %e, "feed candidate rejected");
             // Only "nothing here" answers justify guessing the next path;

@@ -1,3 +1,4 @@
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,7 +14,7 @@ use crate::feed;
 use crate::fulltext::FullTextExtractor;
 use crate::html;
 use crate::http::{ACCEPT_FEED, FetchError, Fetched, PoliteClient, Validators};
-use crate::sources::Directory;
+use crate::sources::{Directory, DirectoryFetch};
 use crate::util::{jitter, now};
 
 const LAST_SYNC_KEY: &str = "last_directory_sync";
@@ -48,6 +49,17 @@ pub struct CrawlStats {
     pub not_modified: usize,
     pub no_feed: usize,
     pub failed: usize,
+}
+
+impl CrawlStats {
+    fn add(&mut self, o: &CrawlStats) {
+        self.checked += o.checked;
+        self.updated += o.updated;
+        self.new_posts += o.new_posts;
+        self.not_modified += o.not_modified;
+        self.no_feed += o.no_feed;
+        self.failed += o.failed;
+    }
 }
 
 impl Crawler {
@@ -86,7 +98,7 @@ impl Crawler {
         }
     }
 
-    async fn sync_directories_if_due(&self) -> anyhow::Result<()> {
+    pub async fn sync_directories_if_due(&self) -> anyhow::Result<()> {
         let last: i64 = db::kv_get(&self.pool, LAST_SYNC_KEY)
             .await?
             .and_then(|v| v.parse().ok())
@@ -100,11 +112,20 @@ impl Crawler {
     pub async fn sync_directories(&self) -> anyhow::Result<()> {
         let mut any_ok = false;
         for dir in &self.directories {
-            match dir.fetch(&self.http).await {
-                Ok(entries) => {
+            let key = format!("directory_validators:{}", dir.id());
+            let validators: Option<Validators> = db::kv_get(&self.pool, &key)
+                .await?
+                .and_then(|v| serde_json::from_str(&v).ok());
+            match dir.fetch(&self.http, validators.as_ref()).await {
+                Ok(DirectoryFetch::NotModified) => {
+                    tracing::info!(directory = dir.id(), "directory unchanged");
+                    any_ok = true;
+                }
+                Ok(DirectoryFetch::Fetched { entries, validators }) => {
                     let alive = entries.iter().filter(|e| e.alive).count();
                     let saved =
                         db::save_directory(&self.pool, dir.id(), &entries, self.c().refresh_secs as i64, now()).await?;
+                    db::kv_set(&self.pool, &key, &serde_json::to_string(&validators)?).await?;
                     tracing::info!(directory = dir.id(), saved, alive, "directory synced");
                     any_ok = true;
                 }
@@ -120,14 +141,30 @@ impl Crawler {
 
     /// Crawls every blog that is due, at most `limit`. Actual request concurrency
     /// is capped inside `PoliteClient`; more tasks than permits just lets one
-    /// blog wait for its per-host slot while others proceed.
+    /// blog wait for its per-host slot (discovery probes are 10 s apart) while
+    /// others proceed. It never raises the load on any single site.
     pub async fn crawl_due(&self, limit: i64) -> anyhow::Result<CrawlStats> {
         let due = db::due_blogs(&self.pool, now(), limit).await?;
         Ok(self.crawl_blogs(due).await)
     }
 
+    /// Crawls in rounds of `round` blogs until nothing is due or `deadline`
+    /// passes (checked between rounds). For scheduled runs with a time limit.
+    pub async fn crawl_until_done(&self, round: i64, deadline: std::time::Instant) -> anyhow::Result<CrawlStats> {
+        let mut total = CrawlStats::default();
+        while std::time::Instant::now() < deadline {
+            let s = self.crawl_due(round.max(1)).await?;
+            if s.checked == 0 {
+                break;
+            }
+            tracing::info!(?s, "crawl round finished");
+            total.add(&s);
+        }
+        Ok(total)
+    }
+
     pub async fn crawl_blogs(&self, blogs: Vec<BlogRow>) -> CrawlStats {
-        let tasks = self.c().max_concurrency.max(1) * 4;
+        let tasks = self.c().max_concurrency.max(1) * 16;
         let outcomes: Vec<Outcome> = futures::stream::iter(blogs)
             .map(|b| self.crawl_blog(b))
             .buffer_unordered(tasks)
@@ -187,6 +224,7 @@ impl Crawler {
                             final_url: found.feed_url.clone(),
                             validators: found.validators,
                             body: found.body,
+                            fresh_for: found.fresh_for,
                         };
                         (found.feed_url, Some(fetched))
                     }
@@ -219,25 +257,43 @@ impl Crawler {
         };
 
         match fetched {
-            Fetched::NotModified => {
-                let refresh = self.slower(blog.refresh_secs);
-                db::record_success(
-                    &self.pool,
-                    blog.id,
-                    t,
-                    Success {
-                        validators: None,
-                        refresh_secs: refresh,
-                        next_check_at: t + jitter(refresh, 10, blog.id),
-                        had_new_posts: false,
-                        icon_url: None,
-                    },
-                )
-                .await?;
-                Ok(Outcome::NotModified)
-            }
-            Fetched::Ok { body, validators, .. } => self.ingest(blog, &feed_url, &body, &validators).await,
+            Fetched::NotModified { fresh_for } => self.unchanged(blog, None, fresh_for).await,
+            Fetched::Ok {
+                body,
+                validators,
+                fresh_for,
+                ..
+            } => self.ingest(blog, &feed_url, &body, &validators, fresh_for).await,
         }
+    }
+
+    /// The feed is the same as last time (a 304, or identical bytes).
+    async fn unchanged(
+        &self,
+        blog: &BlogRow,
+        validators: Option<&Validators>,
+        fresh_for: Option<Duration>,
+    ) -> anyhow::Result<Outcome> {
+        if blog.full_text_allowed() {
+            self.fetch_full_text(blog).await?;
+        }
+        let t = now();
+        let refresh = self.respect_hints(self.slower(blog.refresh_secs), None, fresh_for);
+        db::record_success(
+            &self.pool,
+            blog.id,
+            t,
+            Success {
+                validators,
+                refresh_secs: refresh,
+                next_check_at: t + jitter(refresh, 10, blog.id),
+                had_new_posts: false,
+                icon_url: None,
+                content_hash: None,
+            },
+        )
+        .await?;
+        Ok(Outcome::NotModified)
     }
 
     async fn ingest(
@@ -246,7 +302,14 @@ impl Crawler {
         feed_url: &Url,
         body: &[u8],
         validators: &Validators,
+        fresh_for: Option<Duration>,
     ) -> anyhow::Result<Outcome> {
+        let hash = content_hash(body);
+        if blog.content_hash.as_deref() == Some(hash.as_str()) {
+            // The server ignores conditional requests but nothing changed.
+            return self.unchanged(blog, Some(validators), fresh_for).await;
+        }
+
         let t = now();
         let parsed = match feed::parse(body, feed_url) {
             Ok(p) => p,
@@ -275,18 +338,19 @@ impl Crawler {
                 new += 1;
             }
         }
+        if new > 0 {
+            db::prune_posts(&self.pool, blog.id, self.c().max_posts_per_blog as i64).await?;
+        }
         if full_text {
             self.fetch_full_text(blog).await?;
         }
 
-        let mut refresh = if new > 0 {
+        let refresh = if new > 0 {
             self.c().refresh_secs as i64
         } else {
             self.slower(blog.refresh_secs)
         };
-        if let Some(ttl) = parsed.ttl_minutes {
-            refresh = refresh.max(ttl as i64 * 60).min(self.c().max_refresh_secs as i64);
-        }
+        let refresh = self.respect_hints(refresh, parsed.ttl_minutes, fresh_for);
         let icon = parsed.icon.as_ref().map(|u| u.to_string());
         db::record_success(
             &self.pool,
@@ -298,6 +362,7 @@ impl Crawler {
                 next_check_at: t + jitter(refresh, 10, blog.id),
                 had_new_posts: new > 0,
                 icon_url: icon.as_deref(),
+                content_hash: Some(&hash),
             },
         )
         .await?;
@@ -345,10 +410,33 @@ impl Crawler {
         jitter(exp.max(retry_after.unwrap_or(0)), 10, blog.id)
     }
 
+    /// The publisher's own hints (RSS `<ttl>`, HTTP `Cache-Control` / `Expires`)
+    /// are a lower bound on the interval: never ask before they say it may change.
+    fn respect_hints(&self, refresh: i64, ttl_minutes: Option<u32>, fresh_for: Option<Duration>) -> i64 {
+        let hint = [
+            ttl_minutes.map(|m| m as i64 * 60),
+            fresh_for.map(|d| d.as_secs() as i64),
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(0);
+        refresh.max(hint).min(self.c().max_refresh_secs as i64)
+    }
+
     /// A feed that did not change gets polled less often next time.
     fn slower(&self, current: i64) -> i64 {
         (current * 3 / 2).clamp(self.c().min_refresh_secs as i64, self.c().max_refresh_secs as i64)
     }
+}
+
+/// Change detector for feed bodies. `DefaultHasher` is stable within a build;
+/// after a toolchain upgrade each feed is simply parsed once more.
+fn content_hash(body: &[u8]) -> String {
+    let mut h = DefaultHasher::new();
+    feed::PARSER_VERSION.hash(&mut h);
+    body.hash(&mut h);
+    format!("{:016x}", h.finish())
 }
 
 fn feed_full_text(item: &feed::ParsedItem) -> Option<String> {

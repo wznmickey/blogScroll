@@ -54,6 +54,7 @@ pub struct BlogRow {
     pub refresh_secs: i64,
     pub discovery_at: Option<i64>,
     pub failures: i64,
+    pub content_hash: Option<String>,
 }
 
 impl BlogRow {
@@ -65,7 +66,7 @@ impl BlogRow {
 macro_rules! blog_columns {
     () => {
         "id, name, homepage_url, feed_url, feed_url_origin, content_policy, \
-         etag, last_modified, refresh_secs, discovery_at, failures"
+         etag, last_modified, refresh_secs, discovery_at, failures, content_hash"
     };
 }
 
@@ -140,6 +141,20 @@ pub async fn save_directory(
         .bind(now)
         .execute(&mut *tx)
         .await?;
+
+        sqlx::query("DELETE FROM blog_tags WHERE blog_id = ? AND directory = ?")
+            .bind(blog_id)
+            .bind(directory)
+            .execute(&mut *tx)
+            .await?;
+        for tag in &e.tags {
+            sqlx::query("INSERT OR IGNORE INTO blog_tags (blog_id, directory, tag) VALUES (?, ?, ?)")
+                .bind(blog_id)
+                .bind(directory)
+                .bind(tag)
+                .execute(&mut *tx)
+                .await?;
+        }
         saved += 1;
     }
 
@@ -305,6 +320,8 @@ pub struct Success<'a> {
     pub next_check_at: i64,
     pub had_new_posts: bool,
     pub icon_url: Option<&'a str>,
+    /// `None` keeps the stored hash.
+    pub content_hash: Option<&'a str>,
 }
 
 pub async fn record_success(pool: &SqlitePool, id: i64, now: i64, s: Success<'_>) -> sqlx::Result<()> {
@@ -316,8 +333,9 @@ pub async fn record_success(pool: &SqlitePool, id: i64, now: i64, s: Success<'_>
             last_checked_at = ?6, last_success_at = ?6,
             last_new_post_at = CASE WHEN ?7 THEN ?6 ELSE last_new_post_at END,
             icon_url = COALESCE(?8, icon_url),
+            content_hash = COALESCE(?9, content_hash),
             failures = 0, last_error = NULL, updated_at = ?6
-         WHERE id = ?9",
+         WHERE id = ?10",
     )
     .bind(s.validators.is_some())
     .bind(s.validators.and_then(|v| v.etag.as_deref()))
@@ -327,6 +345,7 @@ pub async fn record_success(pool: &SqlitePool, id: i64, now: i64, s: Success<'_>
     .bind(now)
     .bind(s.had_new_posts)
     .bind(s.icon_url)
+    .bind(s.content_hash)
     .bind(id)
     .execute(pool)
     .await?;
@@ -402,6 +421,20 @@ pub async fn upsert_post(
     Ok(first_seen == now)
 }
 
+/// Keeps only the newest `keep` posts of a blog, so storage stays bounded
+/// no matter how long a blog has been followed.
+pub async fn prune_posts(pool: &SqlitePool, blog_id: i64, keep: i64) -> sqlx::Result<u64> {
+    let res = sqlx::query(
+        "DELETE FROM posts WHERE blog_id = ?1 AND id NOT IN (
+            SELECT id FROM posts WHERE blog_id = ?1 ORDER BY sort_at DESC, id DESC LIMIT ?2)",
+    )
+    .bind(blog_id)
+    .bind(keep)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
 /// Posts of a full-text blog that still have no stored body.
 pub async fn posts_missing_content(pool: &SqlitePool, blog_id: i64, limit: i64) -> sqlx::Result<Vec<(i64, String)>> {
     sqlx::query_as(
@@ -423,4 +456,80 @@ pub async fn set_post_content(pool: &SqlitePool, post_id: i64, content: Option<&
         .execute(pool)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use url::Url;
+
+    fn entry(id: &str, tags: &[&str]) -> DirectoryEntry {
+        DirectoryEntry {
+            external_id: id.into(),
+            name: format!("Blog {id}"),
+            homepage: Url::parse(&format!("https://{id}.example/")).unwrap(),
+            feed_url: None,
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            status: "RUN".into(),
+            alive: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn resync_replaces_tags_and_deactivates_missing_blogs() {
+        let pool = connect_memory().await;
+        save_directory(
+            &pool,
+            "d",
+            &[entry("a", &["tech", "blog"]), entry("b", &["life"])],
+            3600,
+            100,
+        )
+        .await
+        .unwrap();
+        save_directory(&pool, "d", &[entry("a", &["life"])], 3600, 200)
+            .await
+            .unwrap();
+
+        let tags: Vec<(String, String)> =
+            sqlx::query_as("SELECT b.site_key, t.tag FROM blog_tags t JOIN blogs b ON b.id = t.blog_id ORDER BY 1, 2")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            tags,
+            [("a.example".into(), "life".into()), ("b.example".into(), "life".into())]
+        );
+        let active: Vec<(String, bool)> = sqlx::query_as("SELECT site_key, active FROM blogs ORDER BY 1")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(active, [("a.example".into(), true), ("b.example".into(), false)]);
+    }
+
+    #[tokio::test]
+    async fn prune_keeps_newest_posts() {
+        let pool = connect_memory().await;
+        save_directory(&pool, "d", &[entry("a", &[])], 3600, 100).await.unwrap();
+        for n in 0..10 {
+            let item = crate::feed::ParsedItem {
+                guid: n.to_string(),
+                url: Url::parse(&format!("https://a.example/{n}")).unwrap(),
+                title: format!("p{n}"),
+                excerpt: String::new(),
+                cover: None,
+                author: None,
+                tags: vec![],
+                published: chrono::DateTime::from_timestamp(1_000_000 + n * 60, 0),
+                body_html: None,
+            };
+            upsert_post(&pool, 1, &item, 2_000_000, 0, None).await.unwrap();
+        }
+        assert_eq!(prune_posts(&pool, 1, 4).await.unwrap(), 6);
+        let left: Vec<String> = sqlx::query_scalar("SELECT guid FROM posts ORDER BY sort_at DESC")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, ["9", "8", "7", "6"]);
+    }
 }

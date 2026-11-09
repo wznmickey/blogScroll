@@ -5,6 +5,8 @@ export interface BlogRef {
   name: string
   homepage: string
   icon: string | null
+  /** Directory tags of the blog (tech, life, ...). */
+  tags?: string[]
 }
 
 export interface PostCard {
@@ -47,9 +49,18 @@ export interface Meta {
     posts: number
     last_directory_sync: number | null
   }
+  /** When the server (or the static export) produced this. */
+  generated_at: number
 }
 
-export interface BlogDetail {
+/** A directory tag on a blog, e.g. 开往 `tech` → 技术. */
+export interface TagRef {
+  directory: string
+  tag: string
+  label: string
+}
+
+export interface BlogSummary {
   id: number
   name: string
   homepage: string
@@ -57,8 +68,27 @@ export interface BlogDetail {
   post_count: number
   last_post_at: number | null
   has_feed: boolean
-  full_text: boolean
-  directories: { directory: string; name: string; tags: string[] }[]
+  tags: TagRef[]
 }
+
+export interface BlogDetail extends BlogSummary {
+  full_text: boolean
+  directories: { directory: string; name: string }[]
+}
+
+export interface TagCount {
+  tag: string
+  label: string
+  blogs: number
+  posts: number
+}
+
+export interface TagsInfo {
+  directories: { id: string; name: string; tags: TagCount[] }[]
+  /** Popular categories from the posts' own feeds, recent months. */
+  categories: { name: string; blogs: number; posts: number }[]
+}
+
+export type BlogSort = 'recent' | 'posts' | 'name'
 
 export type FeedMode = 'discover' | 'latest'

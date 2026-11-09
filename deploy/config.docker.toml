@@ -1,0 +1,13 @@
+# Built into the Docker image as /app/config.toml. Every key not set here
+# uses the defaults shown in backend/config.example.toml.
+
+[server]
+listen = "0.0.0.0:8080"
+static_dir = "/app/web"
+
+[database]
+path = "/data/feed.db"
+
+[crawler]
+# Better: set FEED_USER_AGENT with a way to contact you.
+user_agent = "FeedWaterfall/0.1 (RSS reader; low frequency; honours ETag, Cache-Control and Retry-After)"

@@ -5,6 +5,8 @@ listen = "127.0.0.1:8080"
 site_name = "博客漫游"
 # Built frontend; served at / when it exists.
 static_dir = "../frontend/dist"
+# API responses kept in memory (each lives 1–10 minutes; ETag + Cache-Control are sent).
+api_cache_entries = 512
 
 [database]
 path = "data/feed.db"
@@ -28,6 +30,8 @@ discovery_retry_secs = 604800  # 7 days
 directory_sync_secs = 86400
 tick_secs = 30
 max_items_per_feed = 20
+# Older posts beyond this many per blog are deleted (keeps the database bounded).
+max_posts_per_blog = 50
 max_post_age_days = 365
 
 [sources.travellings]

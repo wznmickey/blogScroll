@@ -1,8 +1,10 @@
 mod api;
+mod cache;
 mod config;
 mod crawler;
 mod db;
 mod discovery;
+mod export;
 mod feed;
 mod fulltext;
 mod html;
@@ -15,20 +17,23 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use axum::Router;
+use axum::middleware::{from_fn, from_fn_with_state};
 use clap::{Parser, Subcommand};
+use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
 use crate::api::{AppState, DirectoryInfo};
+use crate::cache::ResponseCache;
 use crate::config::Config;
 use crate::crawler::Crawler;
 
 #[derive(Parser)]
 #[command(about = "RSS waterfall for blog webrings")]
 struct Cli {
-    #[arg(short, long, default_value = "config.toml")]
+    #[arg(short, long, env = "FEED_CONFIG", default_value = "config.toml")]
     config: PathBuf,
     #[command(subcommand)]
     command: Option<Command>,
@@ -46,12 +51,32 @@ enum Command {
     Sync,
     /// Crawl due feeds once.
     Crawl {
-        /// Maximum number of blogs to crawl.
+        /// Maximum number of blogs to crawl (per round with --all).
         #[arg(long, default_value_t = 50)]
         limit: i64,
         /// Crawl just this blog id, due or not.
         #[arg(long)]
         blog: Option<i64>,
+        /// Sync the directories first if a day has passed (for scheduled runs).
+        #[arg(long)]
+        sync: bool,
+        /// Keep going until nothing is due, or until --max-minutes.
+        #[arg(long)]
+        all: bool,
+        /// Time budget for --all; the round in progress is finished, then it stops.
+        #[arg(long, default_value_t = 90)]
+        max_minutes: u64,
+    },
+    /// Write the site's data as static JSON (for GitHub Pages and similar).
+    Export {
+        /// Output directory, e.g. ../frontend/dist/data
+        #[arg(long)]
+        out: PathBuf,
+        /// Newest posts included in the feed.
+        #[arg(long, default_value_t = 3000)]
+        feed_posts: usize,
+        #[arg(long, default_value_t = 500)]
+        shard_size: usize,
     },
 }
 
@@ -73,6 +98,7 @@ async fn main() -> anyhow::Result<()> {
             id: d.id(),
             name: d.name(),
             homepage: d.homepage(),
+            tag_labels: d.tag_labels(),
         })
         .collect();
     let crawler = Arc::new(Crawler::new(
@@ -84,29 +110,63 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command.unwrap_or(Command::Serve { no_crawl: false }) {
         Command::Sync => crawler.sync_directories().await?,
-        Command::Crawl { limit, blog } => {
+        Command::Crawl {
+            limit,
+            blog,
+            sync,
+            all,
+            max_minutes,
+        } => {
+            if sync {
+                crawler.sync_directories_if_due().await?;
+            }
             let stats = match blog {
                 Some(id) => {
                     let blog = db::blog_by_id(&pool, id).await?.context("no such blog")?;
                     crawler.crawl_blogs(vec![blog]).await
                 }
+                None if all => {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(max_minutes * 60);
+                    crawler.crawl_until_done(limit, deadline).await?
+                }
                 None => crawler.crawl_due(limit).await?,
             };
             println!("{stats:#?}");
+        }
+        Command::Export {
+            out,
+            feed_posts,
+            shard_size,
+        } => {
+            let state = AppState {
+                pool: pool.clone(),
+                site_name: cfg.server.site_name.clone(),
+                directories: Arc::new(dir_info),
+            };
+            let opts = export::ExportOptions { feed_posts, shard_size };
+            let s = export::export(api::router(state), &out, &opts).await?;
+            println!(
+                "exported {} posts in {} shards and {} blogs to {}",
+                s.feed_posts,
+                s.feed_shards,
+                s.blogs,
+                out.display()
+            );
         }
         Command::Serve { no_crawl } => {
             if !no_crawl {
                 tokio::spawn(crawler.clone().run());
             }
             let state = AppState {
-                pool,
+                pool: pool.clone(),
                 site_name: cfg.server.site_name.clone(),
                 directories: Arc::new(dir_info),
             };
-            let mut app: Router = api::router(state);
+            let cache = Arc::new(ResponseCache::new(cfg.server.api_cache_entries));
+            let mut app: Router = api::router(state).route_layer(from_fn_with_state(cache, cache::api_cache));
             if let Some(dir) = cfg.server.static_dir.as_ref().filter(|d| d.join("index.html").exists()) {
                 let spa = ServeDir::new(dir).fallback(ServeFile::new(dir.join("index.html")));
-                app = app.fallback_service(spa);
+                app = app.fallback_service(ServiceBuilder::new().layer(from_fn(cache::static_headers)).service(spa));
             } else {
                 tracing::warn!("frontend not built; serving the API only");
             }
@@ -121,5 +181,8 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
         }
     }
+    // Closing cleanly checkpoints the WAL, leaving a single self-contained file
+    // (matters when the database is carried between CI runs).
+    pool.close().await;
     Ok(())
 }

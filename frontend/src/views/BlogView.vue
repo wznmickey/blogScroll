@@ -38,9 +38,14 @@ const load = (cursor: string | null) => api.posts({ mode: 'latest', blog: id.val
         <h1>{{ blog.name }}</h1>
         <a :href="blog.homepage" target="_blank" rel="noopener" class="home">{{ hostOf(blog.homepage) }} ↗</a>
         <p class="chips">
-          <span v-for="d in blog.directories" :key="d.directory" class="chip">
-            {{ d.name }}<template v-for="t in d.tags" :key="t"> · {{ t }}</template>
-          </span>
+          <span v-for="d in blog.directories" :key="d.directory" class="chip source">收录于{{ d.name }}</span>
+          <RouterLink
+            v-for="t in blog.tags"
+            :key="t.directory + t.tag"
+            :to="{ path: '/', query: { tag: t.tag } }"
+            class="chip link"
+            >{{ t.label }}</RouterLink
+          >
           <span v-if="blog.full_text" class="chip">作者已授权全文</span>
         </p>
         <p class="stats">
@@ -92,6 +97,13 @@ h1 {
   background: var(--surface);
   color: var(--text-2);
   font-size: 12px;
+}
+.chip.link:hover {
+  color: var(--text);
+}
+.chip.source {
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 .stats {
   display: flex;

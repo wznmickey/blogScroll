@@ -15,16 +15,36 @@ pub struct AppState {
     pub directories: Arc<Vec<DirectoryInfo>>,
 }
 
+impl AppState {
+    fn directory_name(&self, id: &str) -> String {
+        self.directories
+            .iter()
+            .find(|d| d.id == id)
+            .map_or_else(|| id.to_string(), |d| d.name.to_string())
+    }
+
+    fn tag_label(&self, directory: &str, tag: &str) -> String {
+        self.directories
+            .iter()
+            .find(|d| d.id == directory)
+            .and_then(|d| d.tag_labels.iter().find(|(t, _)| *t == tag))
+            .map_or_else(|| tag.to_string(), |(_, label)| label.to_string())
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DirectoryInfo {
     pub id: &'static str,
     pub name: &'static str,
     pub homepage: &'static str,
+    #[serde(skip)]
+    pub tag_labels: &'static [(&'static str, &'static str)],
 }
 
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/meta", get(meta))
+        .route("/api/tags", get(tags))
         .route("/api/posts", get(list_posts))
         .route("/api/posts/{id}", get(get_post))
         .route("/api/blogs", get(list_blogs))
@@ -53,6 +73,42 @@ fn not_found() -> ApiError {
 
 type ApiResult<T> = Result<Json<T>, ApiError>;
 
+fn non_empty(s: &Option<String>) -> Option<&str> {
+    s.as_deref().map(str::trim).filter(|s| !s.is_empty())
+}
+
+fn truthy(s: &Option<String>) -> bool {
+    matches!(non_empty(s), Some("1" | "true" | "yes"))
+}
+
+fn like_pattern(s: &str) -> String {
+    let escaped: String = s
+        .chars()
+        .flat_map(|c| match c {
+            '%' | '_' | '\\' => vec!['\\', c],
+            _ => vec![c],
+        })
+        .collect();
+    format!("%{escaped}%")
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TagRef {
+    directory: String,
+    tag: String,
+    #[serde(default)]
+    label: String,
+}
+
+/// Parses `json_group_array(json_object('directory', .., 'tag', ..))` and fills in labels.
+fn tag_refs(st: &AppState, json: &str) -> Vec<TagRef> {
+    let mut tags: Vec<TagRef> = serde_json::from_str(json).unwrap_or_default();
+    for t in &mut tags {
+        t.label = st.tag_label(&t.directory, &t.tag);
+    }
+    tags
+}
+
 // ---------- meta ----------
 
 #[derive(Serialize)]
@@ -60,6 +116,8 @@ struct Meta {
     site_name: String,
     directories: Vec<DirectoryInfo>,
     stats: Stats,
+    /// When this answer was produced; tells static exports' readers how fresh they are.
+    generated_at: i64,
 }
 
 #[derive(Serialize, FromRow)]
@@ -84,6 +142,89 @@ async fn meta(State(st): State<AppState>) -> ApiResult<Meta> {
         site_name: st.site_name.clone(),
         directories: st.directories.to_vec(),
         stats,
+        generated_at: crate::util::now(),
+    }))
+}
+
+// ---------- tags ----------
+
+#[derive(Serialize)]
+struct TagsResponse {
+    /// Directory tags (开往: 技术 / 生活 / ...), used as channels.
+    directories: Vec<DirectoryTags>,
+    /// Popular categories from the posts themselves (RSS `<category>`), last 180 days.
+    categories: Vec<CategoryCount>,
+}
+
+#[derive(Serialize)]
+struct DirectoryTags {
+    id: &'static str,
+    name: &'static str,
+    tags: Vec<TagCount>,
+}
+
+#[derive(Serialize)]
+struct TagCount {
+    tag: String,
+    label: String,
+    blogs: i64,
+    posts: i64,
+}
+
+#[derive(Serialize, FromRow)]
+struct CategoryCount {
+    name: String,
+    blogs: i64,
+    posts: i64,
+}
+
+async fn tags(State(st): State<AppState>) -> ApiResult<TagsResponse> {
+    let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT bt.directory, bt.tag, COUNT(DISTINCT b.id) AS blogs, COUNT(p.id) AS posts
+         FROM blog_tags bt
+         JOIN blogs b ON b.id = bt.blog_id
+         LEFT JOIN posts p ON p.blog_id = b.id
+         WHERE b.active = 1 AND b.excluded = 0
+         GROUP BY bt.directory, bt.tag
+         ORDER BY blogs DESC, bt.tag",
+    )
+    .fetch_all(&st.pool)
+    .await?;
+    let directories = st
+        .directories
+        .iter()
+        .map(|d| DirectoryTags {
+            id: d.id,
+            name: d.name,
+            tags: rows
+                .iter()
+                .filter(|(dir, ..)| dir == d.id)
+                .map(|(dir, tag, blogs, posts)| TagCount {
+                    label: st.tag_label(dir, tag),
+                    tag: tag.clone(),
+                    blogs: *blogs,
+                    posts: *posts,
+                })
+                .collect(),
+        })
+        .collect();
+
+    let since = crate::util::now() - 180 * 86400;
+    let categories: Vec<CategoryCount> = sqlx::query_as(
+        "SELECT MIN(j.value) AS name, COUNT(DISTINCT p.blog_id) AS blogs, COUNT(*) AS posts
+         FROM posts p JOIN blogs b ON b.id = p.blog_id, json_each(p.tags) j
+         WHERE b.active = 1 AND b.excluded = 0 AND p.sort_at >= ?
+         GROUP BY lower(j.value)
+         HAVING blogs >= 2
+         ORDER BY blogs DESC, posts DESC, name
+         LIMIT 40",
+    )
+    .bind(since)
+    .fetch_all(&st.pool)
+    .await?;
+    Ok(Json(TagsResponse {
+        directories,
+        categories,
     }))
 }
 
@@ -107,6 +248,18 @@ pub struct PostQuery {
     blog: Option<i64>,
     #[serde(default)]
     q: Option<String>,
+    /// Directory tag of the blog, e.g. `tech`.
+    #[serde(default)]
+    tag: Option<String>,
+    /// Only blogs listed in this directory, e.g. `travellings`.
+    #[serde(default)]
+    directory: Option<String>,
+    /// The post's own category from its feed, e.g. `旅行`.
+    #[serde(default)]
+    category: Option<String>,
+    /// `1`: only posts with a cover image.
+    #[serde(default)]
+    cover: Option<String>,
 }
 
 #[derive(Debug, FromRow)]
@@ -125,6 +278,7 @@ struct PostRow {
     blog_name: String,
     blog_homepage: String,
     blog_icon: Option<String>,
+    blog_tags: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -133,6 +287,8 @@ pub struct BlogRef {
     name: String,
     homepage: String,
     icon: Option<String>,
+    /// Directory tags of the blog (e.g. `tech`), so clients can filter cards.
+    tags: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -168,6 +324,7 @@ impl From<PostRow> for PostCard {
                 name: r.blog_name,
                 homepage: r.blog_homepage,
                 icon: r.blog_icon,
+                tags: serde_json::from_str(&r.blog_tags).unwrap_or_default(),
             },
         }
     }
@@ -183,34 +340,56 @@ macro_rules! post_columns {
     () => {
         "p.id, p.title, p.url, p.excerpt, p.cover_url, p.author, p.tags, p.published_at, p.sort_at,
      (p.content_html IS NOT NULL) AS has_full_text,
-     b.id AS blog_id, b.name AS blog_name, b.homepage_url AS blog_homepage, b.icon_url AS blog_icon"
+     b.id AS blog_id, b.name AS blog_name, b.homepage_url AS blog_homepage, b.icon_url AS blog_icon,
+     (SELECT json_group_array(DISTINCT bt.tag) FROM blog_tags bt WHERE bt.blog_id = b.id) AS blog_tags"
     };
+}
+
+/// Blog-level filters shared by both feed modes. Arguments are the SQL
+/// parameter numbers for (tag, directory, cover-only).
+macro_rules! blog_filters {
+    ($tag:literal, $dir:literal, $cover:literal) => {
+        concat!(
+            " AND (",
+            $tag,
+            " IS NULL OR EXISTS (SELECT 1 FROM blog_tags bt WHERE bt.blog_id = b.id AND bt.tag = ",
+            $tag,
+            "))",
+            " AND (",
+            $dir,
+            " IS NULL OR EXISTS (SELECT 1 FROM directory_entries de
+                   WHERE de.blog_id = b.id AND de.active = 1 AND de.directory = ",
+            $dir,
+            "))",
+            " AND (",
+            $cover,
+            " = 0 OR p.cover_url IS NOT NULL)"
+        )
+    };
+}
+
+struct Filters<'a> {
+    tag: Option<&'a str>,
+    directory: Option<&'a str>,
+    category: Option<&'a str>,
+    cover: bool,
 }
 
 async fn list_posts(State(st): State<AppState>, Query(q): Query<PostQuery>) -> ApiResult<Page<PostCard>> {
     let limit = q.limit.unwrap_or(30).clamp(1, 100);
-    let search =
-        q.q.as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(like_pattern);
-    let discover = q.mode.as_deref() != Some("latest") && q.blog.is_none() && search.is_none();
+    let search = non_empty(&q.q).map(like_pattern);
+    let f = Filters {
+        tag: non_empty(&q.tag),
+        directory: non_empty(&q.directory),
+        category: non_empty(&q.category),
+        cover: truthy(&q.cover),
+    };
+    let discover = q.mode.as_deref() != Some("latest") && q.blog.is_none() && search.is_none() && f.category.is_none();
     if discover {
-        discover_posts(&st.pool, limit, q.cursor.as_deref(), q.seed.unwrap_or(0)).await
+        discover_posts(&st.pool, limit, q.cursor.as_deref(), q.seed.unwrap_or(0), &f).await
     } else {
-        latest_posts(&st.pool, limit, q.cursor.as_deref(), q.blog, search.as_deref()).await
+        latest_posts(&st.pool, limit, q.cursor.as_deref(), q.blog, search.as_deref(), &f).await
     }
-}
-
-fn like_pattern(s: &str) -> String {
-    let escaped: String = s
-        .chars()
-        .flat_map(|c| match c {
-            '%' | '_' | '\\' => vec!['\\', c],
-            _ => vec![c],
-        })
-        .collect();
-    format!("%{escaped}%")
 }
 
 async fn latest_posts(
@@ -219,19 +398,25 @@ async fn latest_posts(
     cursor: Option<&str>,
     blog: Option<i64>,
     search: Option<&str>,
+    f: &Filters<'_>,
 ) -> ApiResult<Page<PostCard>> {
     let (c_sort, c_id) = cursor
         .and_then(|c| c.split_once('.'))
         .and_then(|(a, b)| Some((a.parse::<i64>().ok()?, b.parse::<i64>().ok()?)))
         .map_or((None, None), |(a, b)| (Some(a), Some(b)));
     let rows: Vec<PostRow> = sqlx::query_as(concat!(
-        "SELECT ", post_columns!(), "
+        "SELECT ",
+        post_columns!(),
+        "
          FROM posts p JOIN blogs b ON b.id = p.blog_id
          WHERE b.excluded = 0
            AND (?1 IS NOT NULL OR b.active = 1)
            AND (?1 IS NULL OR p.blog_id = ?1)
            AND (?2 IS NULL OR (p.sort_at, p.id) < (?2, ?3))
            AND (?4 IS NULL OR p.title LIKE ?4 ESCAPE '\\' OR p.excerpt LIKE ?4 ESCAPE '\\' OR b.name LIKE ?4 ESCAPE '\\')
+           AND (?9 IS NULL OR EXISTS (SELECT 1 FROM json_each(p.tags) j WHERE lower(j.value) = lower(?9)))",
+        blog_filters!("?6", "?7", "?8"),
+        "
          ORDER BY p.sort_at DESC, p.id DESC
          LIMIT ?5"
     ))
@@ -240,6 +425,10 @@ async fn latest_posts(
     .bind(c_id)
     .bind(search)
     .bind(limit)
+    .bind(f.tag)
+    .bind(f.directory)
+    .bind(f.cover)
+    .bind(f.category)
     .fetch_all(pool)
     .await?;
     let next_cursor = (rows.len() as i64 == limit)
@@ -254,14 +443,22 @@ async fn latest_posts(
 /// Score = age in days, plus up to two weeks of seeded noise, minus five days
 /// for each newer post of the same blog. Keeps the feed fresh, mixed, and
 /// stops one prolific blog from filling a screen.
-async fn discover_posts(pool: &SqlitePool, limit: i64, cursor: Option<&str>, seed: i64) -> ApiResult<Page<PostCard>> {
+async fn discover_posts(
+    pool: &SqlitePool,
+    limit: i64,
+    cursor: Option<&str>,
+    seed: i64,
+    f: &Filters<'_>,
+) -> ApiResult<Page<PostCard>> {
     let offset: i64 = cursor.and_then(|c| c.parse().ok()).unwrap_or(0).max(0);
     let seed = seed.rem_euclid(1 << 31);
     let rows: Vec<PostRow> = sqlx::query_as(concat!(
         "WITH ranked AS (
             SELECT p.id AS post_id, ROW_NUMBER() OVER (PARTITION BY p.blog_id ORDER BY p.sort_at DESC) AS rn
             FROM posts p JOIN blogs b ON b.id = p.blog_id
-            WHERE b.active = 1 AND b.excluded = 0
+            WHERE b.active = 1 AND b.excluded = 0",
+        blog_filters!("?4", "?5", "?6"),
+        "
          )
          SELECT ",
         post_columns!(),
@@ -277,6 +474,9 @@ async fn discover_posts(pool: &SqlitePool, limit: i64, cursor: Option<&str>, see
     .bind(seed)
     .bind(limit)
     .bind(offset)
+    .bind(f.tag)
+    .bind(f.directory)
+    .bind(f.cover)
     .fetch_all(pool)
     .await?;
     let next_cursor = (rows.len() as i64 == limit).then(|| (offset + limit).to_string());
@@ -328,9 +528,26 @@ pub struct BlogQuery {
     offset: Option<i64>,
     #[serde(default)]
     q: Option<String>,
+    #[serde(default)]
+    tag: Option<String>,
+    /// `recent` (default) | `posts` | `name`
+    #[serde(default)]
+    sort: Option<String>,
 }
 
-#[derive(Debug, Serialize, FromRow)]
+#[derive(Debug, FromRow)]
+struct BlogSummaryRow {
+    id: i64,
+    name: String,
+    homepage: String,
+    icon: Option<String>,
+    post_count: i64,
+    last_post_at: Option<i64>,
+    has_feed: bool,
+    tags: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct BlogSummary {
     id: i64,
     name: String,
@@ -339,43 +556,62 @@ pub struct BlogSummary {
     post_count: i64,
     last_post_at: Option<i64>,
     has_feed: bool,
+    tags: Vec<TagRef>,
+}
+
+impl BlogSummary {
+    fn from_row(st: &AppState, r: BlogSummaryRow) -> Self {
+        BlogSummary {
+            tags: tag_refs(st, &r.tags),
+            id: r.id,
+            name: r.name,
+            homepage: r.homepage,
+            icon: r.icon,
+            post_count: r.post_count,
+            last_post_at: r.last_post_at,
+            has_feed: r.has_feed,
+        }
+    }
 }
 
 macro_rules! blog_summary_sql {
     () => {
         "SELECT b.id, b.name, b.homepage_url AS homepage, b.icon_url AS icon,
-        COUNT(p.id) AS post_count, MAX(p.sort_at) AS last_post_at,
-        (b.last_success_at IS NOT NULL) AS has_feed
-     FROM blogs b LEFT JOIN posts p ON p.blog_id = b.id"
+            (SELECT COUNT(*) FROM posts p WHERE p.blog_id = b.id) AS post_count,
+            (SELECT MAX(p.sort_at) FROM posts p WHERE p.blog_id = b.id) AS last_post_at,
+            (b.last_success_at IS NOT NULL) AS has_feed,
+            (SELECT json_group_array(json_object('directory', bt.directory, 'tag', bt.tag))
+             FROM blog_tags bt WHERE bt.blog_id = b.id) AS tags
+         FROM blogs b"
     };
 }
 
 async fn list_blogs(State(st): State<AppState>, Query(q): Query<BlogQuery>) -> ApiResult<Page<BlogSummary>> {
-    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let limit = q.limit.unwrap_or(48).clamp(1, 200);
     let offset = q.offset.unwrap_or(0).max(0);
-    let search =
-        q.q.as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(like_pattern);
-    let rows: Vec<BlogSummary> = sqlx::query_as(concat!(
-        "",
+    let search = non_empty(&q.q).map(like_pattern);
+    let rows: Vec<BlogSummaryRow> = sqlx::query_as(concat!(
         blog_summary_sql!(),
         "
          WHERE b.active = 1 AND b.excluded = 0
            AND (?1 IS NULL OR b.name LIKE ?1 ESCAPE '\\' OR b.homepage_url LIKE ?1 ESCAPE '\\')
-         GROUP BY b.id
-         ORDER BY last_post_at IS NULL, last_post_at DESC, b.id
+           AND (?4 IS NULL OR EXISTS (SELECT 1 FROM blog_tags bt WHERE bt.blog_id = b.id AND bt.tag = ?4))
+         ORDER BY
+           CASE WHEN ?5 = 'name' THEN b.name END COLLATE NOCASE,
+           CASE WHEN ?5 = 'posts' THEN post_count END DESC,
+           last_post_at IS NULL, last_post_at DESC, b.id
          LIMIT ?2 OFFSET ?3"
     ))
     .bind(search)
     .bind(limit)
     .bind(offset)
+    .bind(non_empty(&q.tag))
+    .bind(non_empty(&q.sort).unwrap_or("recent"))
     .fetch_all(&st.pool)
     .await?;
     let next_cursor = (rows.len() as i64 == limit).then(|| (offset + limit).to_string());
     Ok(Json(Page {
-        items: rows,
+        items: rows.into_iter().map(|r| BlogSummary::from_row(&st, r)).collect(),
         next_cursor,
     }))
 }
@@ -392,37 +628,29 @@ pub struct BlogDetail {
 pub struct BlogDirectory {
     directory: String,
     name: String,
-    tags: Vec<String>,
 }
 
 async fn get_blog(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<BlogDetail> {
-    let summary: Option<BlogSummary> = sqlx::query_as(concat!(
-        blog_summary_sql!(),
-        " WHERE b.id = ? AND b.excluded = 0 GROUP BY b.id"
-    ))
-    .bind(id)
-    .fetch_optional(&st.pool)
-    .await?;
-    let summary = summary.ok_or_else(not_found)?;
+    let row: Option<BlogSummaryRow> =
+        sqlx::query_as(concat!(blog_summary_sql!(), " WHERE b.id = ? AND b.excluded = 0"))
+            .bind(id)
+            .fetch_optional(&st.pool)
+            .await?;
+    let summary = BlogSummary::from_row(&st, row.ok_or_else(not_found)?);
     let full_text: bool = sqlx::query_scalar("SELECT content_policy = 'full_text' FROM blogs WHERE id = ?")
         .bind(id)
         .fetch_one(&st.pool)
         .await?;
-    let dirs: Vec<(String, String)> =
-        sqlx::query_as("SELECT directory, tags FROM directory_entries WHERE blog_id = ? AND active = 1")
+    let dirs: Vec<String> =
+        sqlx::query_scalar("SELECT directory FROM directory_entries WHERE blog_id = ? AND active = 1")
             .bind(id)
             .fetch_all(&st.pool)
             .await?;
     let directories = dirs
         .into_iter()
-        .map(|(directory, tags)| BlogDirectory {
-            name: st
-                .directories
-                .iter()
-                .find(|d| d.id == directory)
-                .map_or_else(|| directory.clone(), |d| d.name.to_string()),
+        .map(|directory| BlogDirectory {
+            name: st.directory_name(&directory),
             directory,
-            tags: serde_json::from_str(&tags).unwrap_or_default(),
         })
         .collect();
     Ok(Json(BlogDetail {
@@ -433,7 +661,7 @@ async fn get_blog(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::feed::ParsedItem;
     use crate::sources::DirectoryEntry;
@@ -442,15 +670,24 @@ mod tests {
     use tower::ServiceExt;
     use url::Url;
 
-    async fn seeded() -> AppState {
+    /// Blogs 1–3; blog 3 is not alive. Tags: 1 = blog+tech, 2 = life, 3 = tech.
+    /// Five posts each; even posts have a cover and the category 旅行.
+    pub(crate) async fn seeded() -> AppState {
         let pool = crate::db::connect_memory().await;
+        let tags = |i: i64| -> Vec<String> {
+            match i {
+                1 => vec!["blog".into(), "tech".into()],
+                2 => vec!["life".into()],
+                _ => vec!["tech".into()],
+            }
+        };
         let entries: Vec<DirectoryEntry> = (1..=3)
             .map(|i| DirectoryEntry {
                 external_id: i.to_string(),
                 name: format!("Blog {i}"),
                 homepage: Url::parse(&format!("https://b{i}.example/")).unwrap(),
                 feed_url: None,
-                tags: vec!["blog".into()],
+                tags: tags(i),
                 status: "RUN".into(),
                 alive: i != 3,
             })
@@ -458,6 +695,7 @@ mod tests {
         crate::db::save_directory(&pool, "travellings", &entries, 3600, 1000)
             .await
             .unwrap();
+        let now = crate::util::now();
         for blog in 1..=3 {
             for n in 0..5 {
                 let item = ParsedItem {
@@ -467,13 +705,15 @@ mod tests {
                     excerpt: "摘要".into(),
                     cover: (n % 2 == 0).then(|| Url::parse("https://img.example/a.jpg").unwrap()),
                     author: None,
-                    tags: vec!["t".into()],
-                    published: chrono::DateTime::from_timestamp(1_700_000_000 + (blog * 10 + n) * 3600, 0),
+                    tags: if n % 2 == 0 {
+                        vec!["旅行".into()]
+                    } else {
+                        vec!["随笔".into()]
+                    },
+                    published: chrono::DateTime::from_timestamp(now - 86400 * 10 + (blog * 10 + n) * 3600, 0),
                     body_html: Some("<p>secret full text</p>".into()),
                 };
-                crate::db::upsert_post(&pool, blog, &item, 1_800_000_000, 0, None)
-                    .await
-                    .unwrap();
+                crate::db::upsert_post(&pool, blog, &item, now, 0, None).await.unwrap();
             }
         }
         AppState {
@@ -483,6 +723,7 @@ mod tests {
                 id: "travellings",
                 name: "开往",
                 homepage: "x",
+                tag_labels: &[("tech", "技术"), ("life", "生活")],
             }]),
         }
     }
@@ -495,6 +736,15 @@ mod tests {
         let status = resp.status();
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    fn ids(v: &serde_json::Value, key: &str) -> Vec<i64> {
+        v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|it| it.pointer(key).unwrap().as_i64().unwrap())
+            .collect()
     }
 
     #[tokio::test]
@@ -528,12 +778,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filters_by_directory_tag_in_both_modes() {
+        let st = seeded().await;
+        for mode in ["latest", "discover"] {
+            let (_, v) = get_json(&st, &format!("/api/posts?mode={mode}&tag=tech&limit=100")).await;
+            let blogs = ids(&v, "/blog/id");
+            assert_eq!(blogs.len(), 5, "{mode}: only blog 1 is alive and tagged tech");
+            assert!(blogs.iter().all(|b| *b == 1));
+        }
+        let (_, v) = get_json(&st, "/api/posts?tag=life&directory=travellings&limit=100").await;
+        assert!(ids(&v, "/blog/id").iter().all(|b| *b == 2));
+        let (_, v) = get_json(&st, "/api/posts?directory=elsewhere&limit=100").await;
+        assert!(v["items"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn filters_cover_and_category() {
+        let st = seeded().await;
+        let (_, v) = get_json(&st, "/api/posts?cover=1&limit=100").await;
+        let items = v["items"].as_array().unwrap();
+        assert_eq!(items.len(), 6);
+        assert!(items.iter().all(|it| it["cover"].is_string()));
+
+        let (_, v) = get_json(&st, "/api/posts?category=%E9%9A%8F%E7%AC%94&limit=100").await;
+        let items = v["items"].as_array().unwrap();
+        assert_eq!(items.len(), 4);
+        assert!(items.iter().all(|it| it["tags"][0] == "随笔"));
+    }
+
+    #[tokio::test]
     async fn search_escapes_like_wildcards() {
         let st = seeded().await;
         let (_, v) = get_json(&st, "/api/posts?q=100%25&limit=100").await;
         assert_eq!(v["items"].as_array().unwrap().len(), 10);
         let (_, v) = get_json(&st, "/api/posts?q=_&limit=100").await;
         assert_eq!(v["items"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn tags_endpoint_counts_live_blogs() {
+        let st = seeded().await;
+        let (_, v) = get_json(&st, "/api/tags").await;
+        let tags = v["directories"][0]["tags"].as_array().unwrap();
+        let tech = tags.iter().find(|t| t["tag"] == "tech").unwrap();
+        assert_eq!(tech["label"], "技术");
+        assert_eq!(tech["blogs"], 1);
+        assert_eq!(tech["posts"], 5);
+        let blog = tags.iter().find(|t| t["tag"] == "blog").unwrap();
+        assert_eq!(blog["label"], "blog", "unlabelled tags fall back to the raw tag");
+        let cats: Vec<&str> = v["categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(cats.len(), 2);
+        assert!(cats.contains(&"旅行") && cats.contains(&"随笔"));
     }
 
     #[tokio::test]
@@ -548,13 +848,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blog_detail_lists_directories() {
+    async fn blogs_list_filters_and_labels_tags() {
         let st = seeded().await;
         let (_, v) = get_json(&st, "/api/blogs/1").await;
         assert_eq!(v["name"], "Blog 1");
         assert_eq!(v["post_count"], 5);
         assert_eq!(v["directories"][0]["name"], "开往");
+        let labels: Vec<&str> = v["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["label"].as_str().unwrap())
+            .collect();
+        assert_eq!(labels, ["blog", "技术"]);
+
         let (_, list) = get_json(&st, "/api/blogs").await;
-        assert_eq!(list["items"].as_array().unwrap().len(), 2);
+        assert_eq!(ids(&list, "/id"), [2, 1], "most recently updated first");
+        let (_, list) = get_json(&st, "/api/blogs?sort=name").await;
+        assert_eq!(ids(&list, "/id"), [1, 2]);
+        let (_, list) = get_json(&st, "/api/blogs?tag=life").await;
+        assert_eq!(ids(&list, "/id"), [2]);
     }
 }
