@@ -3,11 +3,12 @@
 // like or save the post, reload, open it in a new tab, or close. The divider
 // can be dragged. It slides in and out; while closed it stays in the page out
 // of sight, so a page loading ahead (readerAhead) is the very frame that shows.
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   closeReader,
   markBlocked,
+  placePage,
   readerAhead,
   readerOpen,
   readerPage,
@@ -74,6 +75,15 @@ watch(
   { immediate: true },
 )
 onBeforeUnmount(() => clearTimeout(dropTimer))
+
+// Another page lays out differently: it goes left by its own margin.
+watch(
+  () => route.path,
+  async () => {
+    await nextTick()
+    if (open.value) placePage()
+  },
+)
 
 function reload() {
   const page = readerPage.value

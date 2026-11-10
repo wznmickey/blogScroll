@@ -273,7 +273,8 @@ const title = computed(() =>
   top: var(--header-h);
   z-index: 10;
   margin: 0 -24px 12px;
-  padding: 8px 24px 10px;
+  /* Its controls stay clear of the reader pane. */
+  padding: 8px calc(24px + var(--pane-cover, 0px)) 10px 24px;
   background: color-mix(in srgb, var(--bg-page) 92%, transparent);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);

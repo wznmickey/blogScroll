@@ -149,11 +149,26 @@ export function warmUp(url: string) {
   }
 }
 
-// The left part is laid out as if the window ended where the pane begins.
-watch(
-  [readerOpen, readerShare],
-  ([open, share]) => {
-    document.documentElement.style.setProperty('--pane-w', open ? `${(share * 100).toFixed(2)}vw` : '0px')
-  },
-  { immediate: true },
-)
+/**
+ * Where the page goes while the pane is open: it keeps its layout and moves
+ * left by as much as its left margin (from the middle to the left edge), at
+ * most the pane's width; `--pane-cover` is how much of it stays under the
+ * pane, for bars that keep their controls clear. Call again after the page
+ * changed (another route) or the window did.
+ */
+export function placePage() {
+  const root = document.documentElement.style
+  const paneW = readerOpen.value ? readerShare.value * window.innerWidth : 0
+  // Pages are centred: half the room they leave is their margin. Widths, not
+  // positions, so a move in progress does not count.
+  const main = document.querySelector('main')
+  const page = main?.firstElementChild as HTMLElement | null | undefined
+  const margin = main && page ? Math.max(0, (main.clientWidth - page.offsetWidth) / 2) : 0
+  const shift = Math.min(margin, paneW)
+  root.setProperty('--pane-w', `${paneW.toFixed(1)}px`)
+  root.setProperty('--pane-shift', `${shift.toFixed(1)}px`)
+  root.setProperty('--pane-cover', `${Math.max(0, paneW - margin - shift).toFixed(1)}px`)
+}
+
+watch([readerOpen, readerShare], placePage, { immediate: true })
+window.addEventListener('resize', placePage)

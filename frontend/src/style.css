@@ -60,9 +60,18 @@ html {
   scrollbar-gutter: stable;
 }
 
-/* The reader pane (reader.ts) takes the right part; the site lays out in the rest. */
-#app {
-  padding-right: var(--pane-w, 0px);
+/* The reader pane (reader.ts) comes in over the right part. The page keeps
+   its layout (the feed is not laid out again) and only moves left, as far as
+   its margin goes; the header and the channel bar make room. */
+main {
+  position: relative;
+  left: calc(-1 * var(--pane-shift, 0px));
+  transition: left 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@media (prefers-reduced-motion: reduce) {
+  main {
+    transition: none;
+  }
 }
 
 body {

@@ -178,6 +178,8 @@ function submit() {
   position: sticky;
   top: 0;
   z-index: 20;
+  /* Beside the reader pane, not under it. */
+  padding-right: var(--pane-w, 0px);
   background: color-mix(in srgb, var(--bg) 88%, transparent);
   backdrop-filter: saturate(180%) blur(16px);
   -webkit-backdrop-filter: saturate(180%) blur(16px);
