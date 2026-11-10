@@ -542,8 +542,10 @@ pub struct Upserted {
 pub struct Entry<'a> {
     /// Place in the feed (0 = first).
     pub position: i64,
-    /// The blog had no posts before this fetch.
-    pub first_fetch: bool,
+    /// Where the entry sorts if it has no usable date and is old: it came
+    /// with the blog's first fetch, or below entries already known (the feed
+    /// now lists more of its past). None: an undated entry appeared just now.
+    pub backlog_at: Option<i64>,
     pub keywords_json: &'a str,
     /// (HTML, source) for blogs that allowed full text.
     pub content: Option<(&'a str, &'a str)>,
@@ -551,9 +553,10 @@ pub struct Entry<'a> {
 
 /// Inserts or refreshes a post.
 ///
-/// An entry without a usable date that arrives with a blog's first fetch is
-/// backlog of unknown age: it sorts below every dated post, in feed order,
-/// and is never shown as new. One that shows up later appeared just now.
+/// An entry without a usable date that arrives with a blog's first fetch, or
+/// below entries already known, is backlog of unknown age: it sorts below
+/// every dated post, in feed order, and is never shown as new. One that shows
+/// up at the top later appeared just now.
 pub async fn upsert_post(
     conn: &mut sqlx::SqliteConnection,
     blog_id: i64,
@@ -563,10 +566,10 @@ pub async fn upsert_post(
 ) -> sqlx::Result<Upserted> {
     let published = item.published.map(|d| d.timestamp());
     let backlog_sort = -e.position;
-    let (sort_at, backlog) = match published {
-        Some(p) => (p.min(now), false),
-        None if e.first_fetch => (backlog_sort, true),
-        None => (now - e.position, false),
+    let (sort_at, backlog) = match (published, e.backlog_at) {
+        (Some(p), _) => (p.min(now), false),
+        (None, Some(s)) => (s, true),
+        (None, None) => (now - e.position, false),
     };
     let (id, first_seen): (i64, i64) = sqlx::query_as(
         "INSERT INTO posts (blog_id, guid, url, title, excerpt, cover_url, author, tags,
@@ -622,8 +625,17 @@ pub async fn upsert_post(
     })
 }
 
-pub async fn post_count(pool: &SqlitePool, blog_id: i64) -> sqlx::Result<i64> {
-    sqlx::query_scalar("SELECT COUNT(*) FROM posts WHERE blog_id = ?")
+pub async fn post_guids(pool: &SqlitePool, blog_id: i64) -> sqlx::Result<std::collections::HashSet<String>> {
+    let rows: Vec<String> = sqlx::query_scalar("SELECT guid FROM posts WHERE blog_id = ?")
+        .bind(blog_id)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().collect())
+}
+
+/// Where a blog's undated backlog ends (its lowest place).
+pub async fn backlog_end(pool: &SqlitePool, blog_id: i64) -> sqlx::Result<Option<i64>> {
+    sqlx::query_scalar("SELECT MIN(sort_at) FROM posts WHERE blog_id = ? AND undated = 1")
         .bind(blog_id)
         .fetch_one(pool)
         .await
@@ -902,27 +914,27 @@ mod tests {
             comments_url: None,
             comment_count: None,
         };
-        let e = |position, first_fetch| Entry {
+        let e = |position, backlog_at| Entry {
             position,
-            first_fetch,
+            backlog_at,
             keywords_json: "[]",
             content: None,
         };
         let mut conn = pool.acquire().await.unwrap();
         // First fetch: a dated post and an undated one of unknown age.
-        upsert_post(&mut conn, 1, &item("dated", Some(1_000_000)), 2_000_000, &e(0, true))
+        upsert_post(&mut conn, 1, &item("dated", Some(1_000_000)), 2_000_000, &e(0, Some(0)))
             .await
             .unwrap();
-        upsert_post(&mut conn, 1, &item("old", None), 2_000_000, &e(1, true))
+        upsert_post(&mut conn, 1, &item("old", None), 2_000_000, &e(1, Some(-1)))
             .await
             .unwrap();
         // Later: a new undated entry appeared just now.
-        let up = upsert_post(&mut conn, 1, &item("fresh", None), 3_000_000, &e(0, false))
+        let up = upsert_post(&mut conn, 1, &item("fresh", None), 3_000_000, &e(0, None))
             .await
             .unwrap();
         assert!(up.is_new);
         // Re-parsed with stricter rules, the first post loses its (bogus) date.
-        let up = upsert_post(&mut conn, 1, &item("dated", None), 3_000_000, &e(2, false))
+        let up = upsert_post(&mut conn, 1, &item("dated", None), 3_000_000, &e(2, None))
             .await
             .unwrap();
         assert!(!up.is_new);
@@ -964,7 +976,7 @@ mod tests {
             let mut conn = pool.acquire().await.unwrap();
             let e = Entry {
                 position: 0,
-                first_fetch: false,
+                backlog_at: None,
                 keywords_json: "[]",
                 content: None,
             };

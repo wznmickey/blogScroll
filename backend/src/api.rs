@@ -1648,7 +1648,7 @@ pub(crate) mod tests {
                 let mut conn = pool.acquire().await.unwrap();
                 let e = crate::db::Entry {
                     position: n,
-                    first_fetch: false,
+                    backlog_at: None,
                     keywords_json: "[]",
                     content: None,
                 };

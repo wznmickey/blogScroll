@@ -690,7 +690,32 @@ impl Crawler {
         if items.is_empty() {
             return Ok(0);
         }
-        let first_fetch = db::post_count(&self.pool, blog.id).await? == 0;
+        let known = db::post_guids(&self.pool, blog.id).await?;
+        // Undated entries keep their feed order (dated ones come first).
+        // Below one already known, an unseen one is older, not new: the feed
+        // lists more of its past than before, or we used to keep fewer.
+        let mut next_backlog = db::backlog_end(&self.pool, blog.id).await?.map_or(0, |s| s - 1);
+        let mut below_known = false;
+        let backlog_at: Vec<Option<i64>> = items
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| {
+                if known.is_empty() {
+                    return Some(-(idx as i64));
+                }
+                if item.published.is_some() {
+                    return None;
+                }
+                if known.contains(&item.guid) {
+                    below_known = true;
+                    return None;
+                }
+                below_known.then(|| {
+                    next_backlog -= 1;
+                    next_backlog + 1
+                })
+            })
+            .collect();
         let texts: Vec<(String, Vec<String>, String, Option<String>)> = items
             .iter()
             .map(|i| (i.title.clone(), i.tags.clone(), i.excerpt.clone(), i.body_html.clone()))
@@ -713,7 +738,7 @@ impl Crawler {
             let kw_json = serde_json::to_string(kw)?;
             let entry = db::Entry {
                 position: idx as i64,
-                first_fetch,
+                backlog_at: backlog_at[idx],
                 keywords_json: &kw_json,
                 content: content_ref,
             };
@@ -863,5 +888,60 @@ mod tests {
             .unwrap();
         crawler.catch_up_on_new_rules().await.unwrap();
         assert!(due(pool.clone()).await.is_empty(), "only once per change of rules");
+    }
+
+    #[tokio::test]
+    async fn undated_entries_below_known_ones_are_old() {
+        let pool = crate::api::tests::seeded().await.pool;
+        let crawler = Crawler::new(
+            pool.clone(),
+            Arc::new(Config::default()),
+            Vec::new(),
+            Box::new(crate::fulltext::ArticleExtractor),
+        )
+        .unwrap();
+        sqlx::query("DELETE FROM posts WHERE blog_id = 2").execute(&pool).await.unwrap();
+        let blog = db::blog_by_id(&pool, 2).await.unwrap().unwrap();
+        let items = |guids: &[&str]| -> Vec<feed::ParsedItem> {
+            guids
+                .iter()
+                .map(|g| feed::ParsedItem {
+                    guid: g.to_string(),
+                    url: Url::parse(&format!("https://b.example/{g}")).unwrap(),
+                    title: g.to_string(),
+                    excerpt: String::new(),
+                    cover: None,
+                    author: None,
+                    tags: vec![],
+                    published: None,
+                    body_html: None,
+                    comments_url: None,
+                    comment_count: None,
+                })
+                .collect()
+        };
+        // The feed used to be cut to its first entries; read in full, it has
+        // older ones below them, and meanwhile one new post at the top.
+        crawler.store_items(&blog, &items(&["b", "c"]), 1_000).await.unwrap();
+        let new = crawler
+            .store_items(&blog, &items(&["a", "b", "c", "d", "e"]), 2_000)
+            .await
+            .unwrap();
+        assert_eq!(new, 3);
+        let rows: Vec<(String, i64, bool)> =
+            sqlx::query_as("SELECT guid, sort_at, undated FROM posts WHERE blog_id = 2 ORDER BY undated, sort_at DESC")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            rows,
+            [
+                ("a".into(), 2_000, false),
+                ("b".into(), 0, true),
+                ("c".into(), -1, true),
+                ("d".into(), -2, true),
+                ("e".into(), -3, true),
+            ]
+        );
     }
 }
