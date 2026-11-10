@@ -94,7 +94,7 @@ docker compose up -d          # http://127.0.0.1:8080，前面再挂 Caddy / ngi
 说明：
 
 - 数据库（ETag、刷新节奏、退避状态）存在 Actions 缓存里，每次运行存一份新的，只保留最近 3 份。缓存并不永久（7 天没用到或总量超过 10 GB 会被清掉）；丢失时如果配了下面的 git 备份，就从备份恢复，否则下一轮从头重新抓一遍。
-- 可选：每次抓完把数据备份到一个私有仓库（见「备份到 GitHub 私有仓库」），并在缓存丢失时从它恢复。在那个仓库加一个有写权限的 deploy key，把私钥存为本仓库的 Secret `BACKUP_DEPLOY_KEY`，再加 Variable `BACKUP_REPO` = `你/私有仓库名`。备份失败不影响网站发布。
+- 可选：每次抓取前先把一个私有仓库里的备份合并进数据库，抓完再备份回去（见「备份到 GitHub 私有仓库」）；缓存丢失时也从它恢复。在那个仓库加一个有写权限的 deploy key，把私钥存为本仓库的 Secret `BACKUP_DEPLOY_KEY`，再加 Variable `BACKUP_REPO` = `你/私有仓库名`。备份失败不影响网站发布。
 - 静态版用真实路径（`/blogScroll/blog/12`）：导出时为每个要被搜索引擎看到的页面生成 HTML 文件（见「搜索引擎」），其余路径（搜索、我的）由 `404.html` 接住，照常打开。以前的 `#/blog/12` 链接会自动跳到新地址。推荐、筛选、搜索都在浏览器里完成，覆盖最新 3000 篇，博客主页覆盖该博客已存的全部文章。
 - Runner 在海外机房：少数国内博客会拦截或超时，数据会比自建服务器少一些。
 - 私有仓库每月只有 2000 分钟免费额度，这个频率会超；建议用公开仓库，或把 cron 改成每 6 小时。公开仓库 60 天没有提交，GitHub 会自动停用定时任务。
@@ -163,15 +163,24 @@ GitHub Pages 的项目页（`你.github.io/blogScroll/`）不在域名根目录�
 
 ## 备份到 GitHub 私有仓库
 
-`[backup]` 打开后，`serve` 每 `every_hours`（默认 6）小时把数据库导出成文本快照，有变化就 `git commit` 并 `git push`：
+`[backup]` 打开后，`serve` 每 `every_hours`（默认 6）小时备份一次：先把仓库里已有的合并进数据库，再把合并后的结果写成文本快照，有变化就 `git commit` 并 `git push`：
 
 ```text
-README.md          说明
-meta.json          格式版本、博客数、文章数
-blogs/<id>.json    一个博客一个文件：博客信息、所属目录、全部文章（按 id 排序）
+README.md            说明
+meta.json            格式版本、博客数、文章数
+sites/<博客地址>.json  一个博客一个文件：博客信息、所属目录、全部文章（按首次抓到的时间排序）
 ```
 
-每次提交只包含有变化的博客，diff 可以直接读；抓取过程中的临时状态（ETag、刷新时间、错误）和能重新算出来的内容（分类、标签向量、评论数）不进备份。目前约 1600 个博客、8000 多篇文章，快照约 14 MB，git 压缩后几百 KB。
+每次提交只包含有变化的博客，diff 可以直接读；抓取过程中的临时状态（ETag、刷新时间、错误）和能重新算出来的内容（分类、标签向量、评论数）不进备份。目前约 1600 个博客、一万多篇文章，快照十几 MB，git 压缩后几百 KB。
+
+**可以多处一起往同一个仓库备份**（家里的服务器、GitHub Actions……）。快照里没有数据库编号，博客按地址、文章按 guid 认；每次备份先合并：
+
+- 对方有、自己没有的博客和文章补进自己的数据库（所以每一处的网站都能显示所有地方抓到的文章）；
+- 对方找到了 RSS 而自己没找到的博客，用对方找到的地址，马上抓一次；
+- 博主资料取较新的那份（读失败的空资料不会盖掉有内容的）；同一篇文章两边都有时以自己数据库里的为准，只是「首次抓到的时间」取两边较早的那个；
+- 然后把「自己的数据库 ∪ 仓库里原有的」写回去。数据库里删掉的文章（比如按条数修剪掉的）在快照里照样保留。唯一的例外是博主要求不收录（`policy.exclude`）或收回了全文授权：快照里也随之去掉他的文章或全文，与数据库一致。
+
+旧版的 `blogs/<id>.json` 会在第一次合并时读进来，改存成 `sites/`。
 
 设置一次：
 
@@ -189,16 +198,16 @@ blogs/<id>.json    一个博客一个文件：博客信息、所属目录、全�
 
 4. `cargo run -- backup` 先手动跑一次确认能推送，之后交给 `serve`。
 
-用 GitHub Actions 部署（上文 B）时不需要 `[backup]`：设好 Secret `BACKUP_DEPLOY_KEY`（**私钥**：不带 `.pub` 的那个文件，从 `-----BEGIN` 到 `-----END` 整段；公钥是贴到备份仓库的 Deploy keys 里的）和 Variable `BACKUP_REPO`，工作流每次抓完会运行 `feed-server backup --git-dir … --remote …`；Actions 缓存丢失时，先 `feed-server restore` 从这个仓库恢复数据库再抓。一个备份仓库只给一处写：服务器和 Actions 不要同时往同一个仓库备份（本来也不该两边同时抓），否则两边历史分叉，备份会停下来等你处理。
+用 GitHub Actions 部署（上文 B）时不需要 `[backup]`：设好 Secret `BACKUP_DEPLOY_KEY`（**私钥**：不带 `.pub` 的那个文件，从 `-----BEGIN` 到 `-----END` 整段；公钥是贴到备份仓库的 Deploy keys 里的）和 Variable `BACKUP_REPO`，工作流每次先用 `feed-server restore` 把这个仓库合并进缓存里的数据库（没有缓存时就是完整恢复），抓完再运行 `feed-server backup --git-dir … --remote …`；发布网站时也会先合并，所以网站上有所有抓取端的文章。服务器和 Actions 可以同时往这个仓库备份；不过两边按同一个间隔抓同一批博客会让对方站点的请求翻倍，同时开着时把一边的间隔调长些。
 
 提交者显示为 `blogScroll <backup@blogscroll.invalid>`，不会用到你本机的 git 身份。推送失败时提交留在本地，下次一起推。Docker 镜像里已带 git 和 ssh，把 key 挂进容器即可。
 
 **只追加、不覆盖。** 备份程序这边保证：
 
 - 推送是 `git push origin HEAD`：明确写出的 refspec、不带 `+`，所以不会强推，git 配置里写了强推的 refspec 也不影响；
-- 每次备份前先 `git fetch`，只用快进（`merge --ff-only`）接上远端的新提交（比如你在 GitHub 上改了 README，或另一台机器推过）；两边历史分叉时这一轮直接停止并报错，不提交、不推送，等你手工合并（`git pull --rebase`，不要用 `--force`）；
-- `README.md` 只在第一次生成，之后归你编辑，备份不会改回去；
-- 新快照的博客数或文章数比上一次备份少 10% 以上时不提交（多半是数据库丢了、从头抓起），要么先从备份恢复，要么确认是有意的再加 `--allow-shrink`；恢复是一个事务，要么完整恢复，要么什么都不写；
+- 每次备份前先 `git fetch`，快进接上远端的新提交（比如你在 GitHub 上改了 README，或另一处推过）。本地还有没推上去的提交、和远端分叉时，把它们留在本地分支 `unpushed` 上，工作区换成远端的最新版本再做这一轮备份——那些提交里的内容都在数据库里，合并后会重新写进去；推送时如果正好有别处抢先推了，同样在对方之上重做，最多三次；
+- `README.md` 只在第一次生成，之后归你编辑，备份不会改回去（还是旧版自动生成的原文时会换成新说明）；
+- 合并只增不减，新快照的博客数或文章数比上一次少 10% 以上时不提交（只可能是 bug 或大量博主退出），确认是有意的再加 `--allow-shrink`；合并进数据库是一个事务，要么全部写入，要么什么都不写；
 - ssh 以 BatchMode 运行，遇到陌生主机密钥或要输口令时直接失败，不会卡在终端里等输入（你自己配了 `core.sshCommand` 或 `GIT_SSH_COMMAND` 时用你的）。
 
 GitHub 那边还可以再加一道锁：仓库 Settings → Rules → Rulesets 新建规则，目标选全部分支，勾选 *Block force pushes* 和 *Restrict deletions*，Bypass 列表留空（deploy key 也受约束）。注意 GitHub Free 账号的**私有**仓库不能用 rulesets 和分支保护，需要 GitHub Pro（学生可通过 GitHub Student Developer Pack 免费获得）；用不了时就只靠上面程序这边的保证。
@@ -215,7 +224,9 @@ Host github-blogscroll-backup
 
 然后 `remote = "git@github-blogscroll-backup:<你>/<私有仓库>.git"`。
 
-恢复：把 `[database] path` 指向一个新文件，`cargo run -- restore --from data/backup`。博客、目录关系、文章（含已授权的全文）原样恢复，分类和标签当场重算；之后每个 RSS 会完整读一次，没找到 RSS 的博客一周后再找。
+恢复或合并：`cargo run -- restore --from data/backup`，空数据库就是完整恢复，已有数据就是合并（同上，只补不删）。博客、目录关系、文章（含已授权的全文）都会写入，分类和标签当场重算；新加入的博客马上读一次 RSS，没找到 RSS 的一周后再找。
+
+抓取规则变了（RSS 解析版本、`max_items_per_feed`、`max_post_age_days`，或寻找 RSS 的路径）之后第一次启动 `serve` 或 `crawl`，会把按旧规则读过的 RSS 全部排到马上完整重读一次，没找到 RSS 的博客也马上按新路径再找一次，不用等各自的刷新时间。
 
 ## 在页面右侧阅读原文
 

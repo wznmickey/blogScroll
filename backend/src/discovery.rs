@@ -17,6 +17,11 @@ use crate::feed;
 use crate::html;
 use crate::http::{ACCEPT_FEED, ACCEPT_HTML, FetchError, Fetched, PoliteClient, Validators};
 
+/// Bumped when where or how feeds are looked for changes (more paths, say):
+/// blogs where none was found are then searched again straight away (see
+/// `Crawler::catch_up_on_new_rules`).
+pub const VERSION: u32 = 2;
+
 /// Feed paths used by common blog engines, most likely first: Hexo,
 /// WordPress/Typecho, Halo/Hexo, Hugo, Jekyll, Ghost; then less common ones
 /// seen on blogs that do advertise their feed (Hexo's `rss2.xml`, PHP

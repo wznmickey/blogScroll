@@ -100,7 +100,8 @@ enum Command {
         #[arg(long)]
         allow_shrink: bool,
     },
-    /// Fill a new, empty database from a backup snapshot directory.
+    /// Merge a backup snapshot directory into the database (an empty one is
+    /// filled): blogs and posts it lacks, newer profiles, feeds found elsewhere.
     Restore {
         /// The backup repository's working copy.
         #[arg(long)]
@@ -140,19 +141,20 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Arc::new(Config::load(&cli.config)?);
     let pool = db::connect(&cfg.database.path).await.context("opening database")?;
     // Before anything writes to the (empty) database.
+    let merge_opts = backup::MergeOptions {
+        refresh_secs: cfg.crawler.refresh_secs as i64,
+        discovery_retry_secs: cfg.crawler.discovery_retry_secs as i64,
+    };
     if let Some(Command::Restore { from }) = &cli.command {
-        let s = backup::restore(
-            &pool,
-            from,
-            cfg.crawler.refresh_secs as i64,
-            cfg.crawler.discovery_retry_secs as i64,
-        )
-        .await?;
+        let s = backup::restore(&pool, from, &merge_opts).await?;
         println!(
-            "restored {} blogs and {} posts from {}",
+            "merged {} blogs and {} posts from {}: {} blogs and {} posts were new here, {} blogs updated",
             s.blogs,
             s.posts,
-            from.display()
+            from.display(),
+            s.blogs_added,
+            s.posts_added,
+            s.blogs_updated
         );
         pool.close().await;
         return Ok(());
@@ -190,6 +192,7 @@ async fn main() -> anyhow::Result<()> {
             if sync {
                 crawler.sync_directories_if_due().await?;
             }
+            crawler.catch_up_on_new_rules().await?;
             let stats = match blog {
                 Some(id) => {
                     let blog = db::blog_by_id(&pool, id).await?.context("no such blog")?;
@@ -227,7 +230,7 @@ async fn main() -> anyhow::Result<()> {
             b.git_dir = git_dir.or(b.git_dir);
             b.remote = remote.or(b.remote);
             b.allow_shrink |= allow_shrink;
-            let o = backup::backup(&pool, &b).await?;
+            let o = backup::backup(&pool, &b, &merge_opts).await?;
             println!("{o:#?}");
         }
         Command::Restore { .. } => unreachable!("handled above"),
@@ -269,10 +272,11 @@ async fn main() -> anyhow::Result<()> {
                     }
                 });
             } else {
+                crawler.catch_up_on_new_rules().await?;
                 tokio::spawn(crawler.clone().run());
             }
             if cfg.backup.git_dir.is_some() && cfg.backup.every_hours > 0 {
-                tokio::spawn(backup::run_periodically(pool.clone(), cfg.backup.clone()));
+                tokio::spawn(backup::run_periodically(pool.clone(), cfg.backup.clone(), merge_opts));
             }
             let state = AppState {
                 pool: pool.clone(),

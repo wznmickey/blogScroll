@@ -97,6 +97,46 @@ impl Crawler {
         &self.cfg.crawler
     }
 
+    /// After the rules for reading feeds change (the parser, which entries
+    /// are kept, where feeds are looked for), catches up at once instead of
+    /// as each blog falls due: feeds read under the old rules are fetched in
+    /// full now, and blogs without a feed are searched again.
+    pub async fn catch_up_on_new_rules(&self) -> anyhow::Result<()> {
+        const FEEDS: &str = "rules_feeds";
+        const DISCOVERY: &str = "rules_discovery";
+        let prefix = self.hash_prefix();
+        if db::kv_get(&self.pool, FEEDS).await?.as_deref() != Some(prefix.as_str()) {
+            let n = sqlx::query(
+                "UPDATE blogs SET next_check_at = 0
+                 WHERE active = 1 AND excluded = 0 AND feed_url IS NOT NULL
+                   AND (content_hash IS NULL OR substr(content_hash, 1, length(?1)) <> ?1)",
+            )
+            .bind(&prefix)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+            tracing::info!(feeds = n, rules = %prefix, "feed rules changed: reading every feed in full now");
+            db::kv_set(&self.pool, FEEDS, &prefix).await?;
+        }
+        let version = discovery::VERSION.to_string();
+        if db::kv_get(&self.pool, DISCOVERY).await?.as_deref() != Some(version.as_str()) {
+            let n = sqlx::query(
+                "UPDATE blogs SET discovery_at = NULL, next_check_at = 0
+                 WHERE active = 1 AND excluded = 0 AND feed_url IS NULL",
+            )
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+            tracing::info!(
+                blogs = n,
+                version,
+                "feed discovery changed: searching blogs without a feed again"
+            );
+            db::kv_set(&self.pool, DISCOVERY, &version).await?;
+        }
+        Ok(())
+    }
+
     /// Background loop: daily directory sync plus feed refreshes as they fall due.
     pub async fn run(self: Arc<Self>) {
         let mut last_retag: Option<std::time::Instant> = None;
@@ -699,4 +739,57 @@ fn content_hash(prefix: &str, body: &[u8]) -> String {
 fn feed_full_text(item: &feed::ParsedItem) -> Option<String> {
     let body = item.body_html.as_deref()?;
     (html::to_text(body).chars().count() >= FULL_FEED_MIN_CHARS).then(|| html::sanitize(body, Some(&item.url)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn new_rules_bring_stale_feeds_and_feedless_blogs_forward_once() {
+        let pool = crate::api::tests::seeded().await.pool;
+        let crawler = Crawler::new(
+            pool.clone(),
+            Arc::new(Config::default()),
+            Vec::new(),
+            Box::new(crate::fulltext::ArticleExtractor),
+        )
+        .unwrap();
+        let current = format!("{}abc", crawler.hash_prefix());
+        // Blog 1 was read under the current rules, blog 2 under older ones;
+        // blog 3 has no feed and was searched recently.
+        sqlx::query(
+            "UPDATE blogs SET next_check_at = 9999999999,
+                feed_url = CASE id WHEN 3 THEN NULL ELSE 'https://f.example/' || id END,
+                content_hash = CASE id WHEN 1 THEN ? WHEN 2 THEN 'v1-30d20i-abc' END,
+                discovery_at = CASE id WHEN 3 THEN 1000 END",
+        )
+        .bind(&current)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let due = |pool: SqlitePool| async move {
+            sqlx::query_scalar::<_, i64>("SELECT id FROM blogs WHERE next_check_at = 0 ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        };
+        // Blog 3 is not alive in the seed; make it so for the discovery part.
+        sqlx::query("UPDATE blogs SET active = 1").execute(&pool).await.unwrap();
+
+        crawler.catch_up_on_new_rules().await.unwrap();
+        assert_eq!(due(pool.clone()).await, [2, 3]);
+        let discovery_at: Option<i64> = sqlx::query_scalar("SELECT discovery_at FROM blogs WHERE id = 3")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(discovery_at, None, "searched again despite the recent attempt");
+
+        sqlx::query("UPDATE blogs SET next_check_at = 9999999999")
+            .execute(&pool)
+            .await
+            .unwrap();
+        crawler.catch_up_on_new_rules().await.unwrap();
+        assert!(due(pool.clone()).await.is_empty(), "only once per change of rules");
+    }
 }

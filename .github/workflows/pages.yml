@@ -9,13 +9,15 @@
 # Do not also run the server image against the same blogs; that doubles their load.
 #
 # Optional: back up the crawled data to a (private) git repository after each
-# run, and rebuild the database from it when the Actions cache is gone (caches
-# are evicted after 7 days unused or beyond 10 GB):
+# run. Each run first merges that repository into the cached database (and
+# rebuilds the database from it when the cache is gone: caches are evicted
+# after 7 days unused or beyond 10 GB), so what other crawlers backed up there
+# (a server at home) is crawled on from and published too:
 #   3. In that repository: Settings → Deploy keys → add a key with write access.
 #   4. Here: Secrets → BACKUP_DEPLOY_KEY = the private half of that key: the
 #            whole file without .pub, from -----BEGIN to -----END;
 #            Variables → BACKUP_REPO = owner/name, e.g. you/blogscroll-data.
-# Backups only ever add commits; see "备份到 GitHub 私有仓库" in README.md.
+# Backups only ever add, and never force-push; see "备份到 GitHub 私有仓库" in README.md.
 name: Crawl (GitHub Pages)
 
 on:
@@ -70,11 +72,12 @@ jobs:
         with:
           deploy-key: ${{ secrets.BACKUP_DEPLOY_KEY }}
 
-      # No cache to carry on from: start from the last backup instead of from
-      # nothing. The restore is all or nothing; if it fails, crawling starts
-      # afresh (and the backup step refuses to commit the much smaller result).
-      - name: Restore crawler database from the backup
-        if: steps.key.outputs.ok == 'true' && steps.cache.outputs.cache-matched-key == ''
+      # Merge what was backed up (from here or elsewhere) into the cached
+      # database, or fill it when there is no cache. All or nothing; if it
+      # fails, the crawl goes on from the cache alone, and the backup step
+      # merges again before it commits.
+      - name: Merge the backup into the database
+        if: steps.key.outputs.ok == 'true'
         continue-on-error: true
         working-directory: backend
         run: |
@@ -82,7 +85,7 @@ jobs:
           if [ -f "$RUNNER_TEMP/backup/meta.json" ]; then
             ./target/release/feed-server restore --from "$RUNNER_TEMP/backup"
           else
-            echo "The backup repository has no snapshot yet; starting from nothing."
+            echo "The backup repository has no snapshot yet."
           fi
 
       - name: Crawl due feeds
@@ -90,8 +93,9 @@ jobs:
         # The first run discovers ~1300 feeds (about an hour); later runs take minutes.
         run: ./target/release/feed-server crawl --sync --all --limit 200 --max-minutes 100
 
-      # Commits only when something changed; never force-pushes. A failure here
-      # does not stop the site from being published.
+      # Merges again (another crawler may have pushed during the crawl), then
+      # commits only when something changed; never force-pushes. A failure
+      # here does not stop the site from being published.
       - name: Back up to the git repository
         if: always() && steps.key.outputs.ok == 'true'
         continue-on-error: true

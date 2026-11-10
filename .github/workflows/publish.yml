@@ -69,13 +69,14 @@ jobs:
 
       - name: Use the backup repository's deploy key
         id: key
-        if: vars.BACKUP_REPO != '' && steps.cache.outputs.cache-matched-key == ''
+        if: vars.BACKUP_REPO != ''
         uses: ./.github/actions/backup-key
         with:
           deploy-key: ${{ secrets.BACKUP_DEPLOY_KEY }}
 
-      # No cached database: publish from the last backup rather than an empty site.
-      - name: Restore database from the backup
+      # Publish everything backed up, also by other crawlers (and not an empty
+      # site when there is no cache). Only this run's copy changes.
+      - name: Merge the backup into the database
         if: steps.key.outputs.ok == 'true'
         continue-on-error: true
         working-directory: backend
