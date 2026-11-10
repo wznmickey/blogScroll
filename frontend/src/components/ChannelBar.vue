@@ -10,6 +10,7 @@ import {
   addChannel,
   allChannels,
   channel,
+  COLUMN_CHOICES,
   MAX_PINNED,
   moveChannel,
   prefs,
@@ -206,6 +207,21 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
         <input v-model="tagText" placeholder="输入标签，例如 Rust" aria-label="标签" />
         <button class="btn btn-ghost" type="submit">添加</button>
       </form>
+
+      <h3>每行几列</h3>
+      <p class="adds" role="group" aria-label="每行几列">
+        <button
+          v-for="n in COLUMN_CHOICES"
+          :key="String(n)"
+          class="add col-choice"
+          :class="{ on: prefs.columns === n }"
+          :aria-pressed="prefs.columns === n"
+          @click="prefs.columns = n"
+        >
+          {{ n ?? '自动' }}
+        </button>
+      </p>
+      <p class="hint">首页、博客页、搜索和「我的」里的瀑布流都按这个列数排；屏幕不够宽时会少几列，免得卡片太窄。</p>
     </section>
   </div>
 </template>
@@ -464,6 +480,13 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
 }
 .add:hover {
   color: var(--text);
+}
+.col-choice {
+  min-width: 34px;
+}
+.col-choice.on {
+  background: var(--text);
+  color: var(--bg);
 }
 .tag-form {
   display: flex;

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch, type ComponentPublicInstance } from 'vue'
 import { meta, rememberPosts } from '../api'
+import { prefs } from '../channels'
 import { COVER_DEFAULT, textCoverRatio } from '../format'
 import type { Page, PostCard } from '../types'
 import FeedCard from './FeedCard.vue'
@@ -35,9 +36,14 @@ const aspects = new Map<number, number>()
 const PRELOAD_PX = 1200
 const IMPRESSION_MS = 600
 
-/** Two on a phone, then one more per 320px from 640px wide, up to the
- *  site's `[server] columns`. */
+/** Narrowest a card gets when the reader asks for many columns. */
+const MIN_CARD = 150
+
+/** The reader's choice, as many as fit at MIN_CARD; else two on a phone,
+ *  then one more per 320px from 640px wide, up to the site's `[server] columns`. */
 function columnCount(w: number) {
+  const chosen = prefs.value.columns
+  if (chosen) return Math.max(1, Math.min(chosen, Math.floor((w + gap(w)) / (MIN_CARD + gap(w)))))
   const max = meta.value?.columns ?? 6
   return Math.max(1, Math.min(max, w < 640 ? 2 : 3 + Math.floor((w - 640) / 320)))
 }
@@ -195,13 +201,11 @@ onBeforeUnmount(() => {
   resetImpressions()
 })
 
-// The setting arrives with the site's meta, possibly after the first cards.
-watch(
-  () => meta.value?.columns,
-  () => {
-    if (items.length) place([], true)
-  },
-)
+// The site's setting arrives with its meta, possibly after the first cards;
+// the reader's can change at any time.
+watch([() => meta.value?.columns, () => prefs.value.columns], () => {
+  if (items.length) place([], true)
+})
 
 watch(
   () => props.resetKey,

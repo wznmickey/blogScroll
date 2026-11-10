@@ -64,7 +64,12 @@ interface Prefs {
   pinned: ChannelId[]
   /** All posts, those with a cover image, or those with an excerpt worth reading. */
   media: Media
+  /** Columns of the waterfall on wide screens; null = the site's default. */
+  columns: number | null
 }
+
+/** Choices for the column count; null = the site's default. */
+export const COLUMN_CHOICES = [null, 1, 2, 3, 4, 5, 6, 7, 8] as const
 
 /** All posts, only those with a cover image, or only those with some text. */
 export type Media = 'all' | 'cover' | 'text'
@@ -90,6 +95,7 @@ export function cleanPrefs(v: unknown): Prefs {
     // Older settings had only "only with images" (`cover: true`).
     media:
       o.media === 'cover' || (o as { cover?: unknown }).cover === true ? 'cover' : o.media === 'text' ? 'text' : 'all',
+    columns: typeof o.columns === 'number' && Number.isInteger(o.columns) && o.columns >= 1 && o.columns <= 8 ? o.columns : null,
   }
 }
 
@@ -190,7 +196,7 @@ export function togglePin(id: ChannelId, info: TagsInfo | null): boolean {
 }
 
 export function resetChannels() {
-  prefs.value = { order: null, pinned: [...DEFAULT_PINNED], media: prefs.value.media }
+  prefs.value = { ...prefs.value, order: null, pinned: [...DEFAULT_PINNED] }
 }
 
 /** Old home page links (?tab=, ?topic=, ?category=, ?tag=) as today's channel and filters. */
