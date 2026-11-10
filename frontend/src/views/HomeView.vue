@@ -243,7 +243,7 @@ const title = computed(() =>
     </div>
     <p v-if="active === 'explore'" class="explore-note">
       <template v-if="hasSignals">避开你读过、喜欢、收藏和关注的方向，看看平时不会遇到的博客和分类。</template>
-      <template v-else>探索会避开你读过、喜欢、收藏和关注的方向；你还没有这些记录，所以现在和「发现」差不多。</template>
+      <template v-else>反推荐会避开你读过、喜欢、收藏和关注的方向；你还没有这些记录，所以现在和「发现」差不多。</template>
     </p>
     <div v-if="isFollowing && !followIds.length" class="empty follow-empty">
       <p>还没有关注任何博主。</p>

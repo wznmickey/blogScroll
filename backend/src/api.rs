@@ -18,6 +18,8 @@ pub struct AppState {
     pub site_name: String,
     pub directories: Arc<Vec<DirectoryInfo>>,
     pub maintainer: Option<crate::config::Maintainer>,
+    /// Waterfall columns on the widest screens.
+    pub columns: u32,
 }
 
 impl AppState {
@@ -208,6 +210,8 @@ struct Meta {
     directories: Vec<DirectoryInfo>,
     /// Who runs the site, and their blog here if it is one of ours.
     maintainer: Option<MaintainerInfo>,
+    /// Waterfall columns on the widest screens (`[server] columns`).
+    columns: u32,
     stats: Stats,
     /// When this answer was produced; tells static exports' readers how fresh they are.
     generated_at: i64,
@@ -277,6 +281,7 @@ async fn meta(State(st): State<AppState>) -> ApiResult<Meta> {
         site_name: st.site_name.clone(),
         directories: st.directories.to_vec(),
         maintainer,
+        columns: st.columns,
         stats,
         generated_at: crate::util::now(),
     }))
@@ -550,6 +555,10 @@ pub struct PostQuery {
     /// `1`: only posts with a cover image; `none`: only posts without one.
     #[serde(default)]
     cover: Option<String>,
+    /// `1`: only posts with some text: an excerpt of at least 20 characters
+    /// (below that, cards show the title instead). Ignored with `cover`.
+    #[serde(default)]
+    text: Option<String>,
 }
 
 #[derive(Debug, FromRow)]
@@ -667,14 +676,15 @@ macro_rules! post_columns {
 }
 
 /// Filters shared by both feed modes, on parameters ?10–?16: directory tag,
-/// directory, with or without a cover, tag key, category (a top-level one includes its
+/// directory, with or without a cover or with text, tag key, category (a top-level one includes its
 /// sub-categories), kind, blog ids (JSON).
 macro_rules! post_filters {
     () => {
         " AND (?10 IS NULL OR EXISTS (SELECT 1 FROM blog_tags bt WHERE bt.blog_id = b.id AND bt.tag = ?10))
           AND (?11 IS NULL OR EXISTS (SELECT 1 FROM directory_entries de
                  WHERE de.blog_id = b.id AND de.active = 1 AND de.directory = ?11))
-          AND (?12 IS NULL OR (p.cover_url IS NOT NULL) = ?12)
+          AND (?12 IS NULL OR (?12 = 'cover' AND p.cover_url IS NOT NULL) OR (?12 = 'none' AND p.cover_url IS NULL)
+               OR (?12 = 'text' AND length(trim(p.excerpt)) >= 20))
           AND (?13 IS NULL OR EXISTS (SELECT 1 FROM post_terms pt WHERE pt.post_id = p.id AND pt.is_tag = 1 AND pt.term = ?13))
           AND (?14 IS NULL OR p.category = ?14 OR substr(p.category, 1, length(?14) + 1) = ?14 || '/')
           AND (?15 IS NULL OR COALESCE(b.kind, b.detected_kind, 'blog') = ?15)
@@ -685,8 +695,9 @@ macro_rules! post_filters {
 struct Filters<'a> {
     dirtag: Option<&'a str>,
     directory: Option<&'a str>,
-    /// Some(true): only with a cover image, Some(false): only without.
-    cover: Option<bool>,
+    /// `cover`: only with a cover image, `none`: only without, `text`:
+    /// only with an excerpt worth reading.
+    media: Option<&'static str>,
     tag: Option<String>,
     category: Option<&'a str>,
     kind: Option<&'a str>,
@@ -701,7 +712,7 @@ impl Filters<'_> {
     ) -> sqlx::query::QueryAs<'q, sqlx::Sqlite, O, sqlx::sqlite::SqliteArguments> {
         q.bind(self.dirtag)
             .bind(self.directory)
-            .bind(self.cover)
+            .bind(self.media)
             .bind(self.tag.as_deref())
             .bind(self.category)
             .bind(self.kind)
@@ -743,9 +754,10 @@ async fn list_posts(State(st): State<AppState>, Query(q): Query<PostQuery>) -> A
     let f = Filters {
         dirtag: non_empty(&q.dirtag),
         directory: non_empty(&q.directory),
-        cover: match non_empty(&q.cover) {
-            Some("none" | "no" | "without") => Some(false),
-            _ if truthy(&q.cover) => Some(true),
+        media: match non_empty(&q.cover) {
+            Some("none" | "no" | "without") => Some("none"),
+            _ if truthy(&q.cover) => Some("cover"),
+            _ if truthy(&q.text) => Some("text"),
             _ => None,
         },
         tag: non_empty(&q.tag).map(analyze::tag_key),
@@ -980,7 +992,7 @@ const FOR_YOU: Leaning = Leaning {
     per_blog: 8,
 };
 
-/// 探索: the other way round. What is close to their reading, in their usual
+/// 反推荐: the other way round. What is close to their reading, in their usual
 /// categories or from blogs they already know moves down, and fewer posts
 /// per blog take part, so the feed opens onto areas and blogs they have not
 /// been to.
@@ -1573,6 +1585,7 @@ pub(crate) mod tests {
                 name: "站长".into(),
                 url: Some("https://b2.example/".into()),
             }),
+            columns: 6,
         }
     }
 
@@ -1651,6 +1664,16 @@ pub(crate) mod tests {
         let items = v["items"].as_array().unwrap();
         assert_eq!(items.len(), 4);
         assert!(items.iter().all(|it| it["cover"].is_null()), "text-only posts");
+
+        // Excerpts of two characters are next to nothing; one real one.
+        let (_, v) = get_json(&st, "/api/posts?text=1&limit=100").await;
+        assert!(v["items"].as_array().unwrap().is_empty());
+        sqlx::query("UPDATE posts SET excerpt = '这一篇的摘要足够长，写了好几句话，值得一读。' WHERE id = 2")
+            .execute(&st.pool)
+            .await
+            .unwrap();
+        let (_, v) = get_json(&st, "/api/posts?text=1&limit=100").await;
+        assert_eq!(ids(&v, "/id"), [2]);
 
         let (_, v) = get_json(&st, "/api/posts?tag=%E6%97%A5%E8%AE%B0&limit=100").await;
         let items = v["items"].as_array().unwrap();

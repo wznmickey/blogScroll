@@ -247,6 +247,7 @@ async fn main() -> anyhow::Result<()> {
                 site_name: cfg.server.site_name.clone(),
                 directories: Arc::new(dir_info),
                 maintainer: cfg.server.maintainer.clone(),
+                columns: cfg.server.columns,
             };
             let opts = export::ExportOptions {
                 feed_posts,
@@ -283,6 +284,7 @@ async fn main() -> anyhow::Result<()> {
                 site_name: cfg.server.site_name.clone(),
                 directories: Arc::new(dir_info),
                 maintainer: cfg.server.maintainer.clone(),
+                columns: cfg.server.columns,
             };
             let cache = Arc::new(ResponseCache::new(cfg.server.api_cache_entries));
             let mut app: Router = api::router(state).route_layer(from_fn_with_state(cache, cache::api_cache));

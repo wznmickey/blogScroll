@@ -3,14 +3,17 @@
 [server]
 listen = "127.0.0.1:8080"
 site_name = "博客瀑布"
-# Who runs the site, shown on the about page (with a link to their blog).
-# [server.maintainer]
-# name = "你的名字"
-# url = "https://your.blog/"
 # Built frontend; served at / when it exists.
 static_dir = "../frontend/dist"
 # API responses kept in memory (each lives 1–10 minutes; ETag + Cache-Control are sent).
 api_cache_entries = 512
+# Columns of the waterfall on the widest screens (1–12). Narrower screens get
+# fewer (one more per 320px from 640px wide), two on a phone.
+columns = 6
+# Who runs the site, shown on the about page (with a link to their blog).
+# [server.maintainer]
+# name = "你的名字"
+# url = "https://your.blog/"
 
 [database]
 path = "data/feed.db"

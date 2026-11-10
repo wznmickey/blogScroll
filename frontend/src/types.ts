@@ -93,6 +93,8 @@ export interface Meta {
   directories: DirectoryInfo[]
   /** Who runs the site, and their blog here if it is one of ours. */
   maintainer?: { name: string; url: string | null; blog: { id: number; name: string } | null } | null
+  /** Waterfall columns on the widest screens (`[server] columns`). */
+  columns?: number
   stats: {
     blogs: number
     blogs_with_feed: number

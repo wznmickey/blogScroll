@@ -21,7 +21,7 @@ export interface Channel {
 
 const MODES: Channel[] = [
   { id: 'foryou', label: '推荐', title: '推荐 · 按你的喜好', type: 'mode' },
-  { id: 'explore', label: '探索', title: '探索 · 你还没看过的方向', type: 'mode' },
+  { id: 'explore', label: '反推荐', title: '反推荐 · 你还没看过的方向', type: 'mode' },
   { id: 'discover', label: '发现', title: '发现 · 不做个性化', type: 'mode' },
   { id: 'latest', label: '最新', title: '最新', type: 'mode' },
   { id: 'following', label: '关注', title: '关注的博主', type: 'mode' },
@@ -62,12 +62,12 @@ interface Prefs {
   /** Shown channels in order; null = the default list (follows new categories). */
   order: ChannelId[] | null
   pinned: ChannelId[]
-  /** Posts with a cover image only, text-only posts only, or all. */
+  /** All posts, those with a cover image, or those with an excerpt worth reading. */
   media: Media
 }
 
-/** All posts, or only those with a cover image. */
-export type Media = 'all' | 'cover'
+/** All posts, only those with a cover image, or only those with some text. */
+export type Media = 'all' | 'cover' | 'text'
 
 const KEY = 'channels'
 const DEFAULT_PINNED = ['foryou']
@@ -88,7 +88,8 @@ export function cleanPrefs(v: unknown): Prefs {
     order: ids(o.order),
     pinned: (ids(o.pinned) ?? DEFAULT_PINNED).slice(0, MAX_PINNED),
     // Older settings had only "only with images" (`cover: true`).
-    media: o.media === 'cover' || (o as { cover?: unknown }).cover === true ? 'cover' : 'all',
+    media:
+      o.media === 'cover' || (o as { cover?: unknown }).cover === true ? 'cover' : o.media === 'text' ? 'text' : 'all',
   }
 }
 

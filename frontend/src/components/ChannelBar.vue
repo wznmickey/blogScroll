@@ -18,6 +18,7 @@ import {
   shownChannels,
   togglePin,
   type ChannelId,
+  type Media,
 } from '../channels'
 import { useDragScroll } from '../composables/dragScroll'
 
@@ -30,7 +31,7 @@ const shownIds = computed(() => new Set([...shown.value.pinned, ...shown.value.r
 /** The open channel when it is not in the bar (a tag or category from a link). */
 const extra = computed(() => (shownIds.value.has(props.active) ? null : channel(props.active, info.value)))
 
-function setMedia(m: 'all' | 'cover') {
+function setMedia(m: Media) {
   prefs.value.media = m
 }
 
@@ -125,7 +126,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
           </svg>
         </button>
       </div>
-      <div class="media" role="group" aria-label="按图片筛选">
+      <div class="media" role="group" aria-label="筛选文章">
         <button
           class="media-btn"
           :class="{ on: prefs.media === 'all' }"
@@ -143,6 +144,15 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
           @click="setMedia('cover')"
         >
           有图
+        </button>
+        <button
+          class="media-btn"
+          :class="{ on: prefs.media === 'text' }"
+          :aria-pressed="prefs.media === 'text'"
+          title="不看摘要很短（不到 20 个字）的文章"
+          @click="setMedia('text')"
+        >
+          有摘要
         </button>
       </div>
       <button class="more" :class="{ open }" :aria-expanded="open" aria-label="管理频道" @click="open = !open">

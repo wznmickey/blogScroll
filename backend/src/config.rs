@@ -25,6 +25,7 @@ impl Config {
         let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let mut cfg: Config = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
         cfg.apply_env();
+        cfg.server.columns = cfg.server.columns.clamp(1, 12);
         let dir = path.parent().unwrap_or(Path::new(""));
         for o in &mut cfg.sources.opml {
             if o.path.is_relative() {
@@ -59,6 +60,9 @@ pub struct ServerConfig {
     pub api_cache_entries: usize,
     /// Who runs the site; shown on the about page.
     pub maintainer: Option<Maintainer>,
+    /// Columns of the waterfall on the widest screens (1–12); narrower
+    /// screens get fewer, down to two on a phone.
+    pub columns: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
@@ -78,6 +82,7 @@ impl Default for ServerConfig {
             static_dir: Some("../frontend/dist".into()),
             api_cache_entries: 512,
             maintainer: None,
+            columns: 6,
         }
     }
 }

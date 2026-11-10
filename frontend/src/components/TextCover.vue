@@ -1,15 +1,12 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { hue } from '../format'
+import { hue, textCoverText } from '../format'
 import type { PostCard } from '../types'
 
 // Posts without a picture get a typographic cover, like text-only notes on XHS.
 const props = defineProps<{ post: PostCard; ratio: number; large?: boolean }>()
 
-const text = computed(() => {
-  const ex = props.post.excerpt.trim()
-  return ex.length >= 20 ? ex : props.post.title
-})
+const text = computed(() => textCoverText(props.post))
 const style = computed(() => ({
   aspectRatio: props.large ? undefined : `1 / ${props.ratio}`,
   '--h': hue(props.post.blog.name),
@@ -28,7 +25,8 @@ const style = computed(() => ({
   position: relative;
   display: flex;
   align-items: center;
-  overflow: hidden;
+  /* Not hidden: where the text needs more room than the shape gives (a
+     narrow column), the card grows instead of cutting it off. */
   padding: 14% 12% 12%;
   border-radius: var(--radius-cover);
   background: linear-gradient(150deg, hsl(var(--h) 75% 94%), hsl(calc(var(--h) + 40) 70% 86%));

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch, type ComponentPublicInstance } from 'vue'
-import { rememberPosts } from '../api'
+import { meta, rememberPosts } from '../api'
 import { COVER_DEFAULT, textCoverRatio } from '../format'
 import type { Page, PostCard } from '../types'
 import FeedCard from './FeedCard.vue'
@@ -35,19 +35,18 @@ const aspects = new Map<number, number>()
 const PRELOAD_PX = 1200
 const IMPRESSION_MS = 600
 
+/** Two on a phone, then one more per 320px from 640px wide, up to the
+ *  site's `[server] columns`. */
 function columnCount(w: number) {
-  if (w < 640) return 2
-  if (w < 960) return 3
-  if (w < 1280) return 4
-  if (w < 1600) return 5
-  return 6
+  const max = meta.value?.columns ?? 6
+  return Math.max(1, Math.min(max, w < 640 ? 2 : 3 + Math.floor((w - 640) / 320)))
 }
 function gap(w: number) {
   return w < 640 ? 6 : 16
 }
 
 function estimate(p: PostCard, colWidth: number) {
-  const ratio = p.cover ? (aspects.get(p.id) ?? COVER_DEFAULT) : textCoverRatio(p.id)
+  const ratio = p.cover ? (aspects.get(p.id) ?? COVER_DEFAULT) : textCoverRatio(p)
   const charsPerLine = Math.max(1, Math.floor((colWidth - 8) / 14))
   const titleLines = p.title.length > charsPerLine ? 2 : 1
   return colWidth * ratio + titleLines * 20 + 48
@@ -195,6 +194,14 @@ onBeforeUnmount(() => {
   intersectionObserver?.disconnect()
   resetImpressions()
 })
+
+// The setting arrives with the site's meta, possibly after the first cards.
+watch(
+  () => meta.value?.columns,
+  () => {
+    if (items.length) place([], true)
+  },
+)
 
 watch(
   () => props.resetKey,

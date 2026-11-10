@@ -44,7 +44,7 @@ function onLoad(e: Event) {
           @error="failed = true"
         />
       </div>
-      <TextCover v-else :post="post" :ratio="textCoverRatio(post.id)" />
+      <TextCover v-else :post="post" :ratio="textCoverRatio(post)" />
       <h3 class="title">{{ post.title }}</h3>
     </RouterLink>
     <footer class="foot">
