@@ -217,12 +217,13 @@ function ahead(url: string, title: string, delay?: number) {
               target="_blank"
               rel="noopener"
               class="btn btn-primary read"
+              :title="post.blog.framable === false ? '这个网站不允许被嵌入别的页面，会在新标签页打开' : undefined"
               @pointerenter="ahead(post.url, post.title)"
               @pointerleave="readerIntentEnd"
               @focus="ahead(post.url, post.title)"
               @pointerdown="ahead(post.url, post.title, 0)"
               @click="openBeside($event, post.url, post.title)"
-              >阅读原文 ↗</a
+              >{{ post.blog.framable === false ? '阅读原文（新标签页）' : '阅读原文' }} ↗</a
             >
           </footer>
         </section>

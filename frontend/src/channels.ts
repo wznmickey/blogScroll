@@ -81,10 +81,11 @@ export interface Hide {
   noComments: boolean
 }
 
+/** Shown as what is kept: ticking 有图 leaves out the posts without a picture. */
 export const HIDE_CHOICES: { key: keyof Hide; label: string; title: string }[] = [
-  { key: 'noCover', label: '无图', title: '没有配图的文章' },
-  { key: 'shortExcerpt', label: '短摘要', title: '摘要不到 50 字的文章，只留长摘要' },
-  { key: 'noComments', label: '0 评论', title: '没有评论的文章（也包括不知道评论数的）' },
+  { key: 'noCover', label: '有图', title: '只看有配图的文章' },
+  { key: 'shortExcerpt', label: '长摘要', title: '只看摘要至少 50 字的文章' },
+  { key: 'noComments', label: '有评论', title: '只看有评论的文章（不知道评论数的也不显示）' },
 ]
 
 export const anyHidden = (h: Hide) => h.noCover || h.shortExcerpt || h.noComments

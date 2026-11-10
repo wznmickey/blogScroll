@@ -1,8 +1,8 @@
 <script setup lang="ts">
 // The home page's channel bar. Pinned channels stay at the left; the rest
 // scroll sideways (swipe, mouse wheel, drag, or the arrows on a desktop).
-// The checkboxes leave posts out of every channel (无图, 短摘要, 0 评论), in
-// any combination. The ▾ button opens the manager: reorder, pin, hide, add
+// The checkboxes keep only posts with a picture, a long excerpt or comments,
+// in any combination and in every channel. The ▾ button opens the manager: reorder, pin, hide, add
 // channels (categories, types, tags).
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { tagsInfo } from '../api'
@@ -123,11 +123,11 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
           </svg>
         </button>
       </div>
-      <div class="filters" role="group" aria-label="过滤掉这些文章">
+      <div class="filters" role="group" aria-label="只看这些文章">
         <svg class="funnel" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true">
           <path d="M4 5h16l-6 7.5V19l-4 1.5v-8z" />
         </svg>
-        <label v-for="c in HIDE_CHOICES" :key="c.key" class="check" :class="{ on: prefs.hide[c.key] }" :title="`过滤掉${c.title}`">
+        <label v-for="c in HIDE_CHOICES" :key="c.key" class="check" :class="{ on: prefs.hide[c.key] }" :title="c.title">
           <input v-model="prefs.hide[c.key]" type="checkbox" />
           <svg v-if="prefs.hide[c.key]" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="m5 12 5 5 9-10" />
