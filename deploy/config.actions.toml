@@ -3,6 +3,10 @@
 # intervals and backoff survive exactly as on a long-running server.
 # Set the User-Agent with the FEED_USER_AGENT repository variable.
 
+[server]
+# Bloggers are pointed here to ask for changes (「我的 → 我的博客」).
+repo = "https://github.com/wznmickey/blogScroll"
+
 [server.maintainer]
 name = "静静"
 url = "https://wznmickey.com/"

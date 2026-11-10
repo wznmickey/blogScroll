@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // Saves, likes, history, 刷到过 (shown on screen, opened or not) and followed
-// blogs, all kept in this browser, plus backup and restore of them.
+// blogs, all kept in this browser, plus backup and restore of them; and, for
+// bloggers, how crawling their own blog goes.
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
@@ -8,17 +9,18 @@ import { downloadBackup, parseBackup, restoreBackup, type Backup } from '../back
 import BlogAvatar from '../components/BlogAvatar.vue'
 import ChipBar, { type Chip } from '../components/ChipBar.vue'
 import FollowButton from '../components/FollowButton.vue'
+import MyBlog from '../components/MyBlog.vue'
 import Waterfall from '../components/Waterfall.vue'
 import { follows } from '../follow'
 import { hostOf } from '../format'
 import { clear, entries, LIST_LABELS, searchList, setSettings, settings, type ListName } from '../library'
 import type { BlogSummary, Page, PostCard } from '../types'
 
-type Tab = ListName | 'follows' | 'backup'
+type Tab = ListName | 'follows' | 'backup' | 'blog'
 
 const route = useRoute()
 const router = useRouter()
-const TABS: Tab[] = ['saves', 'likes', 'history', 'seen', 'follows', 'backup']
+const TABS: Tab[] = ['saves', 'likes', 'history', 'seen', 'follows', 'backup', 'blog']
 const tab = computed<Tab>(() => (TABS.includes(route.query.tab as Tab) ? (route.query.tab as Tab) : 'saves'))
 const isList = computed(() => tab.value in LIST_LABELS)
 
@@ -35,6 +37,7 @@ const chips = computed<Chip[]>(() => [
   { value: 'seen', label: '刷到过', count: lists.seen.value.length },
   { value: 'follows', label: '关注', count: follows.value.length },
   { value: 'backup', label: '备份与恢复' },
+  { value: 'blog', label: '我的博客' },
 ])
 
 function setTab(t: string) {
@@ -197,6 +200,8 @@ const exportedAt = (b: Backup) => (b.exported_at ? new Date(b.exported_at).toLoc
         </li>
       </ul>
     </template>
+
+    <MyBlog v-else-if="tab === 'blog'" :initial="Number(route.query.blog) || null" />
 
     <section v-else class="backup">
       <div class="card">

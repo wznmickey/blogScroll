@@ -20,6 +20,9 @@ pub struct AppState {
     pub maintainer: Option<crate::config::Maintainer>,
     /// Waterfall columns on the widest screens.
     pub columns: u32,
+    /// The source repository, and the config file in it (`[server] repo`).
+    pub repo: Option<String>,
+    pub repo_config: String,
 }
 
 impl AppState {
@@ -212,9 +215,17 @@ struct Meta {
     maintainer: Option<MaintainerInfo>,
     /// Waterfall columns on the widest screens (`[server] columns`).
     columns: u32,
+    /// Where bloggers ask for changes: the source repository and its config file.
+    repo: Option<RepoInfo>,
     stats: Stats,
     /// When this answer was produced; tells static exports' readers how fresh they are.
     generated_at: i64,
+}
+
+#[derive(Serialize)]
+struct RepoInfo {
+    url: String,
+    config_path: String,
 }
 
 #[derive(Serialize)]
@@ -282,6 +293,10 @@ async fn meta(State(st): State<AppState>) -> ApiResult<Meta> {
         directories: st.directories.to_vec(),
         maintainer,
         columns: st.columns,
+        repo: st.repo.as_ref().map(|url| RepoInfo {
+            url: url.trim_end_matches('/').to_string(),
+            config_path: st.repo_config.clone(),
+        }),
         stats,
         generated_at: crate::util::now(),
     }))
@@ -669,7 +684,7 @@ macro_rules! post_columns {
      p.published_at, p.sort_at, p.undated,
      (p.content_html IS NOT NULL) AS has_full_text, p.comment_count, p.comments_url,
      b.id AS blog_id, b.name AS blog_name, b.homepage_url AS blog_homepage,
-     COALESCE(b.avatar_url, b.icon_url) AS blog_icon,
+     COALESCE(b.avatar_custom, b.avatar_url, b.icon_url) AS blog_icon,
      (SELECT json_group_array(DISTINCT bt.tag) FROM blog_tags bt WHERE bt.blog_id = b.id) AS blog_tags,
      COALESCE(b.kind, b.detected_kind, 'blog') AS blog_kind, b.framable AS blog_framable"
     };
@@ -1322,8 +1337,8 @@ impl BlogSummary {
 
 macro_rules! blog_summary_sql {
     () => {
-        "SELECT b.id, b.name, b.homepage_url AS homepage, COALESCE(b.avatar_url, b.icon_url) AS icon,
-            NULLIF(b.description, b.name) AS description,
+        "SELECT b.id, b.name, b.homepage_url AS homepage, COALESCE(b.avatar_custom, b.avatar_url, b.icon_url) AS icon,
+            COALESCE(b.description_custom, NULLIF(b.description, b.name)) AS description,
             (SELECT COUNT(*) FROM posts p WHERE p.blog_id = b.id) AS post_count,
             (SELECT MAX(p.sort_at) FROM posts p WHERE p.blog_id = b.id AND p.undated = 0) AS last_post_at,
             (b.last_success_at IS NOT NULL) AS has_feed,
@@ -1360,7 +1375,7 @@ async fn list_blogs(State(st): State<AppState>, Query(q): Query<BlogQuery>) -> A
         visible!(),
         "
            AND (?1 IS NULL OR b.name LIKE ?1 ESCAPE '\\' OR b.homepage_url LIKE ?1 ESCAPE '\\'
-                OR b.description LIKE ?1 ESCAPE '\\' OR b.about_text LIKE ?1 ESCAPE '\\'
+                OR COALESCE(b.description_custom, b.description) LIKE ?1 ESCAPE '\\' OR b.about_text LIKE ?1 ESCAPE '\\'
                 OR EXISTS (SELECT 1 FROM json_each(b.categories) jc
                            WHERE json_extract(jc.value, '$.id') IN (SELECT value FROM json_each(?8))))
            AND (?4 IS NULL OR EXISTS (SELECT 1 FROM blog_tags bt WHERE bt.blog_id = b.id AND bt.tag = ?4))
@@ -1374,7 +1389,7 @@ async fn list_blogs(State(st): State<AppState>, Query(q): Query<BlogQuery>) -> A
                 WHEN b.name LIKE ?7 ESCAPE '\\' THEN 1
                 WHEN b.name LIKE ?1 ESCAPE '\\' THEN 2
                 WHEN b.homepage_url LIKE ?1 ESCAPE '\\' THEN 3
-                WHEN b.description LIKE ?1 ESCAPE '\\' THEN 4
+                WHEN COALESCE(b.description_custom, b.description) LIKE ?1 ESCAPE '\\' THEN 4
                 ELSE 5 END,
            CASE WHEN ?5 = 'name' THEN b.name END COLLATE NOCASE,
            CASE WHEN ?5 = 'posts' THEN post_count END DESC,
@@ -1421,6 +1436,36 @@ pub struct BlogDetail {
     about_html: Option<String>,
     /// The author allowed their comment widget here.
     comments_embedded: bool,
+    /// How crawling this blog goes, for its author to check.
+    crawl: CrawlStatus,
+}
+
+/// What the crawler knows about a blog, and what the site's config sets.
+#[derive(Debug, Serialize, FromRow)]
+pub struct CrawlStatus {
+    feed_url: Option<String>,
+    /// `directory` (listed there), `discovered` (found on the site) or
+    /// `manual` (set in the config).
+    feed_origin: Option<String>,
+    last_checked_at: Option<i64>,
+    last_success_at: Option<i64>,
+    next_check_at: i64,
+    /// Failed checks in a row, and the last error.
+    failures: i64,
+    last_error: Option<String>,
+    /// Last search for a feed, for blogs without one.
+    discovery_at: Option<i64>,
+    /// When the homepage and about page were last read.
+    profile_at: Option<i64>,
+    /// The picture found on the site, and the feed's own image.
+    found_avatar: Option<String>,
+    feed_image: Option<String>,
+    /// The about page that is read: the configured one, else the one found.
+    about_page: Option<String>,
+    /// Which settings come from the site's config, e.g. `avatar`, `social`,
+    /// `full_text`.
+    #[sqlx(skip)]
+    configured: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1448,18 +1493,52 @@ async fn get_blog(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<
         generator: Option<String>,
         comment_system: Option<String>,
         embed_comments: bool,
+        tags_custom: Option<String>,
+        configured: String,
     }
-    // The author's own introduction wins over anything read from their page.
+    // What the author set in the config wins over anything read from their page.
     let extra: Extra = sqlx::query_as(
         "SELECT content_policy = 'full_text' AS full_text, about_url,
                 COALESCE(about_custom, about_text) AS about_text,
                 CASE WHEN about_full = 1 AND about_custom IS NULL THEN about_html END AS about_html,
-                social_links, generator, comment_system, embed_comments
+                COALESCE(social_custom, social_links) AS social_links, generator, comment_system, embed_comments,
+                tags_custom,
+                concat_ws(' ',
+                    CASE WHEN avatar_custom IS NOT NULL THEN 'avatar' END,
+                    CASE WHEN description_custom IS NOT NULL THEN 'description' END,
+                    CASE WHEN social_custom IS NOT NULL THEN 'social' END,
+                    CASE WHEN tags_custom IS NOT NULL THEN 'tags' END,
+                    CASE WHEN about_page IS NOT NULL OR about_custom IS NOT NULL OR about_full = 1 THEN 'about' END,
+                    CASE WHEN feed_url_origin = 'manual' THEN 'feed' END,
+                    CASE WHEN content_policy = 'full_text' THEN 'full_text' END,
+                    CASE WHEN embed_comments = 1 THEN 'comments' END) AS configured
          FROM blogs WHERE id = ?",
     )
     .bind(id)
     .fetch_one(&st.pool)
     .await?;
+    let mut crawl: CrawlStatus = sqlx::query_as(
+        "SELECT feed_url, feed_url_origin AS feed_origin, last_checked_at, last_success_at, next_check_at,
+                failures, last_error, discovery_at, profile_at, avatar_url AS found_avatar, icon_url AS feed_image,
+                COALESCE(about_page, about_url) AS about_page
+         FROM blogs WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_one(&st.pool)
+    .await?;
+    crawl.configured = [
+        "avatar",
+        "description",
+        "social",
+        "tags",
+        "about",
+        "feed",
+        "full_text",
+        "comments",
+    ]
+    .into_iter()
+    .filter(|k| extra.configured.split(' ').any(|c| c == *k))
+    .collect();
     let dirs: Vec<String> =
         sqlx::query_scalar("SELECT directory FROM directory_entries WHERE blog_id = ? AND active = 1")
             .bind(id)
@@ -1472,7 +1551,7 @@ async fn get_blog(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<
             directory,
         })
         .collect();
-    let top_tags: Vec<String> = sqlx::query_scalar(
+    let found_tags: Vec<String> = sqlx::query_scalar(
         "SELECT COALESCE(l.label, pt.term)
          FROM post_terms pt JOIN posts p ON p.id = pt.post_id
          LEFT JOIN tag_labels l ON l.term = pt.term
@@ -1484,6 +1563,10 @@ async fn get_blog(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<
     .bind(id)
     .fetch_all(&st.pool)
     .await?;
+    let top_tags = match extra.tags_custom.as_deref() {
+        Some(t) => serde_json::from_str(t).unwrap_or_default(),
+        None => found_tags,
+    };
     Ok(Json(BlogDetail {
         summary,
         full_text: extra.full_text,
@@ -1500,6 +1583,7 @@ async fn get_blog(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<
         top_tags,
         about_html: extra.about_html,
         comments_embedded: extra.embed_comments,
+        crawl,
     }))
 }
 
@@ -1586,6 +1670,8 @@ pub(crate) mod tests {
                 url: Some("https://b2.example/".into()),
             }),
             columns: 6,
+            repo: Some("https://github.com/example/blogscroll".into()),
+            repo_config: "deploy/config.actions.toml".into(),
         }
     }
 
@@ -1923,6 +2009,68 @@ pub(crate) mod tests {
         assert_eq!(b["kind"]["id"], "blog");
         assert_eq!(b["kind"]["label"], "博客");
         assert!(b["top_tags"].as_array().unwrap().iter().any(|t| t == "旅行"));
+    }
+
+    #[tokio::test]
+    async fn profile_settings_replace_what_was_found_and_crawl_status_shows() {
+        let st = seeded().await;
+        let (_, m) = get_json(&st, "/api/meta").await;
+        assert_eq!(m["repo"]["url"], "https://github.com/example/blogscroll");
+        assert_eq!(m["repo"]["config_path"], "deploy/config.actions.toml");
+
+        sqlx::query(
+            "UPDATE blogs SET avatar_url = 'https://b1.example/found.png', description = '找到的简介',
+                social_links = '[{\"kind\":\"github\",\"url\":\"https://github.com/found\"}]',
+                feed_url = 'https://b1.example/feed', last_error = 'HTTP 500', failures = 2
+             WHERE id = 1",
+        )
+        .execute(&st.pool)
+        .await
+        .unwrap();
+        let mut cfg = crate::config::Config::default();
+        cfg.policy.profile = vec![crate::config::ProfilePolicy {
+            site: "https://b1.example/".into(),
+            avatar: Some("https://img.example/me.png".into()),
+            description: Some("  博主自己写的一句话 ".into()),
+            social: Some(vec![
+                "https://x.com/me".into(),
+                "https://me.example/".into(),
+                "not a url".into(),
+            ]),
+            tags: Some(vec!["Rust".into(), " 摄影 ".into()]),
+            note: String::new(),
+        }];
+        crate::db::apply_policy(&st.pool, &cfg).await.unwrap();
+        let (_, b) = get_json(&st, "/api/blogs/1").await;
+        assert_eq!(b["icon"], "https://img.example/me.png");
+        assert_eq!(b["description"], "博主自己写的一句话");
+        assert_eq!(
+            b["social"],
+            json!([{"kind": "x", "url": "https://x.com/me"}, {"kind": "link", "url": "https://me.example/"}])
+        );
+        assert_eq!(b["top_tags"], json!(["Rust", "摄影"]));
+        let c = &b["crawl"];
+        assert_eq!(c["configured"], json!(["avatar", "description", "social", "tags"]));
+        assert_eq!(
+            c["found_avatar"], "https://b1.example/found.png",
+            "what was found stays"
+        );
+        assert_eq!(
+            (c["feed_url"].clone(), c["failures"].clone()),
+            (json!("https://b1.example/feed"), json!(2))
+        );
+        assert_eq!(c["last_error"], "HTTP 500");
+        let (_, v) = get_json(&st, "/api/posts?blog=1&limit=1").await;
+        assert_eq!(v["items"][0]["blog"]["icon"], "https://img.example/me.png", "cards too");
+
+        // Taken out of the config: what was found is shown again.
+        cfg.policy.profile.clear();
+        crate::db::apply_policy(&st.pool, &cfg).await.unwrap();
+        let (_, b) = get_json(&st, "/api/blogs/1").await;
+        assert_eq!(b["icon"], "https://b1.example/found.png");
+        assert_eq!(b["description"], "找到的简介");
+        assert_eq!(b["social"][0]["url"], "https://github.com/found");
+        assert_eq!(b["crawl"]["configured"], json!([]));
     }
 
     #[tokio::test]

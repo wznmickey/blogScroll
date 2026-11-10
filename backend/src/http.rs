@@ -139,6 +139,25 @@ pub const ACCEPT_FEED: &str = "application/rss+xml, application/atom+xml, applic
      application/xml;q=0.9, text/xml;q=0.9, */*;q=0.5";
 pub const ACCEPT_HTML: &str = "text/html, application/xhtml+xml;q=0.9, */*;q=0.5";
 pub const ACCEPT_JSON: &str = "application/json, */*;q=0.5";
+pub const ACCEPT_IMAGE: &str = "image/avif, image/webp, image/png, image/svg+xml, image/*;q=0.8, */*;q=0.5";
+
+/// Whether a body is a picture, by its first bytes (servers often send
+/// pictures as `application/octet-stream`, and error pages as 200).
+pub fn looks_like_image(body: &[u8]) -> bool {
+    let starts = |magic: &[u8]| body.starts_with(magic);
+    starts(b"\x89PNG")
+        || starts(b"\xFF\xD8\xFF")
+        || starts(b"GIF8")
+        || (starts(b"RIFF") && body.get(8..12) == Some(&b"WEBP"[..]))
+        || starts(b"\0\0\x01\0")
+        || starts(b"BM")
+        || body.get(4..8) == Some(&b"ftyp"[..])
+        || {
+            // SVG: text with an <svg element near the start.
+            let head = String::from_utf8_lossy(&body[..body.len().min(1024)]).to_ascii_lowercase();
+            head.trim_start_matches('\u{feff}').trim_start().starts_with('<') && head.contains("<svg")
+        }
+}
 
 pub struct PoliteClient {
     client: reqwest::Client,
@@ -309,6 +328,20 @@ fn parse_retry_after(value: &str) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pictures_are_told_by_their_first_bytes() {
+        assert!(looks_like_image(b"\x89PNG\r\n\x1a\n...."));
+        assert!(looks_like_image(b"\xFF\xD8\xFF\xE0..JFIF"));
+        assert!(looks_like_image(b"RIFF\0\0\0\0WEBPVP8 "));
+        assert!(looks_like_image(b"\0\0\0\x1cftypavif"));
+        assert!(looks_like_image(b"\0\0\x01\0\x01\0"), "an .ico");
+        assert!(looks_like_image(
+            b"<?xml version=\"1.0\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"
+        ));
+        assert!(!looks_like_image(b"<!doctype html><html><body>Not found</body></html>"));
+        assert!(!looks_like_image(b"Couldn't find the requested file."));
+    }
 
     #[test]
     fn retry_after_forms() {

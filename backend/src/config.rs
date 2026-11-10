@@ -61,8 +61,13 @@ pub struct ServerConfig {
     /// Who runs the site; shown on the about page.
     pub maintainer: Option<Maintainer>,
     /// Columns of the waterfall on the widest screens (1–12); narrower
-    /// screens get fewer, down to two on a phone.
+    /// screens get fewer, down to two on a phone. Readers can choose their own.
     pub columns: u32,
+    /// The site's source repository (`https://github.com/<owner>/<repo>`):
+    /// bloggers are pointed there to ask for changes (issues, pull requests).
+    pub repo: Option<String>,
+    /// The config file a pull request should change, relative to the repo.
+    pub repo_config: String,
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
@@ -83,6 +88,8 @@ impl Default for ServerConfig {
             api_cache_entries: 512,
             maintainer: None,
             columns: 6,
+            repo: None,
+            repo_config: "deploy/config.actions.toml".into(),
         }
     }
 }
@@ -243,6 +250,30 @@ pub struct PolicyConfig {
     pub feed_overrides: Vec<FeedOverride>,
     /// About-page settings an author asked for.
     pub about: Vec<AboutPolicy>,
+    /// What an author asked to be shown instead of what was found on their
+    /// site: picture, introduction, accounts, tags.
+    pub profile: Vec<ProfilePolicy>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfilePolicy {
+    pub site: String,
+    /// The blog's picture (an image URL).
+    #[serde(default)]
+    pub avatar: Option<String>,
+    /// A one-line introduction, instead of the homepage's description.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// The author's accounts, instead of the links found (profile URLs; the
+    /// platform is recognised from each).
+    #[serde(default)]
+    pub social: Option<Vec<String>>,
+    /// The blog's tags (标签), instead of those its posts use most.
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    #[serde(default)]
+    pub note: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -327,6 +358,10 @@ mod tests {
         }
         let actions = Config::load(Path::new("../deploy/config.actions.toml")).unwrap();
         assert_eq!(actions.server.maintainer.unwrap().name, "静静");
+        assert_eq!(
+            actions.server.repo.as_deref(),
+            Some("https://github.com/wznmickey/blogScroll")
+        );
         assert!(actions.policy.about[0].full);
     }
 }

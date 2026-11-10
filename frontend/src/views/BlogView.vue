@@ -92,6 +92,7 @@ const engine = computed(() => blog.value?.generator?.split(/\s+/)[0] ?? null)
           <span><b>{{ blog.post_count }}</b> 篇文章</span>
           <span v-if="blog.last_post_at">最近更新 {{ relativeTime(blog.last_post_at) }}</span>
           <span v-if="!blog.has_feed">暂未找到 RSS</span>
+          <RouterLink :to="{ path: '/me', query: { tab: 'blog', blog: blog.id } }" class="mine">这是你的博客？查看抓取情况</RouterLink>
         </p>
       </div>
     </section>
@@ -267,6 +268,12 @@ h1 {
 }
 .stats b {
   color: var(--text);
+}
+.stats .mine {
+  color: var(--text-3);
+}
+.stats .mine:hover {
+  color: var(--link);
 }
 .missing {
   margin: 48px 0;

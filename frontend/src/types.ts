@@ -95,6 +95,8 @@ export interface Meta {
   maintainer?: { name: string; url: string | null; blog: { id: number; name: string } | null } | null
   /** Waterfall columns on the widest screens (`[server] columns`). */
   columns?: number
+  /** Where bloggers ask for changes: the source repository and its config file. */
+  repo?: { url: string; config_path: string } | null
   stats: {
     blogs: number
     blogs_with_feed: number
@@ -147,6 +149,28 @@ export interface BlogDetail extends BlogSummary {
   /** The whole about page (sanitised HTML), when the author asked for it. */
   about_html?: string | null
   comments_embedded?: boolean
+  /** How crawling goes, for the blog's author to check (absent from older servers). */
+  crawl?: CrawlStatus
+}
+
+export interface CrawlStatus {
+  feed_url: string | null
+  /** `directory` (listed there), `discovered` (found on the site) or `manual` (set in the config). */
+  feed_origin: string | null
+  last_checked_at: number | null
+  last_success_at: number | null
+  next_check_at: number
+  failures: number
+  last_error: string | null
+  /** Last search for a feed, for blogs without one. */
+  discovery_at: number | null
+  /** When the homepage and about page were last read. */
+  profile_at: number | null
+  found_avatar: string | null
+  feed_image: string | null
+  about_page: string | null
+  /** Settings from the site's config: avatar, description, social, tags, about, feed, full_text, comments. */
+  configured: string[]
 }
 
 export interface TagCount {

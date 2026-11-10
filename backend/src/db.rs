@@ -272,6 +272,53 @@ pub async fn apply_policy(pool: &SqlitePool, cfg: &Config) -> sqlx::Result<()> {
         .execute(&mut *tx)
         .await?;
     }
+    // Profile settings: shown instead of what was found, which is kept.
+    sqlx::query(
+        "UPDATE blogs SET avatar_custom = NULL, description_custom = NULL, social_custom = NULL, tags_custom = NULL
+         WHERE avatar_custom IS NOT NULL OR description_custom IS NOT NULL OR social_custom IS NOT NULL
+            OR tags_custom IS NOT NULL",
+    )
+    .execute(&mut *tx)
+    .await?;
+    for p in &cfg.policy.profile {
+        let Some(k) = site_key(&p.site) else {
+            tracing::warn!(site = %p.site, "ignoring unparsable site in [[policy.profile]]");
+            continue;
+        };
+        let text = |t: &Option<String>| {
+            t.as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_string)
+        };
+        let avatar = text(&p.avatar).filter(|u| {
+            let ok = url::Url::parse(u).is_ok_and(|u| matches!(u.scheme(), "http" | "https"));
+            if !ok {
+                tracing::warn!(site = %p.site, avatar = %u, "ignoring an avatar that is not an http(s) URL");
+            }
+            ok
+        });
+        let social = p.social.as_ref().map(|links| {
+            let links: Vec<_> = links.iter().filter_map(|u| crate::profile::social_link(u)).collect();
+            serde_json::to_string(&links).unwrap_or_else(|_| "[]".into())
+        });
+        let tags = p.tags.as_ref().map(|tags| {
+            let tags: Vec<&str> = tags.iter().map(|t| t.trim()).filter(|t| !t.is_empty()).collect();
+            serde_json::to_string(&tags).unwrap_or_else(|_| "[]".into())
+        });
+        tracing::info!(site = %p.site, note = %p.note, "profile settings");
+        sqlx::query(
+            "UPDATE blogs SET avatar_custom = ?, description_custom = ?, social_custom = ?, tags_custom = ?
+             WHERE site_key = ?",
+        )
+        .bind(avatar)
+        .bind(text(&p.description))
+        .bind(social)
+        .bind(tags)
+        .bind(&k)
+        .execute(&mut *tx)
+        .await?;
+    }
     // Withdrawn consent means the stored copies go too.
     sqlx::query("DELETE FROM posts WHERE blog_id IN (SELECT id FROM blogs WHERE excluded = 1)")
         .execute(&mut *tx)

@@ -15,7 +15,7 @@ use crate::discovery::{self, Page};
 use crate::feed;
 use crate::fulltext::FullTextExtractor;
 use crate::html;
-use crate::http::{ACCEPT_FEED, FetchError, Fetched, PoliteClient, Validators};
+use crate::http::{ACCEPT_FEED, ACCEPT_IMAGE, FetchError, Fetched, PoliteClient, Validators, looks_like_image};
 use crate::profile;
 use crate::sources::{Directory, DirectoryFetch};
 use crate::util::{jitter, now};
@@ -376,7 +376,9 @@ impl Crawler {
         }
         let social = serde_json::to_string(&social)?;
         let about_pictures = about.as_ref().map(|p| profile::pictures_from_page(&p.html, &p.url));
-        let avatar = profile::Pictures::pick(&info.pictures, about_pictures.as_ref(), blog.icon_url.is_some());
+        let candidates =
+            profile::Pictures::candidates(&info.pictures, about_pictures.as_ref(), blog.icon_url.is_some());
+        let avatar = self.first_working_picture(candidates).await;
         let system_json = system.as_ref().map(serde_json::to_string).transpose()?;
         db::save_profile(
             &self.pool,
@@ -396,6 +398,36 @@ impl Crawler {
         )
         .await?;
         Ok(system)
+    }
+
+    /// The first picture that loads as an image, one request each (a few at
+    /// most). An address with a doubled slash (`/gh//user/…`, a config slip
+    /// some CDNs answer with 400) is also tried tidied up. A picture that
+    /// cannot be reached at all (timeout, network) is taken: that says
+    /// nothing about the picture.
+    async fn first_working_picture(&self, candidates: Vec<Url>) -> Option<Url> {
+        for url in candidates.into_iter().take(4) {
+            let mut tries = vec![url.clone()];
+            if url.path().contains("//") {
+                let mut tidy = url.clone();
+                let mut path = url.path().to_string();
+                while path.contains("//") {
+                    path = path.replace("//", "/");
+                }
+                tidy.set_path(&path);
+                tries.push(tidy);
+            }
+            for u in tries {
+                match self.http.get(&u, ACCEPT_IMAGE, None).await {
+                    Ok(Fetched::Ok { body, .. }) if looks_like_image(&body) => return Some(u),
+                    Err(FetchError::Network(_) | FetchError::TooLarge(_)) => return Some(u),
+                    Ok(_) | Err(FetchError::Status { .. }) => {
+                        tracing::debug!(picture = %u, "not a picture; trying the next");
+                    }
+                }
+            }
+        }
+        None
     }
 
     async fn refresh_comment_counts(&self, blog: &BlogRow, sys: &CommentSystem, every: i64) -> anyhow::Result<()> {

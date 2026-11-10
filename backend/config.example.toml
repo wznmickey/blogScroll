@@ -10,6 +10,10 @@ api_cache_entries = 512
 # Columns of the waterfall on the widest screens (1–12). Narrower screens get
 # fewer (one more per 320px from 640px wide), two on a phone.
 columns = 6
+# The site's source repository: 「我的 → 我的博客」 points bloggers there to
+# ask for changes (an issue, or a pull request editing repo_config).
+# repo = "https://github.com/you/blogscroll"
+# repo_config = "deploy/config.actions.toml"
 # Who runs the site, shown on the about page (with a link to their blog).
 # [server.maintainer]
 # name = "你的名字"
@@ -99,6 +103,18 @@ exclude = [
 # full = true
 # text = "自己写的介绍，可以多行。"
 # note = "Asked by email, 2026-11-10"
+
+# What an author asked to be shown instead of what was found on their site.
+# Every key is optional; what is found stays stored, so removing a key brings
+# it back. social replaces the links found (the platform is recognised from
+# each URL); tags replaces the tags shown for the blog (标签).
+# [[policy.profile]]
+# site = "https://example.com"
+# avatar = "https://example.com/me.png"
+# description = "一句话介绍"
+# social = ["https://github.com/someone", "https://x.com/someone"]
+# tags = ["Rust", "摄影"]
+# note = "Asked in issue #12"
 
 # Hand-set feed URLs (skips discovery for that blog).
 # [[policy.feed_overrides]]

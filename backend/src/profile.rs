@@ -81,18 +81,29 @@ pub struct Pictures {
 }
 
 impl Pictures {
-    /// The blog's picture: the author's (on the homepage, else the about
-    /// page), else the site's touch icon, else their GitHub avatar. A favicon
-    /// only when the feed has no image of its own, which is shown instead.
-    pub fn pick(home: &Pictures, about: Option<&Pictures>, feed_has_image: bool) -> Option<Url> {
+    /// What could be the blog's picture, best first (the crawler takes the
+    /// first that loads): the author's (on the homepage, else the about
+    /// page), the site's touch icon, their GitHub avatar, and a favicon only
+    /// when the feed has no image of its own, which is shown instead.
+    pub fn candidates(home: &Pictures, about: Option<&Pictures>, feed_has_image: bool) -> Vec<Url> {
         let about = about.cloned().unwrap_or_default();
-        home.author
-            .clone()
-            .or(about.author)
-            .or_else(|| home.touch_icon.clone())
-            .or_else(|| home.github.clone())
-            .or(about.github)
-            .or_else(|| (!feed_has_image).then(|| home.favicon.clone()).flatten())
+        let mut out: Vec<Url> = Vec::new();
+        for u in [
+            home.author.clone(),
+            about.author,
+            home.touch_icon.clone(),
+            home.github.clone(),
+            about.github,
+            home.favicon.clone().filter(|_| !feed_has_image),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !out.contains(&u) {
+                out.push(u);
+            }
+        }
+        out
     }
 }
 
@@ -382,6 +393,18 @@ fn about_link(doc: &Html, base: &Url) -> Option<Url> {
         .find(|(_, sure)| *sure)
         .or(candidates.first())
         .map(|(u, _)| u.clone())
+}
+
+/// A profile URL given by hand (`[[policy.profile]] social`): its platform
+/// when it is one we know, else a plain link.
+pub fn social_link(url: &str) -> Option<SocialLink> {
+    let parsed = Url::parse(url.trim())
+        .ok()
+        .filter(|u| matches!(u.scheme(), "http" | "https"))?;
+    Some(SocialLink {
+        kind: social_kind(&parsed).unwrap_or_else(|| "link".into()),
+        url: parsed.to_string(),
+    })
 }
 
 /// Social links on any page (the homepage or the about page), to be merged:
@@ -868,7 +891,7 @@ mod tests {
         let h = from_home(page, &base);
         assert_eq!(h.about.unwrap().as_str(), "https://b.example/s/about");
         assert_eq!(
-            Pictures::pick(&h.pictures, None, false).unwrap().as_str(),
+            Pictures::candidates(&h.pictures, None, false).first().unwrap().as_str(),
             "https://b.example/t.png"
         );
     }
@@ -952,15 +975,18 @@ mod tests {
             "https://b.example/icon-192.png",
             "the largest"
         );
-        assert_eq!(Pictures::pick(&p, None, false), p.github);
+        assert_eq!(Pictures::candidates(&p, None, false).first().cloned(), p.github);
 
         let no_github = Pictures {
             github: None,
             ..p.clone()
         };
-        assert_eq!(Pictures::pick(&no_github, None, false), p.favicon);
         assert_eq!(
-            Pictures::pick(&no_github, None, true),
+            Pictures::candidates(&no_github, None, false).first().cloned(),
+            p.favicon
+        );
+        assert_eq!(
+            Pictures::candidates(&no_github, None, true).first().cloned(),
             None,
             "the feed's image is shown instead"
         );
@@ -968,7 +994,10 @@ mod tests {
             author: Url::parse("https://b.example/me.jpg").ok(),
             ..Default::default()
         };
-        assert_eq!(Pictures::pick(&no_github, Some(&about), true), about.author);
+        assert_eq!(
+            Pictures::candidates(&no_github, Some(&about), true).first().cloned(),
+            about.author
+        );
         // Only from the author's own links: a theme credit is someone else.
         let p = from_home(
             r#"<footer><a href="https://github.com/themeauthor">them</a></footer>"#,
