@@ -64,6 +64,8 @@ pub struct BlogRow {
     /// From `[[policy.about]]`: the about page to read, and whether to keep all of it.
     pub about_page: Option<String>,
     pub about_full: bool,
+    /// The feed's own image, shown when the blog has no better picture.
+    pub icon_url: Option<String>,
 }
 
 impl BlogRow {
@@ -76,7 +78,7 @@ macro_rules! blog_columns {
     () => {
         "id, name, homepage_url, feed_url, feed_url_origin, content_policy, \
          etag, last_modified, refresh_secs, discovery_at, failures, content_hash, \
-         profile_at, comment_system, comments_next_at, from_feed_meta, framable, about_page, about_full"
+         profile_at, comment_system, comments_next_at, from_feed_meta, framable, about_page, about_full, icon_url"
     };
 }
 

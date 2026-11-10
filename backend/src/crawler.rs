@@ -375,6 +375,8 @@ impl Crawler {
             profile::merge_social(&mut social, profile::social_from_page(&p.html, &p.url));
         }
         let social = serde_json::to_string(&social)?;
+        let about_pictures = about.as_ref().map(|p| profile::pictures_from_page(&p.html, &p.url));
+        let avatar = profile::Pictures::pick(&info.pictures, about_pictures.as_ref(), blog.icon_url.is_some());
         let system_json = system.as_ref().map(serde_json::to_string).transpose()?;
         db::save_profile(
             &self.pool,
@@ -382,7 +384,7 @@ impl Crawler {
             now(),
             &db::Profile {
                 description: info.description.as_deref(),
-                avatar_url: info.avatar.as_ref().map(|u| u.as_str()),
+                avatar_url: avatar.as_ref().map(|u| u.as_str()),
                 about_url: about.as_ref().map(|p| p.url.as_str()),
                 about_text: about_text.as_deref(),
                 social_json: &social,

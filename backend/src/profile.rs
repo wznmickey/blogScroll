@@ -22,7 +22,7 @@ const MAX_PER_KIND: usize = 3;
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct HomeInfo {
     pub description: Option<String>,
-    pub avatar: Option<Url>,
+    pub pictures: Pictures,
     pub about: Option<Url>,
     pub social: Vec<SocialLink>,
     pub generator: Option<String>,
@@ -60,53 +60,259 @@ pub fn from_home(page: &str, base: &Url) -> HomeInfo {
         description: meta(&doc, &["description", "og:description", "twitter:description"])
             .and_then(|d| crate::clean::description(&d))
             .map(|d| truncate_chars(&redact(&d), DESCRIPTION_CHARS)),
-        avatar: avatar(&doc, base),
+        pictures: pictures(&doc, base),
         about: about_link(&doc, base),
         social: social_links(&doc, base),
         generator: meta(&doc, &["generator"]).map(|g| truncate_chars(&g, 40)),
     }
 }
 
-/// The author's picture as common themes render it, else the touch icon.
-/// Avatars elsewhere on a page often belong to commenters, so only
-/// header/sidebar author slots are trusted.
-fn avatar(doc: &Html, base: &Url) -> Option<Url> {
-    const SLOTS: &[&str] = &[
-        ".avatar-img img",         // Butterfly
-        ".author-info-avatar img", // AnZhiYu
-        "img.author-info__avatar", //
-        ".site-author-image",      // NexT
-        ".author-avatar img",      //
-        ".sidebar img.avatar",     //
-        "header img.avatar",       //
-        "#avatar img",             //
-        "img.site-avatar",         //
-        ".profile-avatar img",     //
-    ];
-    let img = |e: ElementRef| -> Option<Url> {
-        let v = e.value();
-        let src = v.attr("data-lazy-src").or(v.attr("data-src")).or(v.attr("src"))?;
-        html::resolve(src.trim(), Some(base)).filter(|u| matches!(u.scheme(), "http" | "https"))
-    };
-    for s in SLOTS {
-        if let Some(u) = doc.select(&sel(s)).find_map(img) {
-            return Some(u);
+/// Pictures that could stand for a blog, from the most to the least personal.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Pictures {
+    /// The author's picture in the theme's author card or sidebar.
+    pub author: Option<Url>,
+    /// The site's touch icon: its logo or the author's picture, usually 180px.
+    pub touch_icon: Option<Url>,
+    /// The avatar of the GitHub account among the author's own links.
+    pub github: Option<Url>,
+    /// The largest favicon the page declares.
+    pub favicon: Option<Url>,
+}
+
+impl Pictures {
+    /// The blog's picture: the author's (on the homepage, else the about
+    /// page), else the site's touch icon, else their GitHub avatar. A favicon
+    /// only when the feed has no image of its own, which is shown instead.
+    pub fn pick(home: &Pictures, about: Option<&Pictures>, feed_has_image: bool) -> Option<Url> {
+        let about = about.cloned().unwrap_or_default();
+        home.author
+            .clone()
+            .or(about.author)
+            .or_else(|| home.touch_icon.clone())
+            .or_else(|| home.github.clone())
+            .or(about.github)
+            .or_else(|| (!feed_has_image).then(|| home.favicon.clone()).flatten())
+    }
+}
+
+/// Pictures on any page (the homepage or the about page).
+pub fn pictures_from_page(page: &str, base: &Url) -> Pictures {
+    pictures(&Html::parse_document(page), base)
+}
+
+fn pictures(doc: &Html, base: &Url) -> Pictures {
+    Pictures {
+        author: author_picture(doc, base),
+        touch_icon: icons(doc, base, |rel| rel.starts_with("apple-touch-icon"))
+            .into_iter()
+            .next(),
+        github: social_candidates(doc, base)
+            .into_iter()
+            .find(|(s, own)| *own && s.kind == "github")
+            .and_then(|(s, _)| Url::parse(&format!("{}.png?size=160", s.url.trim_end_matches('/'))).ok()),
+        favicon: icons(doc, base, |rel| rel == "icon" || rel == "shortcut icon")
+            .into_iter()
+            .next(),
+    }
+}
+
+/// Icons declared with a matching `rel`, the largest first.
+fn icons(doc: &Html, base: &Url, rel: impl Fn(&str) -> bool) -> Vec<Url> {
+    let mut found: Vec<(u32, Url)> = doc
+        .select(&sel("link[rel][href]"))
+        .filter(|l| rel(&l.value().attr("rel").unwrap_or_default().trim().to_ascii_lowercase()))
+        .filter_map(|l| {
+            let url = html::resolve(l.value().attr("href")?.trim(), Some(base))?;
+            let size = match l.value().attr("sizes").map(str::to_ascii_lowercase) {
+                Some(s) if s == "any" => 512,
+                Some(s) => s.split(['x', ' ']).next().and_then(|n| n.parse().ok()).unwrap_or(0),
+                None => 0,
+            };
+            Some((size, url))
+        })
+        .filter(|(_, u)| usable_picture(u))
+        .collect();
+    found.sort_by_key(|(size, _)| std::cmp::Reverse(*size));
+    found.into_iter().map(|(_, u)| u).collect()
+}
+
+/// The author's picture as themes render it: the `<img>` that looks most
+/// like one. Pictures of other people (commenters, friends) and of no one
+/// (covers, wallpapers, logos, a theme's placeholder) are left out.
+fn author_picture(doc: &Html, base: &Url) -> Option<Url> {
+    let mut best: Option<(i32, Url)> = None;
+    for img in doc.select(&sel("img")) {
+        let score = author_score(&img);
+        if score < 3 || best.as_ref().is_some_and(|(s, _)| *s >= score) {
+            continue;
+        }
+        if let Some(url) = img_src(&img, base) {
+            best = Some((score, url));
         }
     }
-    let icon = |rel: &str| {
-        doc.select(&sel("link[rel][href]"))
-            .filter(|l| {
-                l.value()
-                    .attr("rel")
-                    .unwrap_or_default()
-                    .to_ascii_lowercase()
-                    .split_whitespace()
-                    .any(|r| r == rel)
-            })
-            .filter_map(|l| html::resolve(l.value().attr("href")?, Some(base)))
-            .next()
+    best.map(|(_, u)| u)
+}
+
+fn marks(e: &scraper::node::Element) -> String {
+    format!(
+        "{} {} {}",
+        e.name(),
+        e.attr("class").unwrap_or_default(),
+        e.attr("id").unwrap_or_default()
+    )
+    .to_ascii_lowercase()
+    // Tailwind's utilities say how, not what.
+    .replace("object-cover", "")
+    .replace("bg-cover", "")
+}
+
+/// How much an `<img>` looks like the author's picture; 3 or more counts.
+fn author_score(img: &ElementRef) -> i32 {
+    let v = img.value();
+    let alt = v.attr("alt").unwrap_or_default().to_lowercase();
+    let own = marks(v);
+    let up = |levels: usize| -> String {
+        img.ancestors()
+            .filter_map(ElementRef::wrap)
+            .take(levels)
+            .map(|a| marks(a.value()))
+            .collect::<Vec<_>>()
+            .join(" ")
     };
-    icon("apple-touch-icon")
+    let near = up(5);
+    let any = |hay: &str, words: &[&str]| words.iter().any(|w| hay.contains(w));
+    // Other people's pictures, however deep (a comment list's avatars).
+    const PEOPLE: &[&str] = &[
+        "comment",
+        "cmt",
+        "reply",
+        "respond",
+        "recent",
+        "visitor",
+        "friend",
+        "flink",
+        "link-card",
+        "links-card",
+        "link-img",
+        "chat",
+        "post",
+        "article",
+        "entry",
+    ];
+    // Pictures of no one. Only close by: page layouts use these words too
+    // ("no-banner-layout", "wallpaper-transparent").
+    const THINGS: &[&str] = &[
+        "thumbnail",
+        "cover",
+        "banner",
+        "background",
+        "wallpaper",
+        "music",
+        "song",
+        "playlist",
+        "donate",
+        "reward",
+        "sponsor",
+        "qrcode",
+        "badge",
+        "footer",
+        "copyright",
+    ];
+    let says_author = any(
+        &alt,
+        &["头像", "博主", "站长", "作者", "avatar", "profile image", "author"],
+    );
+    if any(&up(10), PEOPLE) || any(&own, PEOPLE) || (!says_author && (any(&up(3), THINGS) || any(&own, THINGS))) {
+        return 0;
+    }
+    let mut score = 0;
+    if says_author {
+        score += 3;
+    }
+    if any(&own, &["avatar", "author", "profile", "portrait"]) {
+        score += 2;
+    }
+    if any(&near, &["avatar"]) {
+        score += 2;
+    }
+    if any(
+        &near,
+        &[
+            "author",
+            "profile",
+            "blogger",
+            "sideuser",
+            "user-info",
+            "userinfo",
+            "about-me",
+        ],
+    ) {
+        score += 2;
+    }
+    if any(&near, &["sidebar", "aside", "header", "nav", "drawer"]) {
+        score += 1;
+    }
+    // A logo is the site's, and often a word mark that a round crop ruins.
+    if any(&alt, &["logo"]) || any(&own, &["logo", "brand"]) {
+        score -= 2;
+    }
+    score
+}
+
+/// The picture an `<img>` shows once lazy loading is done: the first of
+/// its sources that is not a placeholder.
+fn img_src(img: &ElementRef, base: &Url) -> Option<Url> {
+    let v = img.value();
+    [
+        "data-lazy-src",
+        "data-src",
+        "data-original",
+        "data-lazy",
+        "lazy-src",
+        "data-srcset",
+        "src",
+        "srcset",
+    ]
+    .iter()
+    .filter_map(|a| v.attr(a))
+    // A srcset's first candidate.
+    .filter_map(|s| s.split(',').next()?.split_whitespace().next())
+    .filter_map(|s| html::resolve(s, Some(base)))
+    .find(usable_picture)
+}
+
+/// Not a placeholder: a spinner, a blank, a theme's or plugin's default
+/// picture (their assets live under `/themes/` and `/plugins/`), an empty QQ
+/// avatar.
+fn usable_picture(url: &Url) -> bool {
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    let path = url.path().to_ascii_lowercase();
+    let file = path.rsplit('/').next().unwrap_or_default();
+    let stem = file.split('.').next().unwrap_or_default();
+    let placeholder = [
+        "spinner",
+        "loading",
+        "preloader",
+        "placeholder",
+        "lazy",
+        "blank",
+        "default",
+        "transparent",
+        "1x1",
+    ]
+    .iter()
+    .any(|w| file.contains(w))
+        || stem == "load"
+        || path.contains("/themes/")
+        || path.contains("/plugins/")
+        || path.contains("/avatar/0.")
+        || url
+            .query()
+            .is_some_and(|q| q.contains("dst_uin=&") || q.ends_with("dst_uin="));
+    !placeholder
 }
 
 const ABOUT_WORDS: &[&str] = &[
@@ -643,7 +849,7 @@ mod tests {
             h.description.as_deref(),
             Some("记录生活、学习， 以及自己琢磨的一些有趣的东西。")
         );
-        assert_eq!(h.avatar.unwrap().as_str(), "https://blog.example/img/me.webp");
+        assert_eq!(h.pictures.author.unwrap().as_str(), "https://blog.example/img/me.webp");
         assert_eq!(h.about.unwrap().as_str(), "https://blog.example/about/index.html");
         assert_eq!(h.generator.as_deref(), Some("Hexo 7.3.0"));
         let kinds: Vec<&str> = h.social.iter().map(|s| s.kind.as_str()).collect();
@@ -661,7 +867,115 @@ mod tests {
             <a href="https://other.example/about">别人的关于</a><a href="/s/about">关于本站</a>"#;
         let h = from_home(page, &base);
         assert_eq!(h.about.unwrap().as_str(), "https://b.example/s/about");
-        assert_eq!(h.avatar.unwrap().as_str(), "https://b.example/t.png");
+        assert_eq!(
+            Pictures::pick(&h.pictures, None, false).unwrap().as_str(),
+            "https://b.example/t.png"
+        );
+    }
+
+    fn author(page: &str) -> Option<String> {
+        let base = Url::parse("https://b.example/").unwrap();
+        from_home(page, &base).pictures.author.map(|u| u.to_string())
+    }
+
+    #[test]
+    fn author_pictures_in_common_themes() {
+        // Fuwari / Firefly (Astro).
+        assert_eq!(
+            author(r#"<div class="card-base"><a><img alt="Profile Image of the Author" src="/_astro/avatar.webp"></a></div>"#)
+                .as_deref(),
+            Some("https://b.example/_astro/avatar.webp")
+        );
+        // Joe: the real picture in data-src here, in src there.
+        assert_eq!(
+            author(
+                r#"<aside class="joe_aside"><section class="joe_aside__item author"><div class="avatar_wrapper">
+                <img class="avatar_frame" alt="挂架" src="/themes/theme-Joe3/assets/frame/bat.png">
+                <img class="avatar lazyload" alt="博主头像" data-src="/upload/me.jpg" src="/themes/theme-Joe3/assets/svg/spinner-preloader.svg">
+                </div></section></aside>"#
+            )
+            .as_deref(),
+            Some("https://b.example/upload/me.jpg")
+        );
+        // Z-Blog: the author card, not the recent commenters below it.
+        assert_eq!(
+            author(
+                r#"<div class="sideuser"><div class="avatar"><img alt="行者" src="/u/me.jpg"></div></div>
+                <ul><li class="sideitem"><div class="avatarcmt"><img alt="客人" src="/u/guest.png"></div></li></ul>"#
+            )
+            .as_deref(),
+            Some("https://b.example/u/me.jpg")
+        );
+        assert_eq!(
+            author(
+                r#"<div class="sidebar"><div class="avatarcmt"><img class="avatar" alt="头像" src="/u/guest.png"></div></div>"#
+            ),
+            None,
+            "a commenter's picture"
+        );
+        // A theme's default picture and a spinner with nothing behind it.
+        assert_eq!(
+            author(
+                r#"<div id="mo-nav"><div class="m-avatar"><img src="/wp-content/themes/Skrilex/images/avatar.jpg"></div></div>"#
+            ),
+            None
+        );
+        assert_eq!(
+            author(
+                r#"<aside><img class="avatar" alt="博主" src="/img/avatar-default.png" data-src="/img/loading.gif"></aside>"#
+            ),
+            None
+        );
+        // Post covers and a word mark in the header are not the author.
+        assert_eq!(
+            author(
+                r#"<header><a class="navbar-brand"><img alt="logo" class="logo" src="/logo.png"></a></header>
+                <div class="post"><div class="headimg"><img alt="author's trip" src="/cover.jpg"></div></div>"#
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn pictures_fall_back_to_github_then_the_feed_then_a_favicon() {
+        let base = Url::parse("https://b.example/").unwrap();
+        let page = r#"<head><link rel="icon" href="/favicon.ico"><link rel="icon" sizes="192x192" href="/icon-192.png"></head>
+            <footer>Theme by <a href="https://github.com/themeauthor">them</a></footer>
+            <ul class="social"><li><a href="https://github.com/me">GitHub</a></li></ul>"#;
+        let p = from_home(page, &base).pictures;
+        assert_eq!(
+            p.github.as_ref().unwrap().as_str(),
+            "https://github.com/me.png?size=160"
+        );
+        assert_eq!(
+            p.favicon.as_ref().unwrap().as_str(),
+            "https://b.example/icon-192.png",
+            "the largest"
+        );
+        assert_eq!(Pictures::pick(&p, None, false), p.github);
+
+        let no_github = Pictures {
+            github: None,
+            ..p.clone()
+        };
+        assert_eq!(Pictures::pick(&no_github, None, false), p.favicon);
+        assert_eq!(
+            Pictures::pick(&no_github, None, true),
+            None,
+            "the feed's image is shown instead"
+        );
+        let about = Pictures {
+            author: Url::parse("https://b.example/me.jpg").ok(),
+            ..Default::default()
+        };
+        assert_eq!(Pictures::pick(&no_github, Some(&about), true), about.author);
+        // Only from the author's own links: a theme credit is someone else.
+        let p = from_home(
+            r#"<footer><a href="https://github.com/themeauthor">them</a></footer>"#,
+            &base,
+        )
+        .pictures;
+        assert_eq!(p.github, None);
     }
 
     #[test]
