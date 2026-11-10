@@ -73,6 +73,12 @@ export function markBlocked(blogId: number) {
   }
 }
 
+function canShow(page: ReaderPage): boolean {
+  if (!wide.value || page.blog.framable === false || blocked().includes(page.blog.id)) return false
+  // A page served over https cannot show an http one.
+  return !(location.protocol === 'https:' && page.url.startsWith('http:'))
+}
+
 /**
  * Opens `page` in the pane when it can show there. Returns false when the
  * link should do what links do (open a new tab); call it from the link's
@@ -80,15 +86,67 @@ export function markBlocked(blogId: number) {
  */
 export function openInReader(page: ReaderPage, e?: MouseEvent): boolean {
   if (e && (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey)) return false
-  if (!wide.value || page.blog.framable === false || blocked().includes(page.blog.id)) return false
-  // A page served over https cannot show an http one.
-  if (location.protocol === 'https:' && page.url.startsWith('http:')) return false
+  if (!canShow(page)) return false
   readerPage.value = page
+  if (readerAhead.value === page.url) readerAhead.value = null
   return true
 }
 
 export function closeReader() {
   readerPage.value = null
+}
+
+/**
+ * A page that will probably open in the pane next, loading out of sight so
+ * it shows at once. Only on a clear sign (the pointer resting on its link),
+ * since loading it counts as a visit on the author's site.
+ */
+export const readerAhead = ref<string | null>(null)
+
+/** How long the pointer rests on a link before its page loads ahead. */
+const REST_MS = 150
+/** A page loaded ahead and not opened is let go after this. */
+const AHEAD_MS = 60_000
+let restTimer = 0
+let aheadTimer = 0
+
+/** The pointer reached (or the keyboard focused) a link to `page`. */
+export function readerIntent(page: ReaderPage, delay = REST_MS) {
+  clearTimeout(restTimer)
+  if (!canShow(page) || readerPage.value?.url === page.url) return
+  restTimer = window.setTimeout(() => {
+    readerAhead.value = page.url
+    clearTimeout(aheadTimer)
+    aheadTimer = window.setTimeout(() => (readerAhead.value = null), AHEAD_MS)
+  }, delay)
+}
+
+/** The pointer left the link before resting on it. */
+export function readerIntentEnd() {
+  clearTimeout(restTimer)
+}
+
+const warmed = new Set<string>()
+
+/**
+ * Looks up and connects to a site whose page may be opened soon (a post's
+ * details are showing): no request for the page itself.
+ */
+export function warmUp(url: string) {
+  let origin: string
+  try {
+    origin = new URL(url).origin
+  } catch {
+    return
+  }
+  if (warmed.has(origin) || warmed.size >= 50) return
+  warmed.add(origin)
+  for (const rel of ['dns-prefetch', 'preconnect']) {
+    const link = document.createElement('link')
+    link.rel = rel
+    link.href = origin
+    document.head.append(link)
+  }
 }
 
 // The left part is laid out as if the window ended where the pane begins.

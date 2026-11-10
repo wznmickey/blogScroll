@@ -8,7 +8,7 @@ import Waterfall from '../components/Waterfall.vue'
 import SocialLinks from '../components/SocialLinks.vue'
 import { hostOf, relativeTime } from '../format'
 import { recordShown } from '../library'
-import { openInReader } from '../reader'
+import { openInReader, readerIntent, readerIntentEnd } from '../reader'
 import type { BlogDetail } from '../types'
 
 const route = useRoute()
@@ -40,6 +40,11 @@ function openBeside(e: MouseEvent, url: string, title: string) {
   if (blog.value && openInReader({ url, title, blog: blog.value }, e)) e.preventDefault()
 }
 
+/** Resting on a link to the blog's site loads it in the (hidden) pane. */
+function ahead(url: string, title: string, delay?: number) {
+  if (blog.value) readerIntent({ url, title, blog: blog.value }, delay)
+}
+
 /** "Hexo 7.3.0" → "Hexo" */
 const engine = computed(() => blog.value?.generator?.split(/\s+/)[0] ?? null)
 </script>
@@ -58,6 +63,10 @@ const engine = computed(() => blog.value?.generator?.split(/\s+/)[0] ?? null)
           target="_blank"
           rel="noopener"
           class="home"
+          @pointerenter="ahead(blog.homepage, blog.name)"
+          @pointerleave="readerIntentEnd"
+          @focus="ahead(blog.homepage, blog.name)"
+          @pointerdown="ahead(blog.homepage, blog.name, 0)"
           @click="openBeside($event, blog.homepage, blog.name)"
           >{{ hostOf(blog.homepage) }} ↗</a
         >
@@ -109,6 +118,10 @@ const engine = computed(() => blog.value?.generator?.split(/\s+/)[0] ?? null)
         :href="blog.about_url"
         target="_blank"
         rel="noopener"
+        @pointerenter="ahead(blog.about_url, `关于 · ${blog.name}`)"
+        @pointerleave="readerIntentEnd"
+        @focus="ahead(blog.about_url, `关于 · ${blog.name}`)"
+        @pointerdown="ahead(blog.about_url, `关于 · ${blog.name}`, 0)"
         @click="openBeside($event, blog.about_url, `关于 · ${blog.name}`)"
         >阅读完整介绍 ↗</a
       >

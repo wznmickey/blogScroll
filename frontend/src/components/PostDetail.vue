@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { api, cachedPost, categoryName, rememberPosts } from '../api'
 import { fullDate, hostOf, hue, initial } from '../format'
 import { recordVisit } from '../library'
-import { openInReader } from '../reader'
+import { openInReader, readerIntent, readerIntentEnd, warmUp } from '../reader'
 import type { PostCard, PostDetail } from '../types'
 import BlogAboutCard from './BlogAboutCard.vue'
 import BlogAvatar from './BlogAvatar.vue'
@@ -68,6 +68,18 @@ function openBeside(e: MouseEvent, url: string, title: string) {
     e.preventDefault()
     emit('close')
   }
+}
+
+// The original may be next: be connected to its site, and once the pointer
+// rests on a link to it, load it in the (hidden) pane.
+watch(
+  () => post.value?.url,
+  (url) => url && warmUp(url),
+  { immediate: true },
+)
+function ahead(url: string, title: string, delay?: number) {
+  const p = post.value
+  if (p) readerIntent({ url, title, blog: p.blog, post: p }, delay)
 }
 </script>
 
@@ -156,6 +168,10 @@ function openBeside(e: MouseEvent, url: string, title: string) {
                   target="_blank"
                   rel="noopener"
                   class="comments-go"
+                  @pointerenter="ahead(commentsLink!, `评论 · ${post.title}`)"
+                  @pointerleave="readerIntentEnd"
+                  @focus="ahead(commentsLink!, `评论 · ${post.title}`)"
+                  @pointerdown="ahead(commentsLink!, `评论 · ${post.title}`, 0)"
                   @click="openBeside($event, commentsLink!, `评论 · ${post.title}`)"
                   >去原文评论 ↗</a
                 >
@@ -199,6 +215,10 @@ function openBeside(e: MouseEvent, url: string, title: string) {
               target="_blank"
               rel="noopener"
               class="btn btn-primary read"
+              @pointerenter="ahead(post.url, post.title)"
+              @pointerleave="readerIntentEnd"
+              @focus="ahead(post.url, post.title)"
+              @pointerdown="ahead(post.url, post.title, 0)"
               @click="openBeside($event, post.url, post.title)"
               >阅读原文 ↗</a
             >
