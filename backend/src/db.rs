@@ -210,7 +210,8 @@ pub async fn apply_policy(pool: &SqlitePool, cfg: &Config) -> sqlx::Result<()> {
     for g in &cfg.policy.full_text {
         tracing::info!(site = %g.site, note = %g.note, "full text allowed");
     }
-    for a in &cfg.policy.about {
+    let about_settings = cfg.policy.about_settings();
+    for a in &about_settings {
         tracing::info!(site = %a.site, note = %a.note, full = a.full, own_text = a.text.is_some(), "about page settings");
     }
 
@@ -239,9 +240,7 @@ pub async fn apply_policy(pool: &SqlitePool, cfg: &Config) -> sqlx::Result<()> {
 
     // About-page settings. A different page, or a change between excerpt and
     // the whole page, re-reads the profile soon; an own text applies at once.
-    let about: Vec<(String, &crate::config::AboutPolicy)> = cfg
-        .policy
-        .about
+    let about: Vec<(String, &crate::config::AboutPolicy)> = about_settings
         .iter()
         .filter_map(|a| Some((site_key(&a.site)?, a)))
         .collect();

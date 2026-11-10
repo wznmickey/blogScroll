@@ -83,6 +83,14 @@ const FEED_ORIGIN: Record<string, string> = {
   manual: '站长按你的要求设置的',
 }
 
+const aboutUse = computed(() => {
+  const b = blog.value
+  if (!b) return ''
+  if (b.about_html) return '整页显示'
+  if (b.about_text) return `显示一段介绍：「${[...b.about_text].slice(0, 30).join('')}…」`
+  return '没有读到介绍'
+})
+
 const avatarSource = computed(() => {
   const c = crawl.value
   if (!c || !blog.value) return ''
@@ -129,6 +137,9 @@ const snippet = computed(() => {
     `${configured('description') ? '' : '# '}description = ${q2(b.description ?? '一句话介绍')}`,
     `${configured('social') ? '' : '# '}social = [${b.social.map((s) => q2(s.url)).join(', ')}]`,
     `${configured('tags') ? '' : '# '}tags = [${b.top_tags.map(q2).join(', ')}]`,
+    `${configured('about') ? '' : '# '}about = ${q2(b.crawl?.about_page ?? `${b.homepage.replace(/\/$/, '')}/about/`)}   # 关于页地址`,
+    `${b.about_html ? '' : '# '}about_full = true   # 关于页整页显示（保留排版），而不是约 300 字摘要`,
+    `# about_text = "自己写的介绍，可以多行。"   # 或者直接用这段介绍`,
     `note = "博主本人申请"`,
   ].join('\n')
 })
@@ -252,6 +263,7 @@ async function copy() {
                 crawl.about_page
               }}</a>
               <span v-else>没找到</span>
+              <span class="sub">{{ aboutUse }}</span>
             </dd>
             <dt>标签<span v-if="configured('tags')" class="tag">配置</span></dt>
             <dd>{{ blog.top_tags.map((t) => `#${t}`).join(' ') || '还没有' }}</dd>

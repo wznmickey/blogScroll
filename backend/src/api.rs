@@ -2038,6 +2038,9 @@ pub(crate) mod tests {
                 "not a url".into(),
             ]),
             tags: Some(vec!["Rust".into(), " 摄影 ".into()]),
+            about: None,
+            about_full: false,
+            about_text: Some("在配置里写的关于".into()),
             note: String::new(),
         }];
         crate::db::apply_policy(&st.pool, &cfg).await.unwrap();
@@ -2049,8 +2052,12 @@ pub(crate) mod tests {
             json!([{"kind": "x", "url": "https://x.com/me"}, {"kind": "link", "url": "https://me.example/"}])
         );
         assert_eq!(b["top_tags"], json!(["Rust", "摄影"]));
+        assert_eq!(b["about_text"], "在配置里写的关于", "about settings in the same block");
         let c = &b["crawl"];
-        assert_eq!(c["configured"], json!(["avatar", "description", "social", "tags"]));
+        assert_eq!(
+            c["configured"],
+            json!(["avatar", "description", "social", "tags", "about"])
+        );
         assert_eq!(
             c["found_avatar"], "https://b1.example/found.png",
             "what was found stays"

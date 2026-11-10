@@ -114,6 +114,10 @@ exclude = [
 # description = "一句话介绍"
 # social = ["https://github.com/someone", "https://x.com/someone"]
 # tags = ["Rust", "摄影"]
+# The about page, as in [[policy.about]] below, can be set here too:
+# about = "https://example.com/about-me/"
+# about_full = true
+# about_text = "自己写的介绍"
 # note = "Asked in issue #12"
 
 # Hand-set feed URLs (skips discovery for that blog).

@@ -310,6 +310,9 @@ avatar = "https://example.com/me.png"         # 头像
 description = "一句话介绍"                     # 简介
 social = ["https://github.com/someone", "https://x.com/someone"]   # 社交链接（替换抓到的，平台按地址识别）
 tags = ["Rust", "摄影"]                        # 标签（替换按文章统计的）
+about = "https://example.com/about-me/"       # 关于页，同 policy.about 的 url / full / text，
+about_full = true                             #   写在这里就不用另开一段
+# about_text = "自己写的介绍"
 note = "issue #12"
 
 [[policy.feed_overrides]]                     # 手动指定 RSS 地址

@@ -272,8 +272,35 @@ pub struct ProfilePolicy {
     /// The blog's tags (标签), instead of those its posts use most.
     #[serde(default)]
     pub tags: Option<Vec<String>>,
+    /// The about page, as in `[[policy.about]]`: which page to read, keep it
+    /// whole, or the author's own introduction instead.
+    #[serde(default)]
+    pub about: Option<String>,
+    #[serde(default)]
+    pub about_full: bool,
+    #[serde(default)]
+    pub about_text: Option<String>,
     #[serde(default)]
     pub note: String,
+}
+
+impl PolicyConfig {
+    /// About-page settings from `[[policy.about]]` and `[[policy.profile]]`
+    /// (a later one for the same site wins).
+    pub fn about_settings(&self) -> Vec<AboutPolicy> {
+        let from_profile = self
+            .profile
+            .iter()
+            .filter(|p| p.about.is_some() || p.about_full || p.about_text.is_some())
+            .map(|p| AboutPolicy {
+                site: p.site.clone(),
+                url: p.about.clone(),
+                full: p.about_full,
+                text: p.about_text.clone(),
+                note: p.note.clone(),
+            });
+        self.about.iter().cloned().chain(from_profile).collect()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
