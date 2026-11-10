@@ -1,7 +1,8 @@
 <script setup lang="ts">
-// The blogger's profile next to one of their posts. Links stay on this site
-// (the blog's page here, its categories and tags); the only way out is the post's
-// own "阅读原文" button.
+// A blogger's profile card: next to one of their posts (where links stay on
+// this site and the only way out is the post's own "阅读原文"), and for the
+// site's maintainer on the about page, which adds its own links below.
+
 import { computed, ref, watch } from 'vue'
 import { blogDetail } from '../api'
 import { relativeTime } from '../format'
@@ -84,6 +85,8 @@ const longAbout = computed(() => (about.value?.length ?? 0) > 110)
         socialLabel(s.kind)
       }}</a>
     </p>
+
+    <footer v-if="$slots.default" class="extra"><slot /></footer>
   </section>
 </template>
 
@@ -193,5 +196,15 @@ const longAbout = computed(() => (about.value?.length ?? 0) > 110)
 }
 .social a {
   color: var(--link);
+}
+.extra {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
 }
 </style>

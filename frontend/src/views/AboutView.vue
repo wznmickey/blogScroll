@@ -1,10 +1,19 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { isStatic, meta } from '../api'
+import BlogAboutCard from '../components/BlogAboutCard.vue'
+import BlogAvatar from '../components/BlogAvatar.vue'
+import FollowButton from '../components/FollowButton.vue'
 import { fullDate, hostOf } from '../format'
 import { openInReader } from '../reader'
+import type { BlogRef } from '../types'
 
 const maintainer = computed(() => meta.value?.maintainer ?? null)
+/** Their blog, when it is one of ours: shown with the usual profile card. */
+const maintainerBlog = computed<BlogRef | null>(() => {
+  const m = maintainer.value
+  return m?.blog ? { id: m.blog.id, name: m.blog.name, homepage: m.url ?? '', icon: null } : null
+})
 
 function openBlog(e: MouseEvent) {
   const m = maintainer.value
@@ -24,17 +33,24 @@ function openBlog(e: MouseEvent) {
 
       <template v-if="maintainer">
         <h2>维护者</h2>
-        <p class="maintainer">
-          本站由 <b>{{ maintainer.name }}</b> 维护。
-          <template v-if="maintainer.url">
-            博客：<a :href="maintainer.url" target="_blank" rel="noopener me" @click="openBlog">{{
-              maintainer.blog?.name ?? hostOf(maintainer.url)
-            }}</a>
-            <template v-if="maintainer.blog">
-              （<RouterLink :to="`/blog/${maintainer.blog.id}`">在本站浏览</RouterLink>）
-            </template>
-          </template>
-        </p>
+        <p>本站由 <b>{{ maintainer.name }}</b> 维护。</p>
+        <BlogAboutCard v-if="maintainerBlog" :blog="maintainerBlog" class="maintainer-card">
+          <a :href="maintainerBlog.homepage" target="_blank" rel="noopener me" class="go" @click="openBlog"
+            >访问{{ maintainerBlog.name }} ↗</a
+          >
+          <RouterLink :to="`/blog/${maintainerBlog.id}`" class="go">在本站浏览</RouterLink>
+          <FollowButton :blog-id="maintainerBlog.id" small class="follow" />
+        </BlogAboutCard>
+        <!-- Their blog is not one we list: the same card, with what we know. -->
+        <section v-else-if="maintainer.url" class="maintainer-card plain">
+          <BlogAvatar :name="maintainer.name" :icon="null" :size="44" />
+          <span class="plain-text">
+            <b>{{ maintainer.name }}</b>
+            <a :href="maintainer.url" target="_blank" rel="noopener me" class="go" @click="openBlog"
+              >{{ hostOf(maintainer.url) }} ↗</a
+            >
+          </span>
+        </section>
       </template>
 
       <h2>数据来源</h2>
@@ -114,5 +130,27 @@ a {
   border-radius: 12px;
   background: var(--surface);
   font-size: 14px;
+}
+.maintainer-card {
+  margin-top: 8px;
+}
+.go {
+  color: var(--link);
+}
+.follow {
+  margin-left: auto;
+}
+.plain {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: var(--surface);
+}
+.plain-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
 }
 </style>
