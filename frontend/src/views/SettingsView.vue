@@ -3,6 +3,7 @@
 // excerpts, comments, adult content, blocked bloggers, sites and words),
 // which directories, and how the page looks. All kept in this browser
 // (options.ts, channels.ts) and included in backups.
+import { blogPath } from '../format'
 import { computed, ref, watch } from 'vue'
 import { api, categoryName, meta } from '../api'
 import { COLUMN_CHOICES, HIDE_CHOICES, prefs } from '../channels'
@@ -135,7 +136,7 @@ function toggleDirectory(id: string) {
         <p v-if="!options.blockBlogs.length" class="hint">在博主页点「屏蔽」，他的文章就不会出现在推荐、最新和搜索里。</p>
         <p v-else class="chips">
           <span v-for="b in options.blockBlogs" :key="b.id" class="chip removable">
-            <RouterLink :to="`/blog/${b.id}`">{{ b.name }}</RouterLink>
+            <RouterLink :to="blogPath(b)">{{ b.name }}</RouterLink>
             <button :aria-label="`取消屏蔽 ${b.name}`" @click="options.blockBlogs = options.blockBlogs.filter((x) => x.id !== b.id)">✕</button>
           </span>
         </p>

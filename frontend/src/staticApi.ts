@@ -384,4 +384,9 @@ export const staticApi = {
   related,
   blogs,
   blog: async (id: number) => (await blogFile(id)).blog,
+  blogByKey: async (key: string) => {
+    const found = (await allBlogs()).find((b) => b.key === key)
+    if (!found) throw new Error('HTTP 404')
+    return (await blogFile(found.id)).blog
+  },
 }

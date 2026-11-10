@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { COVER_DEFAULT, clampCover, relativeTime, textCoverRatio } from '../format'
+import { blogPath, clampCover, COVER_DEFAULT, relativeTime, textCoverRatio } from '../format'
 import type { PostCard } from '../types'
 import BlogAvatar from './BlogAvatar.vue'
 import LibraryButton from './LibraryButton.vue'
@@ -48,7 +48,7 @@ function onLoad(e: Event) {
       <h3 class="title">{{ post.title }}</h3>
     </RouterLink>
     <footer class="foot">
-      <RouterLink :to="`/blog/${post.blog.id}`" class="author">
+      <RouterLink :to="blogPath(post.blog)" class="author">
         <BlogAvatar :name="post.blog.name" :icon="post.blog.icon" :size="20" />
         <span class="name">{{ post.blog.name }}</span>
       </RouterLink>

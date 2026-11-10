@@ -12,7 +12,7 @@ import FollowButton from '../components/FollowButton.vue'
 import MyBlog from '../components/MyBlog.vue'
 import Waterfall from '../components/Waterfall.vue'
 import { follows } from '../follow'
-import { hostOf } from '../format'
+import { blogPath, hostOf } from '../format'
 import { clear, entries, LIST_LABELS, searchList, setSettings, settings, type ListName } from '../library'
 import type { BlogSummary, Page, PostCard } from '../types'
 
@@ -189,7 +189,7 @@ const exportedAt = (b: Backup) => (b.exported_at ? new Date(b.exported_at).toLoc
       <p v-else-if="loadingFollows" class="empty"><span class="spinner" /></p>
       <ul v-else class="blog-list">
         <li v-for="b in followed" :key="b.id">
-          <RouterLink :to="`/blog/${b.id}`" class="hit">
+          <RouterLink :to="blogPath(b)" class="hit">
             <BlogAvatar :name="b.name" :icon="b.icon" :size="40" />
             <span class="hit-text">
               <span class="hit-name">{{ b.name }}</span>

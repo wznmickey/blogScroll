@@ -16,7 +16,8 @@
 //! ```
 //!
 //! With a site URL, the pages around it are filled in for search engines
-//! (see `seo.rs`): index.html, blogs.html, about.html, blog/{id}.html,
+//! (see `seo.rs`): index.html, blogs.html, about.html, blog/{key}/index.html
+//! (and blog/{id}.html, which sends old links on),
 //! 404.html (the app for every other route, not indexed), sitemap.xml and
 //! robots.txt.
 //!
@@ -197,8 +198,8 @@ fn write_pages(
         let Some(html) = seo::render(&site, &p) else {
             anyhow::bail!("no built app (index.html with <div id=\"app\">) in {}", dir.display());
         };
-        let file = if p.path.is_empty() {
-            dir.join("index.html")
+        let file = if p.path.is_empty() || p.path.ends_with('/') {
+            dir.join(&p.path).join("index.html")
         } else {
             dir.join(format!("{}.html", p.path))
         };
@@ -219,18 +220,23 @@ fn write_pages(
         std::fs::remove_dir_all(&blog_dir)?;
     }
     for (blog, posts) in blog_pages {
-        page(seo::blog(&site, blog, &shown(posts)))?;
+        let p = seo::blog(&site, blog, &shown(posts));
+        // Links from before pages were named after the blog's address.
+        if p.path.ends_with('/') {
+            std::fs::create_dir_all(&blog_dir)?;
+            std::fs::write(
+                blog_dir.join(format!("{}.html", blog["id"])),
+                seo::moved(&site, &p.path),
+            )?;
+        }
+        page(p)?;
     }
     let mut map: Vec<(String, Option<i64>)> = vec![
         (String::new(), posts.first().and_then(|p| p["sort_at"].as_i64())),
         ("blogs".into(), None),
         ("about".into(), None),
     ];
-    map.extend(
-        blogs
-            .iter()
-            .map(|b| (format!("blog/{}", b["id"]), b["last_post_at"].as_i64())),
-    );
+    map.extend(blogs.iter().map(|b| (seo::blog_path(b), b["last_post_at"].as_i64())));
     std::fs::write(dir.join("sitemap.xml"), seo::sitemap(&site, &map))?;
     std::fs::write(dir.join("robots.txt"), seo::robots(&site))?;
     Ok(())
@@ -322,14 +328,14 @@ mod tests {
         // Pages for search engines, next to the data.
         let page = |p: &str| std::fs::read_to_string(dir.join(p)).unwrap();
         assert!(page("index.html").contains(seo::MARKER));
-        assert!(
-            page("blog/1.html").contains("<link rel=\"canonical\" href=\"https://you.github.io/blogScroll/blog/1\"")
-        );
-        assert!(
-            page("blog/1.html").contains("https://b1.example/p/4"),
-            "posts link to the originals"
-        );
-        assert!(!dir.join("blog/3.html").exists());
+        // Named after the blog's address; the old numbered page sends readers on.
+        let blog1 = page("blog/b1.example/index.html");
+        assert!(blog1.contains("<link rel=\"canonical\" href=\"https://you.github.io/blogScroll/blog/b1.example/\""));
+        assert!(blog1.contains("https://b1.example/p/4"), "posts link to the originals");
+        let old = page("blog/1.html");
+        assert!(old.contains("url=https://you.github.io/blogScroll/blog/b1.example/") && old.contains("noindex"));
+        assert!(!dir.join("blog/3.html").exists() && !dir.join("blog/b3.example").exists());
+        assert!(page("sitemap.xml").contains("<loc>https://you.github.io/blogScroll/blog/b1.example/</loc>"));
         assert!(page("404.html").contains("noindex"));
         assert!(page("sitemap.xml").contains("<loc>https://you.github.io/blogScroll/blogs</loc>"));
         // A second export uses the untouched app, not the filled-in index.html.

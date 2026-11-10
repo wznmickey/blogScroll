@@ -4,7 +4,7 @@ import { isStatic, meta } from '../api'
 import BlogAboutCard from '../components/BlogAboutCard.vue'
 import BlogAvatar from '../components/BlogAvatar.vue'
 import FollowButton from '../components/FollowButton.vue'
-import { fullDate, hostOf } from '../format'
+import { blogPath, fullDate, hostOf } from '../format'
 import { openInReader } from '../reader'
 import type { BlogRef } from '../types'
 
@@ -38,7 +38,7 @@ function openBlog(e: MouseEvent) {
           <a :href="maintainerBlog.homepage" target="_blank" rel="noopener me" class="go" @click="openBlog"
             >访问{{ maintainerBlog.name }} ↗</a
           >
-          <RouterLink :to="`/blog/${maintainerBlog.id}`" class="go">在本站浏览</RouterLink>
+          <RouterLink :to="blogPath(maintainerBlog)" class="go">在本站浏览</RouterLink>
           <FollowButton :blog-id="maintainerBlog.id" small class="follow" />
         </BlogAboutCard>
         <!-- Their blog is not one we list: the same card, with what we know. -->

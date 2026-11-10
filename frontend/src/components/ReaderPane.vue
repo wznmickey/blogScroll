@@ -3,6 +3,7 @@
 // like or save the post, reload, open it in a new tab, or close. The divider
 // can be dragged. It slides in and out; while closed it stays in the page out
 // of sight, so a page loading ahead (readerAhead) is the very frame that shows.
+import { blogPath } from '../format'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
@@ -146,7 +147,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
       @pointercancel="endResize"
     />
     <header v-if="shownPage" class="bar">
-      <RouterLink :to="`/blog/${shownPage.blog.id}`" class="who" :title="shownPage.blog.name">
+      <RouterLink :to="blogPath(shownPage.blog)" class="who" :title="shownPage.blog.name">
         <BlogAvatar :name="shownPage.blog.name" :icon="shownPage.blog.icon" :size="24" />
       </RouterLink>
       <span class="title" :title="shownPage.title">{{ shownPage.title }}</span>

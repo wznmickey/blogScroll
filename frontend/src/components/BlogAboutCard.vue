@@ -5,7 +5,7 @@
 
 import { computed, ref, watch } from 'vue'
 import { blogDetail } from '../api'
-import { relativeTime } from '../format'
+import { blogPath, relativeTime } from '../format'
 import type { BlogDetail, BlogRef } from '../types'
 import BlogAvatar from './BlogAvatar.vue'
 import SocialLinks from './SocialLinks.vue'
@@ -36,7 +36,7 @@ const longAbout = computed(() => (about.value?.length ?? 0) > 110)
 <template>
   <section class="about-card" aria-label="关于博主">
     <header class="head">
-      <RouterLink :to="`/blog/${blog.id}`" class="who">
+      <RouterLink :to="blogPath(blog)" class="who">
         <BlogAvatar :name="blog.name" :icon="detail?.icon ?? blog.icon" :size="44" />
         <span class="names">
           <span class="name">{{ blog.name }}</span>

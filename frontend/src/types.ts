@@ -2,6 +2,8 @@
 
 export interface BlogRef {
   id: number
+  /** Its address without scheme and www. (example.com/blog): its page is /blog/{key}/. */
+  key?: string
   name: string
   homepage: string
   icon: string | null
@@ -142,6 +144,8 @@ export interface InterestProfile {
 
 export interface BlogSummary {
   id: number
+  /** See BlogRef.key. */
+  key?: string
   name: string
   homepage: string
   icon: string | null

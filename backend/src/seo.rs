@@ -21,7 +21,8 @@ pub struct Site<'a> {
 }
 
 pub struct Page {
-    /// "" for the home page, "blogs", "blog/12", ...
+    /// Its address: "" for the home page, "blogs", "blog/example.com/" (a
+    /// trailing slash: written as …/index.html), ...
     pub path: String,
     pub title: String,
     pub description: String,
@@ -38,6 +39,26 @@ impl Site<'_> {
             format!("{}/{path}", self.url)
         }
     }
+}
+
+/// A blog's page: `blog/{key}/`, by its address (`BlogRef::key` in api.rs);
+/// by its number for data from before keys.
+pub fn blog_path(b: &Value) -> String {
+    match b["key"].as_str().filter(|k| !k.is_empty()) {
+        Some(key) => format!("blog/{key}/"),
+        None => format!("blog/{}", b["id"]),
+    }
+}
+
+/// What the old address of a page (`blog/12`) serves: on to the new one.
+pub fn moved(site: &Site, to: &str) -> String {
+    let url = esc(&site.link(to));
+    format!(
+        "<!doctype html>\n<html lang=\"zh-CN\">\n<head>\n  <meta charset=\"UTF-8\" />\n  <title>{}</title>\n  \
+         <link rel=\"canonical\" href=\"{url}\" />\n  <meta name=\"robots\" content=\"noindex\" />\n  \
+         <meta http-equiv=\"refresh\" content=\"0; url={url}\" />\n</head>\n<body><a href=\"{url}\">{url}</a></body>\n</html>\n",
+        esc(site.name)
+    )
 }
 
 pub fn esc(s: &str) -> String {
@@ -133,7 +154,7 @@ fn post_item(site: &Site, p: &Value, with_blog: bool) -> String {
     if with_blog {
         out.push_str(&format!(
             "<a href=\"{}\">{}</a>",
-            esc(&site.link(&format!("blog/{}", p["blog"]["id"]))),
+            esc(&site.link(&blog_path(&p["blog"]))),
             esc(s(&p["blog"], "name"))
         ));
     }
@@ -191,7 +212,7 @@ pub fn blogs(site: &Site, blogs: &[Value]) -> Page {
         .map(|b| {
             let mut li = format!(
                 "<li><a href=\"{}\">{}</a>",
-                esc(&site.link(&format!("blog/{}", b["id"]))),
+                esc(&site.link(&blog_path(b))),
                 esc(s(b, "name"))
             );
             let d = s(b, "description");
@@ -313,7 +334,7 @@ pub fn blog(site: &Site, blog: &Value, posts: &[Value]) -> Page {
         body.push_str(&format!("<main><h2>文章</h2><ul>{items}</ul></main>"));
     }
     Page {
-        path: format!("blog/{}", blog["id"]),
+        path: blog_path(blog),
         title: format!("{name} · {}", site.name),
         description,
         image: blog["icon"].as_str().map(str::to_string),

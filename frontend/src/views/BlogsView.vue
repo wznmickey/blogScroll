@@ -6,7 +6,7 @@ import BlogAvatar from '../components/BlogAvatar.vue'
 import ChipBar, { type Chip } from '../components/ChipBar.vue'
 import FollowButton from '../components/FollowButton.vue'
 import { follows } from '../follow'
-import { hostOf, relativeTime } from '../format'
+import { blogPath, hostOf, relativeTime } from '../format'
 import type { BlogSort, BlogSummary } from '../types'
 
 const route = useRoute()
@@ -173,7 +173,7 @@ onBeforeUnmount(() => {
 
     <ul class="grid">
       <li v-for="b in blogs" :key="b.id">
-        <RouterLink :to="`/blog/${b.id}`" class="card">
+        <RouterLink :to="blogPath(b)" class="card">
           <BlogAvatar :name="b.name" :icon="b.icon" :size="48" />
           <div class="info">
             <div class="name-row">

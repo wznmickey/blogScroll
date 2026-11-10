@@ -1,32 +1,40 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
 import BlogAvatar from '../components/BlogAvatar.vue'
 import FollowButton from '../components/FollowButton.vue'
 import Waterfall from '../components/Waterfall.vue'
 import SocialLinks from '../components/SocialLinks.vue'
-import { hostOf, relativeTime } from '../format'
+import { blogPath, hostOf, relativeTime } from '../format'
 import { recordShown } from '../library'
 import { isBlocked, options, toggleBlock } from '../options'
 import { openInReader, readerIntent, readerIntentEnd } from '../reader'
 import type { BlogDetail } from '../types'
 
 const route = useRoute()
-const id = computed(() => Number(route.params.id))
+const router = useRouter()
+/** The blog's address (example.com/blog), or its number in links from before. */
+const key = computed(() => String(route.params.key ?? '').replace(/\/+$/, ''))
 const blog = ref<BlogDetail | null>(null)
 const missing = ref(false)
+const id = computed(() => blog.value?.id ?? 0)
 
 watch(
-  id,
-  async (blogId) => {
+  key,
+  async (k) => {
+    if (blog.value && (blog.value.key === k || String(blog.value.id) === k)) return
     blog.value = null
     missing.value = false
     try {
-      blog.value = await api.blog(blogId)
-      document.title = blog.value.name
+      const found = /^\d+$/.test(k) ? await api.blog(Number(k)) : await api.blogByKey(k)
+      if (key.value !== k) return
+      blog.value = found
+      document.title = found.name
+      // An old link by number: show the address instead.
+      if (found.key && found.key !== k) router.replace({ path: blogPath(found), query: route.query, hash: route.hash })
     } catch {
-      missing.value = true
+      if (key.value === k) missing.value = true
     }
   },
   { immediate: true },
@@ -141,7 +149,7 @@ const engine = computed(() => blog.value?.generator?.split(/\s+/)[0] ?? null)
     <p v-else-if="missing" class="missing">找不到这个博客</p>
 
     <Waterfall
-      v-if="!missing"
+      v-if="blog"
       :load="load"
       :reset-key="String(id)"
       @impression="(p) => recordShown(p, blog?.name ?? '博客页')"

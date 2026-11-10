@@ -9,7 +9,7 @@ import ChipBar, { type Chip } from '../components/ChipBar.vue'
 import FollowButton from '../components/FollowButton.vue'
 import PostRow from '../components/PostRow.vue'
 import Waterfall from '../components/Waterfall.vue'
-import { hostOf } from '../format'
+import { blogPath, hostOf } from '../format'
 import { readerFilters } from '../options'
 import { LIST_LABELS, recordShown, searchList, type ListName } from '../library'
 import type { BlogSummary, CategoryNode, Page, PostCard, TagStat } from '../types'
@@ -155,7 +155,7 @@ const localLoad = computed(() => (type.value in LIST_LABELS ? localPages(type.va
         </h2>
         <ul class="blog-hits">
           <li v-for="b in blogs" :key="b.id">
-            <RouterLink :to="`/blog/${b.id}`" class="hit">
+            <RouterLink :to="blogPath(b)" class="hit">
               <BlogAvatar :name="b.name" :icon="b.icon" :size="40" />
               <span class="hit-text">
                 <span class="hit-name">{{ b.name }}</span>

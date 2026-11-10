@@ -31,6 +31,9 @@ export function initial(name: string): string {
   return ch.toUpperCase()
 }
 
+/** A blog's page, named after its address (/blog/example.com/); by number without one. */
+export const blogPath = (b: { id: number; key?: string }) => (b.key ? `/blog/${b.key}/` : `/blog/${b.id}`)
+
 export function hostOf(url: string): string {
   try {
     return new URL(url).host.replace(/^www\./, '')

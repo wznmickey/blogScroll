@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { allCategories, api, categoryName, meta, tagsInfo } from '../api'
-import { hostOf } from '../format'
+import { blogPath, hostOf } from '../format'
 import { LIST_LABELS, searchList, type ListName } from '../library'
 import type { BlogSummary, CategoryNode, PostCard, TagStat } from '../types'
 import BlogAvatar from './BlogAvatar.vue'
@@ -138,7 +138,7 @@ function submit() {
           </template>
           <template v-if="blogHits.length">
             <p>博主</p>
-            <button v-for="b in blogHits" :key="b.id" type="button" class="sug" @click="go(`/blog/${b.id}`)">
+            <button v-for="b in blogHits" :key="b.id" type="button" class="sug" @click="go(blogPath(b))">
               <BlogAvatar :name="b.name" :icon="b.icon" :size="28" />
               <span class="sug-text">
                 <span class="sug-name">{{ b.name }}</span>

@@ -161,6 +161,8 @@ const liveApi = {
     (await get<PostCard[]>(`/api/posts/${id}/related`, { limit })).map(withCategory),
   blogs: ({ ids, ...q }: BlogQuery) => get<Page<BlogSummary>>('/api/blogs', { ...q, ids: list(ids) }),
   blog: (id: number) => get<BlogDetail>(`/api/blogs/${id}`),
+  /** By its address, as in /blog/{key}/. */
+  blogByKey: (key: string) => get<BlogDetail>(`/api/sites/${key}`),
 }
 
 export const api: typeof liveApi = isStatic ? staticApi : liveApi

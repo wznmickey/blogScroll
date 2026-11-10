@@ -3,7 +3,7 @@
 // (an issue, or a pull request editing the site's config on GitHub).
 import { computed, ref, watch } from 'vue'
 import { api, meta } from '../api'
-import { fullDate, hostOf, relativeTime } from '../format'
+import { blogPath, fullDate, hostOf, relativeTime } from '../format'
 import type { BlogDetail, BlogSummary } from '../types'
 import BlogAvatar from './BlogAvatar.vue'
 import SocialLinks from './SocialLinks.vue'
@@ -195,7 +195,7 @@ async function copy() {
         <div class="card who">
           <BlogAvatar :name="blog.name" :icon="blog.icon" :size="48" />
           <span class="hit-text">
-            <RouterLink :to="`/blog/${blog.id}`"><b>{{ blog.name }}</b></RouterLink>
+            <RouterLink :to="blogPath(blog)"><b>{{ blog.name }}</b></RouterLink>
             <a class="sub" :href="blog.homepage" target="_blank" rel="noopener">{{ hostOf(blog.homepage) }} ↗</a>
           </span>
           <button class="link" @click="choose(null)">不是我的</button>

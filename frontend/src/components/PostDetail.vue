@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { api, cachedPost, categoryName, rememberPosts } from '../api'
-import { fullDate, hostOf, hue, initial } from '../format'
+import { blogPath, fullDate, hostOf, hue, initial } from '../format'
 import { recordVisit } from '../library'
 import { openInReader, readerIntent, readerIntentEnd, warmUp } from '../reader'
 import type { PostCard, PostDetail } from '../types'
@@ -120,7 +120,7 @@ function ahead(url: string, title: string, delay?: number) {
               <path d="m15 5-7 7 7 7" />
             </svg>
           </button>
-          <RouterLink :to="`/blog/${post.blog.id}`" class="who">
+          <RouterLink :to="blogPath(post.blog)" class="who">
             <BlogAvatar :name="post.blog.name" :icon="post.blog.icon" :size="30" />
             <span>{{ post.blog.name }}</span>
           </RouterLink>
@@ -140,7 +140,7 @@ function ahead(url: string, title: string, delay?: number) {
 
         <section class="panel">
           <header class="panel-head">
-            <RouterLink :to="`/blog/${post.blog.id}`" class="who">
+            <RouterLink :to="blogPath(post.blog)" class="who">
               <BlogAvatar :name="post.blog.name" :icon="post.blog.icon" :size="36" />
               <span>{{ post.blog.name }}</span>
             </RouterLink>

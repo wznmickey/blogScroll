@@ -62,6 +62,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/posts/{id}/related", get(related_posts))
         .route("/api/blogs", get(list_blogs))
         .route("/api/blogs/{id}", get(get_blog))
+        .route("/api/sites/{*key}", get(get_blog_by_key))
         .with_state(state)
 }
 
@@ -655,6 +656,7 @@ struct PostRow {
     comment_count: Option<i64>,
     comments_url: Option<String>,
     blog_id: i64,
+    blog_key: String,
     blog_name: String,
     blog_homepage: String,
     blog_icon: Option<String>,
@@ -670,6 +672,9 @@ struct PostRow {
 #[derive(Debug, Serialize)]
 pub struct BlogRef {
     id: i64,
+    /// The blog's address without scheme and `www.` (`util::site_key`): its
+    /// page is `/blog/{key}/`.
+    key: String,
     name: String,
     homepage: String,
     icon: Option<String>,
@@ -739,6 +744,7 @@ impl From<PostRow> for PostCard {
             why: r.why.and_then(|w| serde_json::from_str(&w).ok()),
             blog: BlogRef {
                 id: r.blog_id,
+                key: r.blog_key,
                 name: r.blog_name,
                 homepage: r.blog_homepage,
                 icon: r.blog_icon,
@@ -761,7 +767,7 @@ macro_rules! post_columns {
         "p.id, p.title, p.url, p.excerpt, p.excerpt_html, p.cover_url, p.author, p.tags, p.auto_tags, p.category,
      p.published_at, p.sort_at, p.undated,
      (p.content_html IS NOT NULL) AS has_full_text, p.comment_count, p.comments_url,
-     b.id AS blog_id, b.name AS blog_name, b.homepage_url AS blog_homepage,
+     b.id AS blog_id, b.site_key AS blog_key, b.name AS blog_name, b.homepage_url AS blog_homepage,
      COALESCE(b.avatar_custom, b.avatar_url, b.icon_url) AS blog_icon,
      (SELECT json_group_array(DISTINCT bt.tag) FROM blog_tags bt WHERE bt.blog_id = b.id) AS blog_tags,
      COALESCE(b.kind, b.detected_kind, 'blog') AS blog_kind, b.framable AS blog_framable, p.nsfw"
@@ -1496,6 +1502,7 @@ pub struct BlogQuery {
 #[derive(Debug, FromRow)]
 struct BlogSummaryRow {
     id: i64,
+    key: String,
     name: String,
     homepage: String,
     icon: Option<String>,
@@ -1513,6 +1520,8 @@ struct BlogSummaryRow {
 #[derive(Debug, Serialize)]
 pub struct BlogSummary {
     id: i64,
+    /// See `BlogRef::key`.
+    key: String,
     name: String,
     homepage: String,
     icon: Option<String>,
@@ -1540,6 +1549,7 @@ impl BlogSummary {
             framable: r.framable,
             directory_ids: serde_json::from_str(&r.directory_ids).unwrap_or_default(),
             id: r.id,
+            key: r.key,
             name: r.name,
             homepage: r.homepage,
             icon: r.icon,
@@ -1553,7 +1563,7 @@ impl BlogSummary {
 
 macro_rules! blog_summary_sql {
     () => {
-        "SELECT b.id, b.name, b.homepage_url AS homepage, COALESCE(b.avatar_custom, b.avatar_url, b.icon_url) AS icon,
+        "SELECT b.id, b.site_key AS key, b.name, b.homepage_url AS homepage, COALESCE(b.avatar_custom, b.avatar_url, b.icon_url) AS icon,
             COALESCE(b.description_custom, NULLIF(b.description, b.name)) AS description,
             (SELECT COUNT(*) FROM posts p WHERE p.blog_id = b.id) AS post_count,
             (SELECT MAX(p.sort_at) FROM posts p WHERE p.blog_id = b.id AND p.undated = 0) AS last_post_at,
@@ -1690,6 +1700,15 @@ pub struct CrawlStatus {
 pub struct BlogDirectory {
     directory: String,
     name: String,
+}
+
+/// A blog by its address (`/api/sites/example.com/blog`), as `/blog/{key}/` links to it.
+async fn get_blog_by_key(State(st): State<AppState>, Path(key): Path<String>) -> ApiResult<BlogDetail> {
+    let id: Option<i64> = sqlx::query_scalar("SELECT id FROM blogs WHERE site_key = ?")
+        .bind(key.trim_end_matches('/'))
+        .fetch_optional(&st.pool)
+        .await?;
+    get_blog(State(st), Path(id.ok_or_else(not_found)?)).await
 }
 
 async fn get_blog(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<BlogDetail> {
@@ -2034,6 +2053,20 @@ pub(crate) mod tests {
         assert_eq!(count(&v), 9);
         let (_, v) = get_json(&st, "/api/posts?mode=latest&limit=100&directories=elsewhere").await;
         assert_eq!(count(&v), 0);
+    }
+
+    #[tokio::test]
+    async fn blogs_by_address() {
+        let st = seeded().await;
+        let (status, v) = get_json(&st, "/api/sites/b1.example").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!((v["id"].as_i64(), v["key"].as_str()), (Some(1), Some("b1.example")));
+        let (_, v) = get_json(&st, "/api/sites/b2.example/").await;
+        assert_eq!(v["id"], 2, "with the trailing slash of its page");
+        let (status, _) = get_json(&st, "/api/sites/nowhere.example").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (_, v) = get_json(&st, "/api/posts?mode=latest&limit=1").await;
+        assert!(v["items"][0]["blog"]["key"].as_str().unwrap().ends_with(".example"));
     }
 
     #[tokio::test]
