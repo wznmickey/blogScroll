@@ -50,7 +50,7 @@ cargo run -- crawl --blog 42       # 立刻抓某一个博客
 cargo run -- serve --no-crawl      # 只提供网页和 API
 cargo run -- crawl --sync --all    # 定时任务用：同步（如到期）并抓完所有到期的博客
 cargo run -- analyze               # 重算全部关键词、标签、分类和相似度（serve 每 6 小时自动做）
-cargo run -- export --out DIR      # 导出静态 JSON（静态版前端读取）
+cargo run -- export --out DIR      # 导出静态 JSON（静态版前端读取）；加 --site-url 再生成给搜索引擎的页面
 cargo run -- backup                # 立刻做一次 git 备份（见下文；serve 按 every_hours 自动做）
 cargo run -- restore --from DIR    # 从备份仓库恢复到一个新的空数据库
 cargo test
@@ -78,7 +78,10 @@ docker compose up -d          # http://127.0.0.1:8080，前面再挂 Caddy / ngi
 
 ### B. 不要服务器：GitHub Actions 定时抓取 + GitHub Pages
 
-`.github/workflows/pages.yml` 每 3 小时：恢复上次的数据库 → 同步成员列表（每天一次）→ 只抓到期的 RSS → 导出静态 JSON → 构建静态版前端 → 发布到 Pages。
+两个工作流，抓取和发布分开：
+
+- `.github/workflows/pages.yml`（Crawl）每 3 小时：恢复上次的数据库 → 同步成员列表（每天一次）→ 只抓到期的 RSS → 存回缓存（和备份）→ 调用发布。
+- `.github/workflows/publish.yml`（Publish site）：用缓存里最新的数据库构建静态版并发布到 Pages，不抓取，几分钟完成。除了抓完以后，每次推送到 main 且 CI 测试通过也会运行，所以改代码不用等下一轮抓取；也可以手动运行。
 
 默认关闭，开启步骤：
 
@@ -86,23 +89,31 @@ docker compose up -d          # http://127.0.0.1:8080，前面再挂 Caddy / ngi
 2. Settings → Secrets and variables → Actions → **Variables** 新建：
    - `ENABLE_PAGES_CRAWL` = `true`
    - `FEED_USER_AGENT` = `blogScroll/0.1 (RSS reader; low frequency; honours ETag, Cache-Control and Retry-After)`
-3. Actions 里手动运行一次 “Crawl & publish”。首次要发现 1300 多个 RSS，约一小时；之后每次几分钟。
+3. Actions 里手动运行一次 “Crawl (GitHub Pages)”。首次要发现 1300 多个 RSS，约一小时；之后每次几分钟。
 
 说明：
 
 - 数据库（ETag、刷新节奏、退避状态）存在 Actions 缓存里，每次运行存一份新的，只保留最近 3 份。缓存并不永久（7 天没用到或总量超过 10 GB 会被清掉）；丢失时如果配了下面的 git 备份，就从备份恢复，否则下一轮从头重新抓一遍。
 - 可选：每次抓完把数据备份到一个私有仓库（见「备份到 GitHub 私有仓库」），并在缓存丢失时从它恢复。在那个仓库加一个有写权限的 deploy key，把私钥存为本仓库的 Secret `BACKUP_DEPLOY_KEY`，再加 Variable `BACKUP_REPO` = `你/私有仓库名`。备份失败不影响网站发布。
-- 静态版用 `#/` 路由（Pages 不能把深链接改写到 index.html）；推荐、筛选、搜索都在浏览器里完成，覆盖最新 3000 篇，博客主页覆盖该博客已存的全部文章。
+- 静态版用真实路径（`/blogScroll/blog/12`）：导出时为每个要被搜索引擎看到的页面生成 HTML 文件（见「搜索引擎」），其余路径（搜索、我的）由 `404.html` 接住，照常打开。以前的 `#/blog/12` 链接会自动跳到新地址。推荐、筛选、搜索都在浏览器里完成，覆盖最新 3000 篇，博客主页覆盖该博客已存的全部文章。
 - Runner 在海外机房：少数国内博客会拦截或超时，数据会比自建服务器少一些。
 - 私有仓库每月只有 2000 分钟免费额度，这个频率会超；建议用公开仓库，或把 cron 改成每 6 小时。公开仓库 60 天没有提交，GitHub 会自动停用定时任务。
 - GitHub 的定时触发不保证准时，繁忙时会推迟或直接跳过。抓取是增量的，少跑几次只是更新慢一些；需要准时的话，可以从外部（自己的机器、cron-job.org 等）定时调用 `POST /repos/<owner>/<repo>/actions/workflows/pages.yml/dispatches`（body `{"ref":"main"}`，用只有本仓库 Actions 写权限的 token）。
-- 本地预览静态版：
+- 本地预览静态版（需要一个像 Pages 一样把 `/blog/12` 对应到 `blog/12.html`、找不到时给 `404.html` 的服务器，例如 `npx serve`）：
 
   ```sh
   cd frontend && VITE_STATIC=1 npm run build && cd ../backend
-  cargo run -- export --out ../frontend/dist/data
-  cd ../frontend/dist && python3 -m http.server 8000   # http://127.0.0.1:8000
+  cargo run -- export --out ../frontend/dist/data --site-url http://localhost:3000
+  npx serve ../frontend/dist   # http://localhost:3000
   ```
+
+### 搜索引擎
+
+静态版导出时（`--site-url` 为网站地址，工作流会自动填）在应用的 `index.html` 基础上，为首页、全部博客、关于和每个博客的主页各生成一个页面：标题、描述、canonical、Open Graph，以及正文本身（简介、社交链接、分类标签、文章列表）的普通 HTML，不运行 JavaScript 的爬虫也能读到；浏览器打开后应用照常接管。另外生成 `sitemap.xml`、`robots.txt` 和 `404.html`（搜索、我的等页面用它打开，标记 `noindex`）。
+
+文章不单独生成页面：列表里的文章直接链到原文，搜索结果会把人带到原博客，也给小博客带去外链，而不是和作者抢排名。
+
+GitHub Pages 的项目页（`你.github.io/blogScroll/`）不在域名根目录，`robots.txt` 不生效；在 Google Search Console、Bing Webmaster Tools 里添加网站后，手动提交 `https://你.github.io/blogScroll/sitemap.xml`。用自定义域名时 `robots.txt` 会自动指向 sitemap。
 
 ## 抓取策略：只读 RSS，不给别人添麻烦
 

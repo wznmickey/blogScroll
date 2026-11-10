@@ -1,0 +1,36 @@
+# Installs the backup repository's deploy key for git over ssh. A key that
+# cannot be used is reported clearly and turns the backup steps off (ok is
+# not "true"); the workflow goes on either way.
+name: Backup deploy key
+description: Check and install the deploy key of the backup repository.
+inputs:
+  deploy-key:
+    description: The private key (secrets.BACKUP_DEPLOY_KEY).
+    required: true
+outputs:
+  ok:
+    description: '"true" when the key can be used.'
+    value: ${{ steps.key.outputs.ok }}
+runs:
+  using: composite
+  steps:
+    - id: key
+      shell: bash
+      env:
+        DEPLOY_KEY: ${{ inputs.deploy-key }}
+      run: |
+        install -m 700 -d ~/.ssh
+        # Pasted keys can come with Windows line ends.
+        printf '%s\n' "$DEPLOY_KEY" | tr -d '\r' > ~/.ssh/backup_key
+        chmod 600 ~/.ssh/backup_key
+        if ! ssh-keygen -y -P '' -f ~/.ssh/backup_key > /dev/null 2>&1; then
+          case "$DEPLOY_KEY" in
+            '') echo "::error::Secret BACKUP_DEPLOY_KEY is empty." ;;
+            ssh-*) echo "::error::Secret BACKUP_DEPLOY_KEY holds a public key. It needs the private one: the whole key file without .pub, from -----BEGIN to -----END." ;;
+            *) echo "::error::Secret BACKUP_DEPLOY_KEY is not a usable private key. It needs the whole key file without .pub, from -----BEGIN to -----END, and no passphrase." ;;
+          esac
+          rm -f ~/.ssh/backup_key
+          exit 0
+        fi
+        echo "GIT_SSH_COMMAND=ssh -i $HOME/.ssh/backup_key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new" >> "$GITHUB_ENV"
+        echo "ok=true" >> "$GITHUB_OUTPUT"

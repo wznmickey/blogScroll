@@ -14,6 +14,7 @@ mod fulltext;
 mod html;
 mod http;
 mod profile;
+mod seo;
 mod sources;
 mod util;
 
@@ -115,6 +116,10 @@ enum Command {
         feed_posts: usize,
         #[arg(long, default_value_t = 500)]
         shard_size: usize,
+        /// The site's public address, e.g. https://you.github.io/blogScroll:
+        /// also write pages for search engines (and a sitemap) next to --out.
+        #[arg(long)]
+        site_url: Option<String>,
     },
 }
 
@@ -230,6 +235,7 @@ async fn main() -> anyhow::Result<()> {
             out,
             feed_posts,
             shard_size,
+            site_url,
         } => {
             let s = analyze::retag_all(&pool).await?;
             println!("analyzed {} posts", s.posts);
@@ -238,7 +244,12 @@ async fn main() -> anyhow::Result<()> {
                 site_name: cfg.server.site_name.clone(),
                 directories: Arc::new(dir_info),
             };
-            let opts = export::ExportOptions { feed_posts, shard_size };
+            let opts = export::ExportOptions {
+                feed_posts,
+                shard_size,
+                site_url,
+                site_name: cfg.server.site_name.clone(),
+            };
             let s = export::export(api::router(state), &out, &opts).await?;
             println!(
                 "exported {} posts in {} shards and {} blogs to {}",

@@ -1,0 +1,114 @@
+# Static mode, part 2: build the site from the newest crawled database and
+# publish it to GitHub Pages. No crawling here, so it takes minutes:
+#   - after each push to main whose tests passed (CI), so code changes go out
+#     without waiting for the next crawl;
+#   - at the end of every crawl (pages.yml);
+#   - by hand (Actions → Publish site → Run workflow).
+# Off until ENABLE_PAGES_CRAWL = true, like the crawl (see pages.yml).
+name: Publish site (GitHub Pages)
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  publish:
+    # From CI: only when its tests passed.
+    if: >-
+      vars.ENABLE_PAGES_CRAWL == 'true' &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # A newer publish replaces one still in progress.
+    concurrency:
+      group: pages-publish
+      cancel-in-progress: true
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    env:
+      FEED_CONFIG: ../deploy/config.actions.toml
+      FEED_USER_AGENT: ${{ vars.FEED_USER_AGENT }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The commit CI tested; otherwise the branch as it is now.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # Read only: whatever changes here (migrations, analysis) is redone by
+      # the next crawl, which owns the database.
+      - name: Restore crawler database
+        id: cache
+        uses: actions/cache/restore@v6
+        with:
+          path: backend/data
+          key: feed-db-publish-${{ github.run_id }}
+          restore-keys: feed-db-
+
+      - name: Build exporter
+        working-directory: backend
+        run: cargo build --release --locked
+
+      - name: Use the backup repository's deploy key
+        id: key
+        if: vars.BACKUP_REPO != '' && steps.cache.outputs.cache-matched-key == ''
+        uses: ./.github/actions/backup-key
+        with:
+          deploy-key: ${{ secrets.BACKUP_DEPLOY_KEY }}
+
+      # No cached database: publish from the last backup rather than an empty site.
+      - name: Restore database from the backup
+        if: steps.key.outputs.ok == 'true'
+        continue-on-error: true
+        working-directory: backend
+        run: |
+          git clone --quiet --depth 1 "git@github.com:${{ vars.BACKUP_REPO }}.git" "$RUNNER_TEMP/backup"
+          if [ -f "$RUNNER_TEMP/backup/meta.json" ]; then
+            ./target/release/feed-server restore --from "$RUNNER_TEMP/backup"
+          fi
+
+      - id: pages
+        uses: actions/configure-pages@v6
+
+      - name: Build static site
+        working-directory: frontend
+        env:
+          VITE_STATIC: '1'
+          VITE_BASE: ${{ steps.pages.outputs.base_path }}/
+        run: |
+          npm ci
+          npm run build
+
+      # Data for the app, plus pages for search engines (blog/<id>.html,
+      # sitemap.xml, ...) built around the app's index.html.
+      - name: Export data and pages
+        working-directory: backend
+        run: >-
+          ./target/release/feed-server export
+          --out ../frontend/dist/data
+          --site-url "${{ steps.pages.outputs.base_url }}"
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: frontend/dist
+
+      - id: deploy
+        uses: actions/deploy-pages@v5

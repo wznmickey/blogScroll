@@ -1,4 +1,5 @@
-# Static mode: crawl on a schedule and publish to GitHub Pages, no server needed.
+# Static mode, part 1: crawl on a schedule, then publish (publish.yml). The
+# site's code is published on its own after each tested push, without a crawl.
 #
 # Off until you opt in, so pushing the repo never starts crawling by surprise:
 #   1. Settings → Pages → Source: "GitHub Actions"
@@ -15,7 +16,7 @@
 #            whole file without .pub, from -----BEGIN to -----END;
 #            Variables → BACKUP_REPO = owner/name, e.g. you/blogscroll-data.
 # Backups only ever add commits; see "备份到 GitHub 私有仓库" in README.md.
-name: Crawl & publish (GitHub Pages)
+name: Crawl (GitHub Pages)
 
 on:
   schedule:
@@ -25,22 +26,19 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
   actions: write # prune old database caches
+  pages: write # for publish.yml
+  id-token: write # for publish.yml
 
 concurrency:
   group: pages-crawl
   cancel-in-progress: false
 
 jobs:
-  crawl-and-publish:
+  crawl:
     if: vars.ENABLE_PAGES_CRAWL == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 150
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
+    timeout-minutes: 130
     env:
       FEED_CONFIG: ../deploy/config.actions.toml
       FEED_USER_AGENT: ${{ vars.FEED_USER_AGENT }}
@@ -50,11 +48,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: backend
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
 
       # The SQLite database is the crawler's memory (ETags, schedules, backoff).
       # Each run saves a new cache entry; the newest one is restored.
@@ -70,30 +63,12 @@ jobs:
         working-directory: backend
         run: cargo build --release --locked
 
-      # A key that cannot be used turns the backup steps off for this run;
-      # crawling and publishing go on.
       - name: Use the backup repository's deploy key
         id: key
         if: vars.BACKUP_REPO != ''
-        continue-on-error: true
-        env:
-          DEPLOY_KEY: ${{ secrets.BACKUP_DEPLOY_KEY }}
-        run: |
-          install -m 700 -d ~/.ssh
-          # Pasted keys can come with Windows line ends.
-          printf '%s\n' "$DEPLOY_KEY" | tr -d '\r' > ~/.ssh/backup_key
-          chmod 600 ~/.ssh/backup_key
-          if ! ssh-keygen -y -P '' -f ~/.ssh/backup_key > /dev/null 2>&1; then
-            case "$DEPLOY_KEY" in
-              '') echo "::error::Secret BACKUP_DEPLOY_KEY is empty." ;;
-              ssh-*) echo "::error::Secret BACKUP_DEPLOY_KEY holds a public key. It needs the private one: the whole key file without .pub, from -----BEGIN to -----END." ;;
-              *) echo "::error::Secret BACKUP_DEPLOY_KEY is not a usable private key. It needs the whole key file without .pub, from -----BEGIN to -----END, and no passphrase." ;;
-            esac
-            rm -f ~/.ssh/backup_key
-            exit 1
-          fi
-          echo "GIT_SSH_COMMAND=ssh -i $HOME/.ssh/backup_key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new" >> "$GITHUB_ENV"
-          echo "ok=true" >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/backup-key
+        with:
+          deploy-key: ${{ secrets.BACKUP_DEPLOY_KEY }}
 
       # No cache to carry on from: start from the last backup instead of from
       # nothing. The restore is all or nothing; if it fails, crawling starts
@@ -141,25 +116,9 @@ jobs:
           gh cache list -R "$GITHUB_REPOSITORY" --key feed-db- --sort created_at --order desc --limit 100 \
             --json id --jq '.[3:][].id' | xargs -r -n1 gh cache delete -R "$GITHUB_REPOSITORY"
 
-      - id: pages
-        uses: actions/configure-pages@v6
-
-      - name: Build static site
-        working-directory: frontend
-        env:
-          VITE_STATIC: '1'
-          VITE_BASE: ${{ steps.pages.outputs.base_path }}/
-        run: |
-          npm ci
-          npm run build
-
-      - name: Export data
-        working-directory: backend
-        run: ./target/release/feed-server export --out ../frontend/dist/data
-
-      - uses: actions/upload-pages-artifact@v5
-        with:
-          path: frontend/dist
-
-      - id: deploy
-        uses: actions/deploy-pages@v5
+  # Whatever was crawled (even if the crawl stopped early) goes out.
+  publish:
+    needs: crawl
+    if: ${{ !cancelled() && needs.crawl.result != 'skipped' }}
+    uses: ./.github/workflows/publish.yml
+    secrets: inherit
