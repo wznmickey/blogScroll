@@ -574,10 +574,11 @@ pub async fn upsert_post(
     let (id, first_seen): (i64, i64) = sqlx::query_as(
         "INSERT INTO posts (blog_id, guid, url, title, excerpt, cover_url, author, tags,
                             published_at, first_seen_at, sort_at, content_html, content_source,
-                            comments_url, comment_count, undated, keywords)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                            comments_url, comment_count, undated, keywords, excerpt_html)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?19)
          ON CONFLICT(blog_id, guid) DO UPDATE SET
             url = excluded.url, title = excluded.title, excerpt = excluded.excerpt,
+            excerpt_html = excluded.excerpt_html,
             cover_url = excluded.cover_url, author = excluded.author, tags = excluded.tags,
             sort_at = CASE
                 WHEN excluded.published_at IS NOT NULL THEN MIN(excluded.published_at, posts.first_seen_at)
@@ -617,6 +618,7 @@ pub async fn upsert_post(
     .bind(backlog)
     .bind(e.keywords_json)
     .bind(backlog_sort)
+    .bind(&item.excerpt_html)
     .fetch_one(&mut *conn)
     .await?;
     Ok(Upserted {
@@ -906,6 +908,7 @@ mod tests {
             url: Url::parse(&format!("https://a.example/{guid}")).unwrap(),
             title: guid.into(),
             excerpt: String::new(),
+            excerpt_html: None,
             cover: None,
             author: None,
             tags: vec![],
@@ -965,6 +968,7 @@ mod tests {
                 url: Url::parse(&format!("https://a.example/{n}")).unwrap(),
                 title: format!("p{n}"),
                 excerpt: String::new(),
+                excerpt_html: None,
                 cover: None,
                 author: None,
                 tags: vec![],

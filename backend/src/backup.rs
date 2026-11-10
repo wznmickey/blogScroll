@@ -165,6 +165,8 @@ struct PostRecord {
     url: String,
     title: String,
     excerpt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    excerpt_html: Option<String>,
     cover_url: Option<String>,
     author: Option<String>,
     #[serde(with = "json_text")]
@@ -263,6 +265,9 @@ impl BlogFile {
             }
             if p.cover_url.is_none() {
                 p.cover_url = o.cover_url;
+            }
+            if p.excerpt_html.is_none() {
+                p.excerpt_html = o.excerpt_html;
             }
             if p.comments_url.is_none() {
                 p.comments_url = o.comments_url;
@@ -419,7 +424,7 @@ async fn read_database(pool: &SqlitePool) -> anyhow::Result<BTreeMap<String, Blo
         }
     }
     let posts: Vec<PostRecord> = sqlx::query_as(
-        "SELECT blog_id, guid, url, title, excerpt, cover_url, author, tags, published_at, first_seen_at,
+        "SELECT blog_id, guid, url, title, excerpt, excerpt_html, cover_url, author, tags, published_at, first_seen_at,
                 sort_at, undated, keywords, content_html, content_source, comments_url
          FROM posts ORDER BY id",
     )
@@ -710,7 +715,7 @@ async fn update_blog(
             Some(old) if *old != p => {
                 changed = true;
                 sqlx::query(
-                    "UPDATE posts SET first_seen_at = ?, sort_at = ?, undated = ?, cover_url = ?,
+                    "UPDATE posts SET first_seen_at = ?, sort_at = ?, undated = ?, cover_url = ?, excerpt_html = ?,
                         comments_url = ?, content_html = ?, content_source = ?
                      WHERE blog_id = ? AND guid = ?",
                 )
@@ -718,6 +723,7 @@ async fn update_blog(
                 .bind(p.sort_at)
                 .bind(p.undated)
                 .bind(&p.cover_url)
+                .bind(&p.excerpt_html)
                 .bind(&p.comments_url)
                 .bind(&p.content_html)
                 .bind(&p.content_source)
@@ -783,15 +789,16 @@ async fn insert_entries(
 
 async fn insert_post(tx: &mut sqlx::SqliteConnection, blog_id: i64, p: &PostRecord) -> anyhow::Result<()> {
     sqlx::query(
-        "INSERT INTO posts (blog_id, guid, url, title, excerpt, cover_url, author, tags, published_at,
+        "INSERT INTO posts (blog_id, guid, url, title, excerpt, excerpt_html, cover_url, author, tags, published_at,
             first_seen_at, sort_at, undated, keywords, content_html, content_source, comments_url)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(blog_id)
     .bind(&p.guid)
     .bind(&p.url)
     .bind(&p.title)
     .bind(&p.excerpt)
+    .bind(&p.excerpt_html)
     .bind(&p.cover_url)
     .bind(&p.author)
     .bind(&p.tags)

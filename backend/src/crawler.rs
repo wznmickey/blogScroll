@@ -913,6 +913,7 @@ mod tests {
                     url: Url::parse(&format!("https://b.example/{g}")).unwrap(),
                     title: g.to_string(),
                     excerpt: String::new(),
+                    excerpt_html: None,
                     cover: None,
                     author: None,
                     tags: vec![],

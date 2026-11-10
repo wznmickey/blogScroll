@@ -570,10 +570,21 @@ pub struct PostQuery {
     /// `1`: only posts with a cover image; `none`: only posts without one.
     #[serde(default)]
     cover: Option<String>,
-    /// `1`: only posts with some text: an excerpt of at least 20 characters
-    /// (below that, cards show the title instead). Ignored with `cover`.
+    /// `1`: only posts with a long excerpt (50 characters or more).
     #[serde(default)]
     text: Option<String>,
+    /// `1`: only posts with comments (a known count above 0).
+    #[serde(default)]
+    comments: Option<String>,
+}
+
+/// What a post must have to be listed (filters `cover`, `text`, `comments`),
+/// as bits of `post_filters!`'s ?12.
+mod only {
+    pub const COVER: i64 = 1;
+    pub const NO_COVER: i64 = 2;
+    pub const LONG_EXCERPT: i64 = 4;
+    pub const COMMENTS: i64 = 8;
 }
 
 #[derive(Debug, FromRow)]
@@ -582,6 +593,7 @@ struct PostRow {
     title: String,
     url: String,
     excerpt: String,
+    excerpt_html: Option<String>,
     cover_url: Option<String>,
     author: Option<String>,
     tags: String,
@@ -621,6 +633,10 @@ pub struct PostCard {
     title: String,
     url: String,
     excerpt: String,
+    /// The excerpt with its formatting (paragraphs, lists, headings,
+    /// emphasis), when it has any: tags without attributes, safe to show.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    excerpt_html: Option<String>,
     cover: Option<String>,
     author: Option<String>,
     /// The author's own tags and categories.
@@ -648,6 +664,7 @@ impl From<PostRow> for PostCard {
             title: r.title,
             url: r.url,
             excerpt: r.excerpt,
+            excerpt_html: r.excerpt_html,
             cover: r.cover_url,
             author: r.author,
             tags: tags.iter().map(|t| analyze::tag_display(t)).collect(),
@@ -680,7 +697,7 @@ pub struct Page<T> {
 
 macro_rules! post_columns {
     () => {
-        "p.id, p.title, p.url, p.excerpt, p.cover_url, p.author, p.tags, p.auto_tags, p.category,
+        "p.id, p.title, p.url, p.excerpt, p.excerpt_html, p.cover_url, p.author, p.tags, p.auto_tags, p.category,
      p.published_at, p.sort_at, p.undated,
      (p.content_html IS NOT NULL) AS has_full_text, p.comment_count, p.comments_url,
      b.id AS blog_id, b.name AS blog_name, b.homepage_url AS blog_homepage,
@@ -691,15 +708,17 @@ macro_rules! post_columns {
 }
 
 /// Filters shared by both feed modes, on parameters ?10–?16: directory tag,
-/// directory, with or without a cover or with text, tag key, category (a top-level one includes its
-/// sub-categories), kind, blog ids (JSON).
+/// directory, what posts must have (`only` bits), tag key, category (a
+/// top-level one includes its sub-categories), kind, blog ids (JSON).
 macro_rules! post_filters {
     () => {
         " AND (?10 IS NULL OR EXISTS (SELECT 1 FROM blog_tags bt WHERE bt.blog_id = b.id AND bt.tag = ?10))
           AND (?11 IS NULL OR EXISTS (SELECT 1 FROM directory_entries de
                  WHERE de.blog_id = b.id AND de.active = 1 AND de.directory = ?11))
-          AND (?12 IS NULL OR (?12 = 'cover' AND p.cover_url IS NOT NULL) OR (?12 = 'none' AND p.cover_url IS NULL)
-               OR (?12 = 'text' AND length(trim(p.excerpt)) >= 20))
+          AND ((?12 & 1) = 0 OR p.cover_url IS NOT NULL)
+          AND ((?12 & 2) = 0 OR p.cover_url IS NULL)
+          AND ((?12 & 4) = 0 OR length(trim(p.excerpt)) >= 50)
+          AND ((?12 & 8) = 0 OR p.comment_count > 0)
           AND (?13 IS NULL OR EXISTS (SELECT 1 FROM post_terms pt WHERE pt.post_id = p.id AND pt.is_tag = 1 AND pt.term = ?13))
           AND (?14 IS NULL OR p.category = ?14 OR substr(p.category, 1, length(?14) + 1) = ?14 || '/')
           AND (?15 IS NULL OR COALESCE(b.kind, b.detected_kind, 'blog') = ?15)
@@ -710,9 +729,8 @@ macro_rules! post_filters {
 struct Filters<'a> {
     dirtag: Option<&'a str>,
     directory: Option<&'a str>,
-    /// `cover`: only with a cover image, `none`: only without, `text`:
-    /// only with an excerpt worth reading.
-    media: Option<&'static str>,
+    /// Bits of `only`.
+    only: i64,
     tag: Option<String>,
     category: Option<&'a str>,
     kind: Option<&'a str>,
@@ -727,7 +745,7 @@ impl Filters<'_> {
     ) -> sqlx::query::QueryAs<'q, sqlx::Sqlite, O, sqlx::sqlite::SqliteArguments> {
         q.bind(self.dirtag)
             .bind(self.directory)
-            .bind(self.media)
+            .bind(self.only)
             .bind(self.tag.as_deref())
             .bind(self.category)
             .bind(self.kind)
@@ -769,12 +787,12 @@ async fn list_posts(State(st): State<AppState>, Query(q): Query<PostQuery>) -> A
     let f = Filters {
         dirtag: non_empty(&q.dirtag),
         directory: non_empty(&q.directory),
-        media: match non_empty(&q.cover) {
-            Some("none" | "no" | "without") => Some("none"),
-            _ if truthy(&q.cover) => Some("cover"),
-            _ if truthy(&q.text) => Some("text"),
-            _ => None,
-        },
+        only: match non_empty(&q.cover) {
+            Some("none" | "no" | "without") => only::NO_COVER,
+            _ if truthy(&q.cover) => only::COVER,
+            _ => 0,
+        } | if truthy(&q.text) { only::LONG_EXCERPT } else { 0 }
+            | if truthy(&q.comments) { only::COMMENTS } else { 0 },
         tag: non_empty(&q.tag).map(analyze::tag_key),
         category: non_empty(&q.category),
         kind: non_empty(&q.kind),
@@ -1633,6 +1651,7 @@ pub(crate) mod tests {
                     url: Url::parse(&format!("https://b{blog}.example/p/{n}")).unwrap(),
                     title: format!("Post {blog}-{n} 100%"),
                     excerpt: "摘要".into(),
+                    excerpt_html: None,
                     cover: (n % 2 == 0).then(|| Url::parse("https://img.example/a.jpg").unwrap()),
                     author: None,
                     tags: if n % 2 == 0 {
@@ -1751,15 +1770,24 @@ pub(crate) mod tests {
         assert_eq!(items.len(), 4);
         assert!(items.iter().all(|it| it["cover"].is_null()), "text-only posts");
 
-        // Excerpts of two characters are next to nothing; one real one.
+        // Excerpts of two characters are next to nothing; one long one.
         let (_, v) = get_json(&st, "/api/posts?text=1&limit=100").await;
         assert!(v["items"].as_array().unwrap().is_empty());
-        sqlx::query("UPDATE posts SET excerpt = '这一篇的摘要足够长，写了好几句话，值得一读。' WHERE id = 2")
-            .execute(&st.pool)
-            .await
-            .unwrap();
-        let (_, v) = get_json(&st, "/api/posts?text=1&limit=100").await;
-        assert_eq!(ids(&v, "/id"), [2]);
+        sqlx::query(
+            "UPDATE posts SET excerpt = '这一篇的摘要足够长，写了好几句话，讲了去哪里、看到了什么、想到了什么，最后还留了一个问题给读者，值得一读。'
+             WHERE id IN (2, 3)",
+        )
+        .execute(&st.pool)
+        .await
+        .unwrap();
+        let (_, v) = get_json(&st, "/api/posts?mode=latest&text=1&limit=100").await;
+        assert_eq!(ids(&v, "/id"), [3, 2]);
+        // The filters combine: of the two, only post 3 has a cover.
+        let (_, v) = get_json(&st, "/api/posts?text=1&cover=1&limit=100").await;
+        assert_eq!(ids(&v, "/id"), [3]);
+        // Only post 5 has comments (9); unknown counts do not count.
+        let (_, v) = get_json(&st, "/api/posts?comments=1&limit=100").await;
+        assert_eq!(ids(&v, "/id"), [5]);
 
         let (_, v) = get_json(&st, "/api/posts?tag=%E6%97%A5%E8%AE%B0&limit=100").await;
         let items = v["items"].as_array().unwrap();

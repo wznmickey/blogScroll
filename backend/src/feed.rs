@@ -16,7 +16,7 @@ use crate::util::truncate_chars;
 pub const EXCERPT_CHARS: usize = 240;
 /// Bump when parsing changes, so stored posts are re-parsed once even if
 /// their feed did not change (it is part of the crawler's content hash).
-pub const PARSER_VERSION: u32 = 7;
+pub const PARSER_VERSION: u32 = 8;
 /// Dates further ahead than this are typos (2077) or scheduled posts; ignored.
 const FUTURE_SLACK_SECS: i64 = 2 * 86400;
 
@@ -103,6 +103,8 @@ pub struct ParsedItem {
     pub url: Url,
     pub title: String,
     pub excerpt: String,
+    /// The excerpt with its formatting (paragraphs, lists, ...), when it has any.
+    pub excerpt_html: Option<String>,
     pub cover: Option<Url>,
     pub author: Option<String>,
     pub tags: Vec<String>,
@@ -214,6 +216,10 @@ fn convert_entry(entry: &Entry, feed_url: &Url) -> Option<ParsedItem> {
 
     let excerpt_source = summary.as_deref().or(content.as_deref()).unwrap_or_default();
     let excerpt = truncate_chars(&clean::excerpt_text(excerpt_source), EXCERPT_CHARS);
+    // As much text as the plain excerpt shows, which also leaves out the
+    // "read more" lines it drops at the end.
+    let shown = excerpt.trim_end_matches('…').chars().count();
+    let excerpt_html = crate::rich::excerpt_html(excerpt_source, shown);
 
     let title = entry
         .title
@@ -264,6 +270,7 @@ fn convert_entry(entry: &Entry, feed_url: &Url) -> Option<ParsedItem> {
         url,
         title: truncate_chars(&title, 200),
         excerpt,
+        excerpt_html,
         cover,
         author: entry
             .authors
@@ -663,6 +670,7 @@ mod tests {
             url: Url::parse(url).unwrap(),
             title: "t".into(),
             excerpt: String::new(),
+            excerpt_html: None,
             cover: None,
             author: None,
             tags: vec![],

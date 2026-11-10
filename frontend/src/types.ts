@@ -35,6 +35,8 @@ export interface PostCard {
   title: string
   url: string
   excerpt: string
+  /** The excerpt with its formatting (paragraphs, lists, headings, emphasis), when it has any. */
+  excerpt_html?: string
   cover: string | null
   author: string | null
   /** The author's own tags and categories. */

@@ -1,9 +1,9 @@
 <script setup lang="ts">
 // The home page's channel bar. Pinned channels stay at the left; the rest
 // scroll sideways (swipe, mouse wheel, drag, or the arrows on a desktop).
-// 全部 / 有图: every post, or only those with a picture, in any channel. The ▾
-// button opens the manager: reorder, pin, hide, add channels (categories,
-// types, tags).
+// The checkboxes leave posts out of every channel (无图, 短摘要, 0 评论), in
+// any combination. The ▾ button opens the manager: reorder, pin, hide, add
+// channels (categories, types, tags).
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { tagsInfo } from '../api'
 import {
@@ -11,6 +11,7 @@ import {
   allChannels,
   channel,
   COLUMN_CHOICES,
+  HIDE_CHOICES,
   MAX_PINNED,
   moveChannel,
   prefs,
@@ -19,7 +20,6 @@ import {
   shownChannels,
   togglePin,
   type ChannelId,
-  type Media,
 } from '../channels'
 import { useDragScroll } from '../composables/dragScroll'
 
@@ -31,10 +31,6 @@ const shown = computed(() => shownChannels(info.value))
 const shownIds = computed(() => new Set([...shown.value.pinned, ...shown.value.rest].map((c) => c.id)))
 /** The open channel when it is not in the bar (a tag or category from a link). */
 const extra = computed(() => (shownIds.value.has(props.active) ? null : channel(props.active, info.value)))
-
-function setMedia(m: Media) {
-  prefs.value.media = m
-}
 
 const open = ref(false)
 const note = ref('')
@@ -127,34 +123,17 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
           </svg>
         </button>
       </div>
-      <div class="media" role="group" aria-label="筛选文章">
-        <button
-          class="media-btn"
-          :class="{ on: prefs.media === 'all' }"
-          :aria-pressed="prefs.media === 'all'"
-          title="全部文章"
-          @click="setMedia('all')"
-        >
-          全部
-        </button>
-        <button
-          class="media-btn"
-          :class="{ on: prefs.media === 'cover' }"
-          :aria-pressed="prefs.media === 'cover'"
-          title="只看有图的文章"
-          @click="setMedia('cover')"
-        >
-          有图
-        </button>
-        <button
-          class="media-btn"
-          :class="{ on: prefs.media === 'text' }"
-          :aria-pressed="prefs.media === 'text'"
-          title="不看摘要很短（不到 20 个字）的文章"
-          @click="setMedia('text')"
-        >
-          有摘要
-        </button>
+      <div class="filters" role="group" aria-label="过滤掉这些文章">
+        <svg class="funnel" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true">
+          <path d="M4 5h16l-6 7.5V19l-4 1.5v-8z" />
+        </svg>
+        <label v-for="c in HIDE_CHOICES" :key="c.key" class="check" :class="{ on: prefs.hide[c.key] }" :title="`过滤掉${c.title}`">
+          <input v-model="prefs.hide[c.key]" type="checkbox" />
+          <svg v-if="prefs.hide[c.key]" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="m5 12 5 5 9-10" />
+          </svg>
+          {{ c.label }}
+        </label>
       </div>
       <button class="more" :class="{ open }" :aria-expanded="open" aria-label="管理频道" @click="open = !open">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -329,29 +308,57 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
 .chip.extra {
   outline: 1px dashed var(--line);
 }
-.media {
+.filters {
   display: flex;
   flex: none;
-  padding: 2px;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 2px 2px 8px;
   border-radius: 999px;
   background: var(--surface);
 }
-.media-btn {
+.funnel {
+  flex: none;
+  margin-right: 2px;
+  color: var(--text-3);
+}
+.check {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   height: 26px;
-  padding: 0 10px;
+  padding: 0 9px;
   border-radius: 999px;
   color: var(--text-2);
   font-size: 13px;
   white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
 }
-.media-btn:hover {
+.check:hover {
   color: var(--text);
 }
-.media-btn.on {
+/* The box itself is the pill; the input stays for keyboards and screen readers. */
+.check input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.check:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.check.on {
   background: var(--bg);
   color: var(--text);
   font-weight: 600;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+.check.on svg {
+  color: var(--accent);
 }
 .more {
   display: grid;

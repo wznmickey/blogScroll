@@ -1,4 +1,5 @@
 import { shallowRef } from 'vue'
+import type { Hide } from './channels'
 import { staticApi } from './staticApi'
 import type {
   BlogDetail,
@@ -55,8 +56,8 @@ export interface PostQuery {
   shown?: number[]
   /** Newest-first feeds: start at this post (inclusive) instead of the top. */
   startAt?: { sort_at: number; id: number }
-  /** Only posts with a cover image, or only those with an excerpt worth reading. */
-  media?: 'cover' | 'text'
+  /** Posts to leave out. */
+  hide?: Hide
 }
 
 export interface BlogQuery {
@@ -93,13 +94,14 @@ const liveApi = {
   tags: () => get<TagsInfo>('/api/tags'),
   /** Tags whose name contains `q`, most used first. */
   searchTags: (q: string, limit = 20) => get<TagStat[]>('/api/tags/search', { q, limit }),
-  posts: async ({ media, blogs, follow, like, save, read, shown, startAt, cursor, ...q }: PostQuery) => {
+  posts: async ({ hide, blogs, follow, like, save, read, shown, startAt, cursor, ...q }: PostQuery) => {
     const page = await get<Page<PostCard>>('/api/posts', {
       ...q,
       // The cursor is exclusive: one past the post itself.
       cursor: cursor ?? (startAt ? `${startAt.sort_at}.${startAt.id + 1}` : undefined),
-      cover: media === 'cover' ? 1 : undefined,
-      text: media === 'text' ? 1 : undefined,
+      cover: hide?.noCover ? 1 : undefined,
+      text: hide?.shortExcerpt ? 1 : undefined,
+      comments: hide?.noComments ? 1 : undefined,
       blogs: list(blogs),
       follow: list(follow),
       like: list(like),

@@ -14,6 +14,7 @@ mod fulltext;
 mod html;
 mod http;
 mod profile;
+mod rich;
 mod seo;
 mod sources;
 mod util;

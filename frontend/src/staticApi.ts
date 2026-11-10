@@ -3,7 +3,7 @@
 // `feed-server export` writes to <base>/data/. See backend/src/export.rs.
 
 import type { BlogQuery, PostQuery } from './api'
-import { hasText } from './format'
+import { hasLongExcerpt } from './format'
 import { entries } from './library'
 import type { BlogDetail, BlogSummary, Meta, Page, PostCard, PostDetail, TagsInfo, TagStat } from './types'
 
@@ -91,8 +91,9 @@ function postFilter(q: PostQuery) {
   const cat = q.category
   return (p: PostCard) =>
     (!q.dirtag || (p.blog.tags ?? []).includes(q.dirtag)) &&
-    (q.media !== 'cover' || !!p.cover) &&
-    (q.media !== 'text' || hasText(p)) &&
+    (!q.hide?.noCover || !!p.cover) &&
+    (!q.hide?.shortExcerpt || hasLongExcerpt(p)) &&
+    (!q.hide?.noComments || (p.comment_count ?? 0) > 0) &&
     (!cat || p.category.id === cat || p.category.id.startsWith(`${cat}/`)) &&
     (!q.kind || (p.blog.kind ?? 'blog') === q.kind) &&
     (!blogs || blogs.has(p.blog.id)) &&

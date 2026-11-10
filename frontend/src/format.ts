@@ -52,6 +52,10 @@ export const MIN_TEXT_CHARS = 20
 
 export const hasText = (post: { excerpt: string }) => [...post.excerpt.trim()].length >= MIN_TEXT_CHARS
 
+/** From here an excerpt is long (the 短摘要 filter keeps these; as on the server). */
+export const LONG_EXCERPT_CHARS = 50
+export const hasLongExcerpt = (post: { excerpt: string }) => [...post.excerpt.trim()].length >= LONG_EXCERPT_CHARS
+
 /** What a card without a picture shows: the excerpt, or the title when the
  *  excerpt is hardly anything. */
 export function textCoverText(post: { title: string; excerpt: string }): string {

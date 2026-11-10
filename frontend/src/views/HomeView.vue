@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api, categoryName, meta, tagLabel, tagsInfo, type PostQuery } from '../api'
-import { addChannel, channel, homeChannel, isMode, isShown, prefs, upgradeOldQuery, type ChannelId } from '../channels'
+import { addChannel, anyHidden, channel, homeChannel, isMode, isShown, prefs, upgradeOldQuery, type ChannelId } from '../channels'
 import ChannelBar from '../components/ChannelBar.vue'
 import { useDragScroll } from '../composables/dragScroll'
 import Waterfall from '../components/Waterfall.vue'
@@ -74,7 +74,7 @@ const subRow = computed(() => {
 
 // Personalisation is read when a feed (re)starts, not on every like.
 const resetKey = computed(() =>
-  [active.value, state.value.latest, state.value.dirtag, state.value.from, prefs.value.media, seed.value].join('|') +
+  [active.value, state.value.latest, state.value.dirtag, state.value.from, JSON.stringify(prefs.value.hide), seed.value].join('|') +
   (isFollowing.value ? `|${followIds.value.join('.')}` : ''),
 )
 
@@ -116,7 +116,7 @@ const load = async (cursor: string | null) => {
   const q: PostQuery = {
     cursor,
     startAt: resumeMark.value ?? undefined,
-    media: prefs.value.media === 'all' ? undefined : prefs.value.media,
+    hide: anyHidden(prefs.value.hide) ? { ...prefs.value.hide } : undefined,
     dirtag: state.value.dirtag || undefined,
     seed: seed.value,
     mode: active.value === 'explore' ? 'explore' : mixed.value ? 'discover' : 'latest',
@@ -253,7 +253,7 @@ const title = computed(() =>
     <Waterfall v-else :load="load" :reset-key="resetKey" :is-fresh="isFresh" @impression="onImpression">
       <template #empty>
         <div class="empty">
-          <p v-if="!isMode(active) || state.dirtag || prefs.media !== 'all'">没有符合条件的文章</p>
+          <p v-if="!isMode(active) || state.dirtag || anyHidden(prefs.hide)">没有符合条件的文章</p>
           <p v-else-if="isFollowing">关注的博主最近没有新文章</p>
           <template v-else>
             <p>还没有文章。</p>

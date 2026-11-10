@@ -130,7 +130,9 @@ function ahead(url: string, title: string, delay?: number) {
             <h1 class="title">{{ post.title }}</h1>
             <div v-if="detail?.content_html" class="content" v-html="detail.content_html" />
             <template v-else>
-              <p v-if="post.excerpt" class="excerpt">{{ post.excerpt }}</p>
+              <!-- Its formatting, when the feed had some: a few tags without attributes, written on the server. -->
+              <div v-if="post.excerpt_html" class="excerpt rich" v-html="post.excerpt_html" />
+              <p v-else-if="post.excerpt" class="excerpt">{{ post.excerpt }}</p>
               <p class="note">
                 以上为 RSS 摘要。为尊重作者，完整内容请到原博客阅读。
               </p>
@@ -338,6 +340,38 @@ function ahead(url: string, title: string, delay?: number) {
   margin: 0 0 12px;
   white-space: pre-line;
   word-break: break-word;
+}
+.excerpt.rich {
+  white-space: normal;
+  line-height: 1.75;
+}
+.rich :deep(p),
+.rich :deep(ul),
+.rich :deep(ol),
+.rich :deep(blockquote) {
+  margin: 0 0 8px;
+}
+.rich :deep(ul),
+.rich :deep(ol) {
+  padding-left: 1.4em;
+}
+.rich :deep(h4) {
+  margin: 12px 0 4px;
+  font-size: 15px;
+}
+.rich :deep(h4:first-child) {
+  margin-top: 0;
+}
+.rich :deep(blockquote) {
+  padding-left: 12px;
+  border-left: 3px solid var(--line);
+  color: var(--text-2);
+}
+.rich :deep(code) {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface);
+  font-size: 0.9em;
 }
 .note {
   margin: 12px 0;

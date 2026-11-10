@@ -62,8 +62,8 @@ interface Prefs {
   /** Shown channels in order; null = the default list (follows new categories). */
   order: ChannelId[] | null
   pinned: ChannelId[]
-  /** All posts, those with a cover image, or those with an excerpt worth reading. */
-  media: Media
+  /** Posts left out of every channel. */
+  hide: Hide
   /** Columns of the waterfall on wide screens; null = the site's default. */
   columns: number | null
 }
@@ -71,8 +71,23 @@ interface Prefs {
 /** Choices for the column count; null = the site's default. */
 export const COLUMN_CHOICES = [null, 1, 2, 3, 4, 5, 6, 7, 8] as const
 
-/** All posts, only those with a cover image, or only those with some text. */
-export type Media = 'all' | 'cover' | 'text'
+/** Posts left out of every channel; each one on its own, so they combine. */
+export interface Hide {
+  /** Without a cover image. */
+  noCover: boolean
+  /** With a short excerpt (below LONG_EXCERPT_CHARS): keeps the long ones. */
+  shortExcerpt: boolean
+  /** Without comments: none, or the count is not known. */
+  noComments: boolean
+}
+
+export const HIDE_CHOICES: { key: keyof Hide; label: string; title: string }[] = [
+  { key: 'noCover', label: '无图', title: '没有配图的文章' },
+  { key: 'shortExcerpt', label: '短摘要', title: '摘要不到 50 字的文章，只留长摘要' },
+  { key: 'noComments', label: '0 评论', title: '没有评论的文章（也包括不知道评论数的）' },
+]
+
+export const anyHidden = (h: Hide) => h.noCover || h.shortExcerpt || h.noComments
 
 const KEY = 'channels'
 const DEFAULT_PINNED = ['foryou']
@@ -92,10 +107,20 @@ export function cleanPrefs(v: unknown): Prefs {
   return {
     order: ids(o.order),
     pinned: (ids(o.pinned) ?? DEFAULT_PINNED).slice(0, MAX_PINNED),
-    // Older settings had only "only with images" (`cover: true`).
-    media:
-      o.media === 'cover' || (o as { cover?: unknown }).cover === true ? 'cover' : o.media === 'text' ? 'text' : 'all',
+    hide: cleanHide(o),
     columns: typeof o.columns === 'number' && Number.isInteger(o.columns) && o.columns >= 1 && o.columns <= 8 ? o.columns : null,
+  }
+}
+
+function cleanHide(o: Partial<Prefs>): Hide {
+  const h = (o.hide ?? {}) as Partial<Hide>
+  // Older settings: one choice of 全部 / 有图 / 有摘要 (`media`), before that
+  // only "with images" (`cover: true`).
+  const old = o as { media?: unknown; cover?: unknown }
+  return {
+    noCover: h.noCover === true || old.media === 'cover' || old.cover === true,
+    shortExcerpt: h.shortExcerpt === true || old.media === 'text',
+    noComments: h.noComments === true,
   }
 }
 
