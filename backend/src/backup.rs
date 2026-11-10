@@ -345,7 +345,13 @@ async fn ensure_repo(cfg: &BackupConfig, dir: &Path, batch_ssh: bool) -> anyhow:
         .unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent)?;
     let target = dir.to_string_lossy();
-    git(parent, &["clone", "--quiet", remote, &target], batch_ssh).await?;
+    // Only the latest snapshot is needed to add the next one.
+    git(
+        parent,
+        &["clone", "--quiet", "--depth", "1", remote, &target],
+        batch_ssh,
+    )
+    .await?;
     Ok(())
 }
 

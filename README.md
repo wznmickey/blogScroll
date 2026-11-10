@@ -90,7 +90,8 @@ docker compose up -d          # http://127.0.0.1:8080，前面再挂 Caddy / ngi
 
 说明：
 
-- 数据库（ETag、刷新节奏、退避状态）存在 Actions 缓存里，每次运行存一份新的，只保留最近 3 份；万一缓存丢失，只是下一轮重新发现一遍。
+- 数据库（ETag、刷新节奏、退避状态）存在 Actions 缓存里，每次运行存一份新的，只保留最近 3 份。缓存并不永久（7 天没用到或总量超过 10 GB 会被清掉）；丢失时如果配了下面的 git 备份，就从备份恢复，否则下一轮从头重新抓一遍。
+- 可选：每次抓完把数据备份到一个私有仓库（见「备份到 GitHub 私有仓库」），并在缓存丢失时从它恢复。在那个仓库加一个有写权限的 deploy key，把私钥存为本仓库的 Secret `BACKUP_DEPLOY_KEY`，再加 Variable `BACKUP_REPO` = `你/私有仓库名`。备份失败不影响网站发布。
 - 静态版用 `#/` 路由（Pages 不能把深链接改写到 index.html）；推荐、筛选、搜索都在浏览器里完成，覆盖最新 3000 篇，博客主页覆盖该博客已存的全部文章。
 - Runner 在海外机房：少数国内博客会拦截或超时，数据会比自建服务器少一些。
 - 私有仓库每月只有 2000 分钟免费额度，这个频率会超；建议用公开仓库，或把 cron 改成每 6 小时。公开仓库 60 天没有提交，GitHub 会自动停用定时任务。
@@ -176,6 +177,8 @@ blogs/<id>.json    一个博客一个文件：博客信息、所属目录、全�
    ```
 
 4. `cargo run -- backup` 先手动跑一次确认能推送，之后交给 `serve`。
+
+用 GitHub Actions 部署（上文 B）时不需要 `[backup]`：设好 Secret `BACKUP_DEPLOY_KEY` 和 Variable `BACKUP_REPO`，工作流每次抓完会运行 `feed-server backup --git-dir … --remote …`；Actions 缓存丢失时，先 `feed-server restore` 从这个仓库恢复数据库再抓。一个备份仓库只给一处写：服务器和 Actions 不要同时往同一个仓库备份（本来也不该两边同时抓），否则两边历史分叉，备份会停下来等你处理。
 
 提交者显示为 `blogScroll <backup@blogscroll.invalid>`，不会用到你本机的 git 身份。推送失败时提交留在本地，下次一起推。Docker 镜像里已带 git 和 ssh，把 key 挂进容器即可。
 

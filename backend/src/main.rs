@@ -88,7 +88,14 @@ enum Command {
     /// Write a text snapshot of everything crawled into `[backup] git_dir`,
     /// commit it if anything changed, and push (normally done by `serve`
     /// every `every_hours`).
-    Backup,
+    Backup {
+        /// Instead of `[backup] git_dir` (e.g. a temporary directory in CI).
+        #[arg(long)]
+        git_dir: Option<PathBuf>,
+        /// Instead of `[backup] remote`.
+        #[arg(long)]
+        remote: Option<String>,
+    },
     /// Fill a new, empty database from a backup snapshot directory.
     Restore {
         /// The backup repository's working copy.
@@ -203,8 +210,11 @@ async fn main() -> anyhow::Result<()> {
             let s = analyze::retag_all(&pool).await?;
             println!("{s:#?}");
         }
-        Command::Backup => {
-            let o = backup::backup(&pool, &cfg.backup).await?;
+        Command::Backup { git_dir, remote } => {
+            let mut b = cfg.backup.clone();
+            b.git_dir = git_dir.or(b.git_dir);
+            b.remote = remote.or(b.remote);
+            let o = backup::backup(&pool, &b).await?;
             println!("{o:#?}");
         }
         Command::Restore { .. } => unreachable!("handled above"),

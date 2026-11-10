@@ -6,6 +6,14 @@
 #        ENABLE_PAGES_CRAWL = true
 #        FEED_USER_AGENT    = blogScroll/0.1 (RSS reader; +https://<how to reach you>)
 # Do not also run the server image against the same blogs; that doubles their load.
+#
+# Optional: back up the crawled data to a (private) git repository after each
+# run, and rebuild the database from it when the Actions cache is gone (caches
+# are evicted after 7 days unused or beyond 10 GB):
+#   3. In that repository: Settings → Deploy keys → add a key with write access.
+#   4. Here: Secrets → BACKUP_DEPLOY_KEY = the private half of that key;
+#            Variables → BACKUP_REPO = owner/name, e.g. you/blogscroll-data.
+# Backups only ever add commits; see "备份到 GitHub 私有仓库" in README.md.
 name: Crawl & publish (GitHub Pages)
 
 on:
@@ -50,6 +58,7 @@ jobs:
       # The SQLite database is the crawler's memory (ETags, schedules, backoff).
       # Each run saves a new cache entry; the newest one is restored.
       - name: Restore crawler database
+        id: cache
         uses: actions/cache/restore@v6
         with:
           path: backend/data
@@ -60,10 +69,43 @@ jobs:
         working-directory: backend
         run: cargo build --release --locked
 
+      - name: Use the backup repository's deploy key
+        if: vars.BACKUP_REPO != ''
+        env:
+          DEPLOY_KEY: ${{ secrets.BACKUP_DEPLOY_KEY }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/backup_key
+          chmod 600 ~/.ssh/backup_key
+          echo "GIT_SSH_COMMAND=ssh -i $HOME/.ssh/backup_key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new" >> "$GITHUB_ENV"
+
+      # No cache to carry on from: start from the last backup instead of from nothing.
+      - name: Restore crawler database from the backup
+        if: vars.BACKUP_REPO != '' && steps.cache.outputs.cache-matched-key == ''
+        working-directory: backend
+        run: |
+          git clone --quiet --depth 1 "git@github.com:${{ vars.BACKUP_REPO }}.git" "$RUNNER_TEMP/backup"
+          if [ -f "$RUNNER_TEMP/backup/meta.json" ]; then
+            ./target/release/feed-server restore --from "$RUNNER_TEMP/backup"
+          else
+            echo "The backup repository has no snapshot yet; starting from nothing."
+          fi
+
       - name: Crawl due feeds
         working-directory: backend
         # The first run discovers ~1300 feeds (about an hour); later runs take minutes.
         run: ./target/release/feed-server crawl --sync --all --limit 200 --max-minutes 100
+
+      # Commits only when something changed; never force-pushes. A failure here
+      # does not stop the site from being published.
+      - name: Back up to the git repository
+        if: always() && vars.BACKUP_REPO != ''
+        continue-on-error: true
+        working-directory: backend
+        run: >-
+          ./target/release/feed-server backup
+          --git-dir "$RUNNER_TEMP/backup"
+          --remote "git@github.com:${{ vars.BACKUP_REPO }}.git"
 
       - name: Save crawler database
         if: always()
