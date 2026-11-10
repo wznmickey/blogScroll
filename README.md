@@ -224,6 +224,18 @@ Host github-blogscroll-backup
 
 然后 `remote = "git@github-blogscroll-backup:<你>/<私有仓库>.git"`。
 
+### 另一台机器更频繁地抓
+
+想比 Actions 的三小时更勤地抓（比如家里常开的电脑或树莓派），在那台机器上跑只抓不建站的 `watch`：
+
+```sh
+feed-server watch --git-dir data/backup --remote git@github-blogscroll-backup:<你>/<私有仓库>.git --backup-hours 1
+```
+
+它做的和 `serve` 后台做的一样（到期的 RSS、博主资料、每天同步目录、按新规则补读），只是不开网页，并每 `--backup-hours` 小时合并、备份到私有仓库一次。想更勤就把那台机器 `config.toml` 里 `[crawler]` 的 `refresh_secs` / `min_refresh_secs` 调小（仍然遵守各站的 `Cache-Control`、`<ttl>` 和 429/503 的 Retry-After）。
+
+网站要尽快用上它抓到的内容，可以在它备份之后触发一次只合并、不抓取的发布：`gh workflow run pages.yml -R <你>/<仓库> -f crawl=false`（放进 cron 或 systemd timer）。两边都抓同一批博客会让对方站点的请求翻倍：这台机器常开时，在本仓库加 Variable `SCHEDULED_CRAWL` = `false`，定时任务就只合并备份、发布网站。
+
 恢复或合并：`cargo run -- restore --from data/backup`，空数据库就是完整恢复，已有数据就是合并（同上，只补不删）。博客、目录关系、文章（含已授权的全文）都会写入，分类和标签当场重算；新加入的博客马上读一次 RSS，没找到 RSS 的一周后再找。
 
 抓取规则变了（RSS 解析版本、`max_items_per_feed`、`max_post_age_days`，或寻找 RSS 的路径）之后第一次启动 `serve` 或 `crawl`，会把按旧规则读过的 RSS 全部排到马上完整重读一次，没找到 RSS 的博客也马上按新路径再找一次，不用等各自的刷新时间。

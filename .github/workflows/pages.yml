@@ -24,7 +24,15 @@ on:
   schedule:
     # Every 3 hours. Each run only fetches feeds that are due (304s for most).
     - cron: '17 */3 * * *'
+  # Started by hand, or by another machine that crawls more often
+  # (`feed-server watch`): with crawl off, only merge its backup and publish,
+  #   gh workflow run pages.yml -R <owner>/<repo> -f crawl=false
   workflow_dispatch:
+    inputs:
+      crawl:
+        description: Crawl before publishing (off = only merge the backup and publish)
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -88,7 +96,10 @@ jobs:
             echo "The backup repository has no snapshot yet."
           fi
 
+      # Variable SCHEDULED_CRAWL = false: another machine does the crawling
+      # (`feed-server watch`) and the scheduled runs only merge and publish.
       - name: Crawl due feeds
+        if: (github.event_name == 'workflow_dispatch' && inputs.crawl) || (github.event_name == 'schedule' && vars.SCHEDULED_CRAWL != 'false')
         working-directory: backend
         # The first run discovers ~1300 feeds (about an hour); later runs take minutes.
         run: ./target/release/feed-server crawl --sync --all --limit 200 --max-minutes 100

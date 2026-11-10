@@ -31,3 +31,8 @@ site = "https://wznmickey.com"
 url = "https://wznmickey.com/about/"
 full = true
 note = "站长本人的博客"
+
+# Personal blogs added by hand, beside the webring (also read by backend/config.toml).
+[[sources.opml]]
+path = "feeds.opml"
+kind = "blog"

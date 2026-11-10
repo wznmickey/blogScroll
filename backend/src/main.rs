@@ -56,6 +56,21 @@ enum Command {
     },
     /// Fetch the blog directories once and apply [policy].
     Sync,
+    /// Crawl on and on without serving: feeds as they fall due, profiles,
+    /// the daily directory sync, and a backup every `[backup] every_hours`.
+    /// For a second machine that crawls more often than the scheduled runs;
+    /// what it backs up is merged by every other crawler (and the site).
+    Watch {
+        /// Instead of `[backup] git_dir`.
+        #[arg(long)]
+        git_dir: Option<PathBuf>,
+        /// Instead of `[backup] remote`.
+        #[arg(long)]
+        remote: Option<String>,
+        /// Hours between backups, instead of `[backup] every_hours`.
+        #[arg(long)]
+        backup_hours: Option<u32>,
+    },
     /// Crawl due feeds once.
     Crawl {
         /// Maximum number of blogs to crawl (per round with --all).
@@ -196,6 +211,26 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command.unwrap_or(Command::Serve { no_crawl: false }) {
         Command::Sync => crawler.sync_directories().await?,
+        Command::Watch {
+            git_dir,
+            remote,
+            backup_hours,
+        } => {
+            let mut b = cfg.backup.clone();
+            b.git_dir = git_dir.or(b.git_dir);
+            b.remote = remote.or(b.remote);
+            b.every_hours = backup_hours.unwrap_or(b.every_hours);
+            if b.git_dir.is_some() && b.every_hours > 0 {
+                tokio::spawn(backup::run_periodically(pool.clone(), b, merge_opts));
+            } else {
+                tracing::warn!("no [backup] git_dir: crawling without backing up");
+            }
+            crawler.catch_up_on_new_rules().await?;
+            tokio::select! {
+                _ = crawler.clone().run() => {}
+                _ = tokio::signal::ctrl_c() => tracing::info!("stopping"),
+            }
+        }
         Command::Crawl {
             limit,
             blog,

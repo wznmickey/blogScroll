@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Personal blogs added by hand, beside the webring directories. Read by
+     [[sources.opml]] in deploy/config.actions.toml and backend/config.toml.
+     To suggest one: open an issue or a pull request that adds an outline. -->
+<opml version="2.0">
+  <head>
+    <title>blogScroll: blogs added by hand</title>
+  </head>
+  <body>
+    <outline type="rss" text="阮一峰的网络日志" title="阮一峰的网络日志" xmlUrl="https://feeds.feedburner.com/ruanyifeng" htmlUrl="https://www.ruanyifeng.com/blog/" />
+    <outline type="rss" text="新的原野" title="新的原野" xmlUrl="https://sinyalee.com/blog/?feed=rss2" htmlUrl="https://sinyalee.com/blog/" />
+    <outline type="rss" text="Innei" title="Innei" xmlUrl="https://innei.in/feed" htmlUrl="https://innei.in/" />
+    <outline type="rss" text="宝玉的分享" title="宝玉的分享" xmlUrl="https://baoyu.io/feed.xml" htmlUrl="https://baoyu.io/" />
+    <outline type="rss" text="K.I.S.S" title="K.I.S.S" xmlUrl="https://bigeagle.me/index.xml" htmlUrl="https://bigeagle.me/" />
+  </body>
+</opml>
