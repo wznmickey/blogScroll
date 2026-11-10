@@ -97,6 +97,21 @@ impl Crawler {
         &self.cfg.crawler
     }
 
+    /// Brings forward the blogs waiting after errors, so they are tried
+    /// again now (a feed search that failed is redone). Sites that asked us
+    /// to wait (429, 503 with Retry-After) keep their time.
+    pub async fn retry_failed(&self) -> anyhow::Result<u64> {
+        Ok(sqlx::query(
+            "UPDATE blogs SET next_check_at = 0,
+                discovery_at = CASE WHEN feed_url IS NULL THEN NULL ELSE discovery_at END
+             WHERE active = 1 AND excluded = 0 AND failures > 0
+               AND COALESCE(last_error, '') NOT LIKE 'HTTP 429%' AND COALESCE(last_error, '') NOT LIKE 'HTTP 503%'",
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
+    }
+
     /// After the rules for reading feeds change (the parser, which entries
     /// are kept, where feeds are looked for), catches up at once instead of
     /// as each blog falls due: feeds read under the old rules are fetched in

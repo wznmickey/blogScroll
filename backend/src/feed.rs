@@ -16,7 +16,7 @@ use crate::util::truncate_chars;
 pub const EXCERPT_CHARS: usize = 240;
 /// Bump when parsing changes, so stored posts are re-parsed once even if
 /// their feed did not change (it is part of the crawler's content hash).
-pub const PARSER_VERSION: u32 = 6;
+pub const PARSER_VERSION: u32 = 7;
 /// Dates further ahead than this are typos (2077) or scheduled posts; ignored.
 const FUTURE_SLACK_SECS: i64 = 2 * 86400;
 
@@ -390,6 +390,9 @@ fn loose_date(s: &str) -> Option<DateTime<Utc>> {
             return Some(d.with_timezone(&Utc));
         }
     }
+    if let Some(d) = loose_rfc2822(s) {
+        return Some(d);
+    }
     let naive = [
         "%Y-%m-%d %H:%M:%S%.f",
         "%Y-%m-%d %H:%M",
@@ -406,6 +409,57 @@ fn loose_date(s: &str) -> Option<DateTime<Utc>> {
     })?;
     let cst = FixedOffset::east_opt(8 * 3600)?;
     naive.and_local_timezone(cst).single().map(|d| d.with_timezone(&Utc))
+}
+
+/// RSS dates that bend RFC 2822: a zone abbreviation it does not know
+/// (`… 19:17:52 HKT`), no time (`Sun, 15 Mar 2026`), or names in another
+/// language (`周日, 31 8月 2025 22:21:10 +0800`).
+fn loose_rfc2822(s: &str) -> Option<DateTime<Utc>> {
+    // The weekday says nothing the date does not, in any language.
+    let rest = s.split_once(',').map_or(s, |(_, r)| r).trim();
+    let (head, zone) = rest.rsplit_once(' ').unwrap_or((rest, ""));
+    let rest = match zone_offset(zone) {
+        Some(offset) => format!("{head} {offset}"),
+        None => rest.to_string(),
+    };
+    for f in ["%d %b %Y %H:%M:%S %z", "%d %m月 %Y %H:%M:%S %z", "%d %b %Y %H:%M %z"] {
+        if let Ok(d) = DateTime::parse_from_str(&rest, f) {
+            return Some(d.with_timezone(&Utc));
+        }
+    }
+    let date = ["%d %b %Y", "%d %m月 %Y"]
+        .iter()
+        .find_map(|f| NaiveDate::parse_from_str(&rest, f).ok())?;
+    let cst = FixedOffset::east_opt(8 * 3600)?;
+    date.and_hms_opt(0, 0, 0)?
+        .and_local_timezone(cst)
+        .single()
+        .map(|d| d.with_timezone(&Utc))
+}
+
+/// Zone abbreviations seen in feeds. CST is China's here (UTC+8), not
+/// America's: these are overwhelmingly Chinese blogs.
+fn zone_offset(zone: &str) -> Option<&'static str> {
+    Some(match zone.to_ascii_uppercase().as_str() {
+        "GMT" | "UT" | "UTC" | "Z" => "+0000",
+        "CST" | "HKT" | "SGT" | "BJT" | "AWST" | "MYT" | "PHT" => "+0800",
+        "JST" | "KST" => "+0900",
+        "ICT" | "WIB" => "+0700",
+        "IST" => "+0530",
+        "AEST" => "+1000",
+        "AEDT" => "+1100",
+        "CET" | "BST" => "+0100",
+        "CEST" | "EET" => "+0200",
+        "EEST" => "+0300",
+        "EST" => "-0500",
+        "EDT" | "AST" => "-0400",
+        "CDT" => "-0500",
+        "MST" => "-0700",
+        "MDT" => "-0600",
+        "PST" => "-0800",
+        "PDT" => "-0700",
+        _ => return None,
+    })
 }
 
 /// Media RSS thumbnails / image enclosures.
@@ -466,6 +520,25 @@ mod tests {
   </item>
 </channel>
 </rss>"#;
+
+    #[test]
+    fn rfc2822_dates_that_bend_the_rules() {
+        let utc = |s: &str| loose_date(s).map(|d| d.to_rfc3339());
+        assert_eq!(
+            utc("Tue, 11 Aug 2026 19:17:52 HKT").as_deref(),
+            Some("2026-08-11T11:17:52+00:00")
+        );
+        assert_eq!(utc("Sun, 15 Mar 2026").as_deref(), Some("2026-03-14T16:00:00+00:00"));
+        assert_eq!(
+            utc("周日, 31 8月 2025 22:21:10 +0800").as_deref(),
+            Some("2025-08-31T14:21:10+00:00")
+        );
+        assert_eq!(
+            utc("Mon, 9 Nov 2026 10:24:46 GMT").as_deref(),
+            Some("2026-11-09T10:24:46+00:00")
+        );
+        assert_eq!(utc("someday"), None);
+    }
 
     /// Hexo's feed drops the line break in `<img\nsrc="…">`.
     #[test]

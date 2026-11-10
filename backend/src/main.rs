@@ -72,6 +72,11 @@ enum Command {
         /// Time budget for --all; the round in progress is finished, then it stops.
         #[arg(long, default_value_t = 90)]
         max_minutes: u64,
+        /// Try again now the blogs waiting after errors (403, timeouts, ...),
+        /// and search again for feeds where the search failed; not those that
+        /// asked us to wait (429, 503).
+        #[arg(long)]
+        retry: bool,
     },
     /// Refresh blog profiles and comment counts that are due (normally done
     /// by `serve` in the background).
@@ -196,11 +201,16 @@ async fn main() -> anyhow::Result<()> {
             sync,
             all,
             max_minutes,
+            retry,
         } => {
             if sync {
                 crawler.sync_directories_if_due().await?;
             }
             crawler.catch_up_on_new_rules().await?;
+            if retry {
+                let n = crawler.retry_failed().await?;
+                println!("retrying {n} blogs that failed");
+            }
             let stats = match blog {
                 Some(id) => {
                     let blog = db::blog_by_id(&pool, id).await?.context("no such blog")?;
