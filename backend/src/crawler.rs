@@ -900,7 +900,10 @@ mod tests {
             Box::new(crate::fulltext::ArticleExtractor),
         )
         .unwrap();
-        sqlx::query("DELETE FROM posts WHERE blog_id = 2").execute(&pool).await.unwrap();
+        sqlx::query("DELETE FROM posts WHERE blog_id = 2")
+            .execute(&pool)
+            .await
+            .unwrap();
         let blog = db::blog_by_id(&pool, 2).await.unwrap().unwrap();
         let items = |guids: &[&str]| -> Vec<feed::ParsedItem> {
             guids
