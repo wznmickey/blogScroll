@@ -61,6 +61,9 @@ pub struct BlogRow {
     pub from_feed_meta: bool,
     /// Whether the site may be shown in a frame here; `None` = not known yet.
     pub framable: Option<bool>,
+    /// From `[[policy.about]]`: the about page to read, and whether to keep all of it.
+    pub about_page: Option<String>,
+    pub about_full: bool,
 }
 
 impl BlogRow {
@@ -73,7 +76,7 @@ macro_rules! blog_columns {
     () => {
         "id, name, homepage_url, feed_url, feed_url_origin, content_policy, \
          etag, last_modified, refresh_secs, discovery_at, failures, content_hash, \
-         profile_at, comment_system, comments_next_at, from_feed_meta, framable"
+         profile_at, comment_system, comments_next_at, from_feed_meta, framable, about_page, about_full"
     };
 }
 
@@ -205,6 +208,9 @@ pub async fn apply_policy(pool: &SqlitePool, cfg: &Config) -> sqlx::Result<()> {
     for g in &cfg.policy.full_text {
         tracing::info!(site = %g.site, note = %g.note, "full text allowed");
     }
+    for a in &cfg.policy.about {
+        tracing::info!(site = %a.site, note = %a.note, full = a.full, own_text = a.text.is_some(), "about page settings");
+    }
 
     let mut tx = pool.begin().await?;
     sqlx::query("UPDATE blogs SET excluded = 0, content_policy = 'summary', embed_comments = 0")
@@ -227,6 +233,42 @@ pub async fn apply_policy(pool: &SqlitePool, cfg: &Config) -> sqlx::Result<()> {
             .bind(k)
             .execute(&mut *tx)
             .await?;
+    }
+
+    // About-page settings. A different page, or a change between excerpt and
+    // the whole page, re-reads the profile soon; an own text applies at once.
+    let about: Vec<(String, &crate::config::AboutPolicy)> = cfg
+        .policy
+        .about
+        .iter()
+        .filter_map(|a| Some((site_key(&a.site)?, a)))
+        .collect();
+    let about_keys =
+        serde_json::to_string(&about.iter().map(|(k, _)| k).collect::<Vec<_>>()).unwrap_or_else(|_| "[]".into());
+    sqlx::query(
+        "UPDATE blogs SET about_page = NULL, about_full = 0, about_custom = NULL, about_html = NULL, profile_at = NULL
+         WHERE (about_page IS NOT NULL OR about_full = 1 OR about_custom IS NOT NULL)
+           AND site_key NOT IN (SELECT value FROM json_each(?))",
+    )
+    .bind(&about_keys)
+    .execute(&mut *tx)
+    .await?;
+    for (k, a) in &about {
+        let text = a.text.as_deref().map(str::trim).filter(|t| !t.is_empty());
+        // The right-hand sides all see the row as it was.
+        sqlx::query(
+            "UPDATE blogs SET
+                profile_at = CASE WHEN about_page IS NOT ?1 OR about_full <> ?2 THEN NULL ELSE profile_at END,
+                about_html = CASE WHEN ?2 THEN about_html END,
+                about_page = ?1, about_full = ?2, about_custom = ?3
+             WHERE site_key = ?4",
+        )
+        .bind(a.url.as_deref())
+        .bind(a.full)
+        .bind(text)
+        .bind(k)
+        .execute(&mut *tx)
+        .await?;
     }
     // Withdrawn consent means the stored copies go too.
     sqlx::query("DELETE FROM posts WHERE blog_id IN (SELECT id FROM blogs WHERE excluded = 1)")
@@ -571,6 +613,8 @@ pub struct Profile<'a> {
     pub comment_system_json: Option<&'a str>,
     /// Whether the homepage may be shown in a frame here; `None` keeps what is known.
     pub framable: Option<bool>,
+    /// The whole about page (sanitised), for authors who asked for it.
+    pub about_html: Option<&'a str>,
 }
 
 pub async fn save_profile(pool: &SqlitePool, blog_id: i64, now: i64, p: &Profile<'_>) -> sqlx::Result<()> {
@@ -578,7 +622,7 @@ pub async fn save_profile(pool: &SqlitePool, blog_id: i64, now: i64, p: &Profile
         "UPDATE blogs SET description = ?1, avatar_url = ?2, about_url = ?3, about_text = ?4,
                 social_links = ?5, generator = ?6,
                 comment_system = COALESCE(?7, comment_system), profile_at = ?8,
-                framable = COALESCE(?10, framable)
+                framable = COALESCE(?10, framable), about_html = ?11
          WHERE id = ?9",
     )
     .bind(p.description)
@@ -591,6 +635,7 @@ pub async fn save_profile(pool: &SqlitePool, blog_id: i64, now: i64, p: &Profile
     .bind(now)
     .bind(blog_id)
     .bind(p.framable)
+    .bind(p.about_html)
     .execute(pool)
     .await?;
     Ok(())

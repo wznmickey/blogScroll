@@ -234,11 +234,27 @@ pub fn about(site: &Site, meta: &Value) -> Page {
         "关于{}：只读取各博客公开的 RSS，不抓取文章页面，摘要之外的内容请到原博客阅读。",
         site.name
     );
+    let m = &meta["maintainer"];
+    let maintainer = if m.is_object() {
+        let mut p = format!("<h2>维护者</h2><p>{}", esc(s(m, "name")));
+        if !s(m, "url").is_empty() {
+            let label = m["blog"]["name"].as_str().unwrap_or(s(m, "url"));
+            p.push_str(&format!(
+                " · <a href=\"{}\" rel=\"me\">{}</a>",
+                esc(s(m, "url")),
+                esc(label)
+            ));
+        }
+        p.push_str("</p>");
+        p
+    } else {
+        String::new()
+    };
     Page {
         path: "about".into(),
         title: format!("关于 · {}", site.name),
         body: format!(
-            "<header><h1>关于{}</h1><p>{}</p>{}</header><main><h2>数据来源</h2><ul>{sources}</ul></main>",
+            "<header><h1>关于{}</h1><p>{}</p>{}</header><main>{maintainer}<h2>数据来源</h2><ul>{sources}</ul></main>",
             esc(site.name),
             esc(&description),
             nav(site)

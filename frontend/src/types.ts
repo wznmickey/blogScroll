@@ -91,6 +91,8 @@ export interface DirectoryInfo {
 export interface Meta {
   site_name: string
   directories: DirectoryInfo[]
+  /** Who runs the site, and their blog here if it is one of ours. */
+  maintainer?: { name: string; url: string | null; blog: { id: number; name: string } | null } | null
   stats: {
     blogs: number
     blogs_with_feed: number
@@ -140,6 +142,9 @@ export interface BlogDetail extends BlogSummary {
   comment_system: string | null
   /** Tags the blog uses most. */
   top_tags: string[]
+  /** The whole about page (sanitised HTML), when the author asked for it. */
+  about_html?: string | null
+  comments_embedded?: boolean
 }
 
 export interface TagCount {

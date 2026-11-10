@@ -126,7 +126,7 @@ GitHub Pages 的项目页（`你.github.io/blogScroll/`）不在域名根目录�
 - **退避**：失败按指数退避（最长 7 天），遵守 `429` / `503` 的 `Retry-After`。
 - **RSS 发现**：先读一次首页的 `<link rel="alternate">`（最多试前 3 个），再按顺序试常见路径：`atom.xml`、`feed`、`rss.xml`、`index.xml`、`feed.xml`、`rss`、`rss2.xml`、`atom`、`feed.php`、`rss.php`、`posts.rss`、`blog.xml`、`rss.en.xml`，找到第一个能解析的就停。某个地址出错（404、403、5xx、超时……）也继续试下一个，但同一网站的请求间隔照旧，对方给了 `Retry-After` 会先等它（最多 1 分钟）；都没有就 7 天后再看。
 - 响应体上限 4 MB，超时 20 秒。
-- **默认什么都不删**：读到的文章一直保留，不限篇数、不限年代（每次只读 RSS 里最新的 `max_items_per_feed` 条，默认 20）。想给数据库设上限，可以设 `max_posts_per_blog`（每个博客最多保留几篇，超出删最旧的）和 `max_post_age_days`（跳过多少天以前的条目，已存的不删），0 表示不限。改动 `max_post_age_days` 或 `max_items_per_feed` 后，每个 RSS 会在下次检查时完整读一次，把之前跳过的条目补进来。
+- **默认什么都不删**：读到的文章一直保留，不限篇数、不限年代，RSS 里有几条就读几条（`max_items_per_feed`，默认 0 = 全部）。想给数据库设上限，可以设 `max_posts_per_blog`（每个博客最多保留几篇，超出删最旧的）和 `max_post_age_days`（跳过多少天以前的条目，已存的不删），0 表示不限。改动 `max_post_age_days` 或 `max_items_per_feed` 后，每个 RSS 会在下次检查时完整读一次，把之前跳过的条目补进来。
 
 以上都可在 `config.toml` 的 `[crawler]` 中调整。
 
@@ -259,7 +259,7 @@ kind = "blog"
   - RSS 自带的 `<slash:comments>` / `<thr:total>`，不需要额外请求；
   - Twikoo（自建地址）、Waline、Artalk、Halo 2：每天最多一次批量请求（最新 20 篇）；401/403/404 视为博主不允许，30 天内不再请求；不伪造 Referer / Origin。
   - Giscus、Utterances、Disqus 没有批量接口，只显示「去原文评论」。
-- **内嵌评论区**（`[[policy.embed_comments]]` 授权后）：详情页加载博客自己的评论组件，评论读写都在原博客的评论服务。组件脚本固定版本、只从 jsDelivr / giscus.app / utteranc.es 加载，从不加载博客站点本身的脚本；博主需要把本站域名加入评论服务的允许列表。静态版（Pages）只显示评论数和链接，不内嵌。
+- **内嵌评论区**（`[[policy.embed_comments]]` 授权后）：详情页加载博客自己的评论组件，评论读写都在原博客的评论服务。组件脚本固定版本、只从 jsDelivr / giscus.app / utteranc.es 加载，从不加载博客站点本身的脚本；博主需要把本站域名加入评论服务的允许列表。静态版（Pages）对授权了全文或内嵌评论的博客，会把它们的文章详情单独导出（`data/posts/<id>.json`），所以 Pages 上也能看全文、用评论区；其他博客只显示评论数和链接。
 
 ## 本站的缓存
 
@@ -277,12 +277,25 @@ exclude = ["https://不想被收录的博客.com"]   # 不请求、不展示，�
 site = "https://example.com"
 note = "2026-11-01 邮件授权"
 
+[[policy.embed_comments]]                     # 作者授权后，详情页内嵌其评论组件
+site = "https://example.com"
+note = "2026-11-01 邮件授权"
+
+[[policy.about]]                              # 作者对关于页的要求
+site = "https://example.com"
+url = "https://example.com/about-me/"         # 指定关于页（不写则从首页找）
+full = true                                   # 取整页（保留排版），而不是约 300 字摘要
+# text = "自己写的介绍，可以多行。"              # 或者直接用作者给的介绍，优先于页面内容
+note = "2026-11-10 博主要求"
+
 [[policy.feed_overrides]]                     # 手动指定 RSS 地址
 site = "https://example.com"
 feed = "https://example.com/custom.xml"
 ```
 
-站点按「去掉 www 的域名 + 路径」匹配，`https://www.a.com/` 和 `a.com` 视为同一站。撤销授权（从列表移除）后，已存的全文会在下次启动或同步时清除。
+站点按「去掉 www 的域名 + 路径」匹配，`https://www.a.com/` 和 `a.com` 视为同一站。撤销授权（从列表移除）后，已存的全文会在下次启动或同步时清除。`policy.about` 改了 `url` 或 `full` 会在下一轮重读关于页；`text` 立即生效；移除后恢复成自动读取的摘要。
+
+关于页还会显示站长（`[server.maintainer]`，名字和博客地址）；如果站长的博客也在收录范围里，会附上它在本站的页面。
 
 ## 扩展
 

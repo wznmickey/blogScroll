@@ -10,6 +10,9 @@
 //! related.json      { post id: [related post ids] }, limited to posts in the feed files
 //! blogs.json        every blog (= GET /api/blogs, all pages)
 //! blogs/{id}.json   { blog: GET /api/blogs/{id}, posts: [every stored post, newest first] }
+//! posts/{id}.json   = GET /api/posts/{id}, only for blogs whose authors allowed full text
+//!                   or their comment widget (otherwise a card says all there is)
+//! details.json      [ids of the posts above]
 //! ```
 //!
 //! With a site URL, the pages around it are filled in for search engines
@@ -62,6 +65,7 @@ pub async fn export(app: Router, out: &Path, opts: &ExportOptions) -> anyhow::Re
         std::fs::remove_dir_all(&tmp)?;
     }
     std::fs::create_dir_all(tmp.join("blogs"))?;
+    std::fs::create_dir_all(tmp.join("posts"))?;
 
     write(&tmp.join("meta.json"), &get(&app, "/api/meta").await?)?;
     write(&tmp.join("tags.json"), &get(&app, "/api/tags").await?)?;
@@ -108,6 +112,7 @@ pub async fn export(app: Router, out: &Path, opts: &ExportOptions) -> anyhow::Re
     .await?;
     write(&tmp.join("blogs.json"), &Value::from(blogs.clone()))?;
     let mut blog_pages = Vec::new();
+    let mut details: Vec<i64> = Vec::new();
     for b in &blogs {
         let id = b["id"].as_i64().context("blog without id")?;
         let blog = get(&app, &format!("/api/blogs/{id}")).await?;
@@ -122,10 +127,19 @@ pub async fn export(app: Router, out: &Path, opts: &ExportOptions) -> anyhow::Re
             &tmp.join(format!("blogs/{id}.json")),
             &json!({ "blog": blog, "posts": posts }),
         )?;
+        if blog["full_text"] == true || blog["comments_embedded"] == true {
+            for pid in posts.iter().filter_map(|p| p["id"].as_i64()) {
+                let detail = get(&app, &format!("/api/posts/{pid}")).await?;
+                write(&tmp.join(format!("posts/{pid}.json")), &detail)?;
+                details.push(pid);
+            }
+        }
         if opts.site_url.is_some() {
             blog_pages.push((blog, posts));
         }
     }
+
+    write(&tmp.join("details.json"), &json!(details))?;
 
     let stats = ExportStats {
         feed_posts: posts.len(),
@@ -254,6 +268,11 @@ mod tests {
     #[tokio::test]
     async fn writes_a_complete_static_site() {
         let state = crate::api::tests::seeded().await;
+        // Blog 1's author allowed full text: its posts' details are exported too.
+        sqlx::query("UPDATE blogs SET content_policy = 'full_text' WHERE id = 1")
+            .execute(&state.pool)
+            .await
+            .unwrap();
         let dir = std::env::temp_dir().join(format!("feed-export-test-{}", std::process::id()));
         let out = dir.join("data");
         std::fs::create_dir_all(out.join("stale")).unwrap();
@@ -293,6 +312,9 @@ mod tests {
             .clone();
         assert!(!first.is_empty() && first.len() <= RELATED_PER_POST);
         assert!(!out.join("blogs/3.json").exists(), "inactive blogs are not exported");
+        assert_eq!(read("details.json"), json!([5, 4, 3, 2, 1]));
+        assert_eq!(read("posts/1.json")["id"], 1);
+        assert!(!out.join("posts/6.json").exists(), "only authorised blogs");
         assert!(!out.join("stale").exists(), "old output is replaced");
 
         // Pages for search engines, next to the data.

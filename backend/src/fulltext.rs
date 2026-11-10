@@ -42,18 +42,24 @@ const MIN_TEXT_CHARS: usize = 200;
 
 impl ArticleExtractor {
     pub fn extract_from_html(page: &str, base: &Url) -> Option<String> {
-        let doc = Html::parse_document(page);
-        for sel in SELECTORS {
-            let sel = Selector::parse(sel).unwrap();
-            for el in doc.select(&sel) {
-                let inner = el.inner_html();
-                if html::to_text(&inner).chars().count() >= MIN_TEXT_CHARS {
-                    return Some(html::sanitize(&inner, Some(base)));
-                }
+        main_content(page, base, MIN_TEXT_CHARS)
+    }
+}
+
+/// The page's main content container (by the selectors above) with at least
+/// `min_chars` of text, sanitised.
+pub fn main_content(page: &str, base: &Url, min_chars: usize) -> Option<String> {
+    let doc = Html::parse_document(page);
+    for sel in SELECTORS {
+        let sel = Selector::parse(sel).unwrap();
+        for el in doc.select(&sel) {
+            let inner = el.inner_html();
+            if html::to_text(&inner).chars().count() >= min_chars {
+                return Some(html::sanitize(&inner, Some(base)));
             }
         }
-        None
     }
+    None
 }
 
 impl FullTextExtractor for ArticleExtractor {

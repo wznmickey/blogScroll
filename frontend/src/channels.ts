@@ -66,7 +66,8 @@ interface Prefs {
   media: Media
 }
 
-export type Media = 'all' | 'cover' | 'text'
+/** All posts, or only those with a cover image. */
+export type Media = 'all' | 'cover'
 
 const KEY = 'channels'
 const DEFAULT_PINNED = ['foryou']
@@ -87,8 +88,7 @@ export function cleanPrefs(v: unknown): Prefs {
     order: ids(o.order),
     pinned: (ids(o.pinned) ?? DEFAULT_PINNED).slice(0, MAX_PINNED),
     // Older settings had only "only with images" (`cover: true`).
-    media:
-      o.media === 'cover' || o.media === 'text' ? o.media : (o as { cover?: unknown }).cover === true ? 'cover' : 'all',
+    media: o.media === 'cover' || (o as { cover?: unknown }).cover === true ? 'cover' : 'all',
   }
 }
 

@@ -17,6 +17,7 @@ pub struct AppState {
     pub pool: SqlitePool,
     pub site_name: String,
     pub directories: Arc<Vec<DirectoryInfo>>,
+    pub maintainer: Option<crate::config::Maintainer>,
 }
 
 impl AppState {
@@ -205,9 +206,24 @@ fn blog_categories(json: &str) -> Vec<CategoryRef> {
 struct Meta {
     site_name: String,
     directories: Vec<DirectoryInfo>,
+    /// Who runs the site, and their blog here if it is one of ours.
+    maintainer: Option<MaintainerInfo>,
     stats: Stats,
     /// When this answer was produced; tells static exports' readers how fresh they are.
     generated_at: i64,
+}
+
+#[derive(Serialize)]
+struct MaintainerInfo {
+    name: String,
+    url: Option<String>,
+    blog: Option<MaintainerBlog>,
+}
+
+#[derive(Serialize)]
+struct MaintainerBlog {
+    id: i64,
+    name: String,
 }
 
 #[derive(Serialize, FromRow)]
@@ -234,9 +250,33 @@ async fn meta(State(st): State<AppState>) -> ApiResult<Meta> {
     ))
     .fetch_one(&st.pool)
     .await?;
+    let maintainer = match &st.maintainer {
+        Some(m) => {
+            let key = m.url.as_deref().and_then(crate::util::site_key);
+            let blog: Option<(i64, String)> = match key {
+                Some(k) => {
+                    sqlx::query_as(concat!(
+                        "SELECT b.id, b.name FROM blogs b WHERE b.site_key = ? AND ",
+                        visible!()
+                    ))
+                    .bind(k)
+                    .fetch_optional(&st.pool)
+                    .await?
+                }
+                None => None,
+            };
+            Some(MaintainerInfo {
+                name: m.name.clone(),
+                url: m.url.clone(),
+                blog: blog.map(|(id, name)| MaintainerBlog { id, name }),
+            })
+        }
+        None => None,
+    };
     Ok(Json(Meta {
         site_name: st.site_name.clone(),
         directories: st.directories.to_vec(),
+        maintainer,
         stats,
         generated_at: crate::util::now(),
     }))
@@ -1365,6 +1405,10 @@ pub struct BlogDetail {
     comment_system: Option<String>,
     /// Tags the blog uses most (own and derived), for its profile.
     top_tags: Vec<String>,
+    /// The whole about page (sanitised HTML), when the author asked for it.
+    about_html: Option<String>,
+    /// The author allowed their comment widget here.
+    comments_embedded: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1387,13 +1431,18 @@ async fn get_blog(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<
         full_text: bool,
         about_url: Option<String>,
         about_text: Option<String>,
+        about_html: Option<String>,
         social_links: String,
         generator: Option<String>,
         comment_system: Option<String>,
+        embed_comments: bool,
     }
+    // The author's own introduction wins over anything read from their page.
     let extra: Extra = sqlx::query_as(
-        "SELECT content_policy = 'full_text' AS full_text, about_url, about_text, social_links,
-                generator, comment_system
+        "SELECT content_policy = 'full_text' AS full_text, about_url,
+                COALESCE(about_custom, about_text) AS about_text,
+                CASE WHEN about_full = 1 AND about_custom IS NULL THEN about_html END AS about_html,
+                social_links, generator, comment_system, embed_comments
          FROM blogs WHERE id = ?",
     )
     .bind(id)
@@ -1437,6 +1486,8 @@ async fn get_blog(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<
             .and_then(|s| serde_json::from_str::<CommentSystem>(s).ok())
             .map(|s| s.label()),
         top_tags,
+        about_html: extra.about_html,
+        comments_embedded: extra.embed_comments,
     }))
 }
 
@@ -1447,6 +1498,7 @@ pub(crate) mod tests {
     use crate::sources::DirectoryEntry;
     use axum::body::Body;
     use axum::http::Request;
+    use serde_json::json;
     use tower::ServiceExt;
     use url::Url;
 
@@ -1517,6 +1569,10 @@ pub(crate) mod tests {
                 homepage: "x",
                 tag_labels: &[("tech", "技术"), ("life", "生活")],
             }]),
+            maintainer: Some(crate::config::Maintainer {
+                name: "站长".into(),
+                url: Some("https://b2.example/".into()),
+            }),
         }
     }
 
@@ -1844,6 +1900,58 @@ pub(crate) mod tests {
         assert_eq!(b["kind"]["id"], "blog");
         assert_eq!(b["kind"]["label"], "博客");
         assert!(b["top_tags"].as_array().unwrap().iter().any(|t| t == "旅行"));
+    }
+
+    #[tokio::test]
+    async fn maintainer_and_about_settings() {
+        let st = seeded().await;
+        let (_, m) = get_json(&st, "/api/meta").await;
+        assert_eq!(m["maintainer"]["name"], "站长");
+        assert_eq!(
+            m["maintainer"]["blog"]["id"], 2,
+            "their blog here, found by its address"
+        );
+
+        sqlx::query("UPDATE blogs SET about_text = '摘要', about_html = '<p>全文</p>', profile_at = 1 WHERE id = 1")
+            .execute(&st.pool)
+            .await
+            .unwrap();
+        let about = |b: &serde_json::Value| (b["about_text"].clone(), b["about_html"].clone());
+        let (_, b) = get_json(&st, "/api/blogs/1").await;
+        assert_eq!(
+            about(&b),
+            (json!("摘要"), json!(null)),
+            "the whole page only when asked for"
+        );
+
+        let mut cfg = crate::config::Config::default();
+        cfg.policy.about = vec![crate::config::AboutPolicy {
+            site: "https://b1.example/".into(),
+            url: Some("https://b1.example/me/".into()),
+            full: true,
+            text: None,
+            note: String::new(),
+        }];
+        crate::db::apply_policy(&st.pool, &cfg).await.unwrap();
+        let (_, b) = get_json(&st, "/api/blogs/1").await;
+        assert_eq!(about(&b), (json!("摘要"), json!("<p>全文</p>")));
+        let (page, refresh): (Option<String>, Option<i64>) =
+            sqlx::query_as("SELECT about_page, profile_at FROM blogs WHERE id = 1")
+                .fetch_one(&st.pool)
+                .await
+                .unwrap();
+        assert_eq!(page.as_deref(), Some("https://b1.example/me/"));
+        assert_eq!(refresh, None, "a new about page is read soon");
+
+        cfg.policy.about[0].text = Some("我自己写的介绍".into());
+        crate::db::apply_policy(&st.pool, &cfg).await.unwrap();
+        let (_, b) = get_json(&st, "/api/blogs/1").await;
+        assert_eq!(about(&b), (json!("我自己写的介绍"), json!(null)), "an own text wins");
+
+        cfg.policy.about.clear();
+        crate::db::apply_policy(&st.pool, &cfg).await.unwrap();
+        let (_, b) = get_json(&st, "/api/blogs/1").await;
+        assert_eq!(about(&b), (json!("摘要"), json!(null)), "withdrawn settings are undone");
     }
 
     #[tokio::test]

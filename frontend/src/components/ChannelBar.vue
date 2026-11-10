@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // The home page's channel bar. Pinned channels stay at the left; the rest
 // scroll sideways (swipe, mouse wheel, drag, or the arrows on a desktop).
-// 有图 / 无图 narrow any channel to posts with or without a picture. The ▾
+// 全部 / 有图: every post, or only those with a picture, in any channel. The ▾
 // button opens the manager: reorder, pin, hide, add channels (categories,
 // types, tags).
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
@@ -30,9 +30,8 @@ const shownIds = computed(() => new Set([...shown.value.pinned, ...shown.value.r
 /** The open channel when it is not in the bar (a tag or category from a link). */
 const extra = computed(() => (shownIds.value.has(props.active) ? null : channel(props.active, info.value)))
 
-/** 有图 / 无图: pressing the pressed one again shows all posts. */
-function toggleMedia(m: 'cover' | 'text') {
-  prefs.value.media = prefs.value.media === m ? 'all' : m
+function setMedia(m: 'all' | 'cover') {
+  prefs.value.media = m
 }
 
 const open = ref(false)
@@ -129,21 +128,21 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
       <div class="media" role="group" aria-label="按图片筛选">
         <button
           class="media-btn"
-          :class="{ on: prefs.media === 'cover' }"
-          :aria-pressed="prefs.media === 'cover'"
-          title="只看有图的文章"
-          @click="toggleMedia('cover')"
+          :class="{ on: prefs.media === 'all' }"
+          :aria-pressed="prefs.media === 'all'"
+          title="全部文章"
+          @click="setMedia('all')"
         >
-          有图
+          全部
         </button>
         <button
           class="media-btn"
-          :class="{ on: prefs.media === 'text' }"
-          :aria-pressed="prefs.media === 'text'"
-          title="只看纯文字的文章"
-          @click="toggleMedia('text')"
+          :class="{ on: prefs.media === 'cover' }"
+          :aria-pressed="prefs.media === 'cover'"
+          title="只看有图的文章"
+          @click="setMedia('cover')"
         >
-          无图
+          有图
         </button>
       </div>
       <button class="more" :class="{ open }" :aria-expanded="open" aria-label="管理频道" @click="open = !open">
@@ -323,9 +322,10 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
   color: var(--text);
 }
 .media-btn.on {
-  background: var(--accent);
-  color: #fff;
+  background: var(--bg);
+  color: var(--text);
   font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
 }
 .more {
   display: grid;

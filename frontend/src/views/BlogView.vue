@@ -33,6 +33,9 @@ watch(
 
 const load = (cursor: string | null) => api.posts({ mode: 'latest', blog: id.value, cursor })
 
+const aboutOpen = ref(false)
+watch(id, () => (aboutOpen.value = false))
+
 function openBeside(e: MouseEvent, url: string, title: string) {
   if (blog.value && openInReader({ url, title, blog: blog.value }, e)) e.preventDefault()
 }
@@ -96,9 +99,14 @@ const engine = computed(() => blog.value?.generator?.split(/\s+/)[0] ?? null)
         </p>
       </div>
     </section>
-    <section v-if="blog?.about_text" class="about">
+    <section v-if="blog?.about_html || blog?.about_text" class="about">
       <h2>关于</h2>
-      <p>{{ blog.about_text }}</p>
+      <!-- The whole page, for authors who asked for it (sanitised on the server). -->
+      <template v-if="blog.about_html">
+        <div class="about-html" :class="{ clamped: !aboutOpen }" v-html="blog.about_html" />
+        <button type="button" class="more" @click="aboutOpen = !aboutOpen">{{ aboutOpen ? '收起' : '展开全部' }}</button>
+      </template>
+      <p v-else>{{ blog.about_text }}</p>
       <a
         v-if="blog.about_url"
         :href="blog.about_url"
@@ -204,6 +212,51 @@ h1 {
   color: var(--text-2);
   font-size: 14px;
   line-height: 1.7;
+  /* An author's own text keeps its line breaks. */
+  white-space: pre-line;
+}
+.about-html {
+  color: var(--text-2);
+  font-size: 14px;
+  line-height: 1.75;
+  word-break: break-word;
+}
+.about-html.clamped {
+  max-height: 16em;
+  overflow: hidden;
+  mask-image: linear-gradient(to bottom, #000 70%, transparent);
+}
+.about-html :deep(h1),
+.about-html :deep(h2),
+.about-html :deep(h3) {
+  margin: 14px 0 6px;
+  color: var(--text);
+  font-size: 15px;
+}
+.about-html :deep(p),
+.about-html :deep(ul),
+.about-html :deep(ol) {
+  margin: 6px 0;
+}
+.about-html :deep(img) {
+  height: auto;
+  border-radius: 8px;
+}
+.about-html :deep(table) {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+.about-html :deep(td),
+.about-html :deep(th) {
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+}
+.about .more {
+  margin-top: 6px;
+  color: var(--link);
+  font-size: 13px;
 }
 .about a {
   display: inline-block;

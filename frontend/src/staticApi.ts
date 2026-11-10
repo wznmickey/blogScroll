@@ -90,7 +90,7 @@ function postFilter(q: PostQuery) {
   const cat = q.category
   return (p: PostCard) =>
     (!q.dirtag || (p.blog.tags ?? []).includes(q.dirtag)) &&
-    (!q.media || (q.media === 'cover') === !!p.cover) &&
+    (!q.media || !!p.cover) &&
     (!cat || p.category.id === cat || p.category.id.startsWith(`${cat}/`)) &&
     (!q.kind || (p.blog.kind ?? 'blog') === q.kind) &&
     (!blogs || blogs.has(p.blog.id)) &&
@@ -236,6 +236,10 @@ async function posts(q: PostQuery): Promise<Page<PostCard>> {
 }
 
 async function post(id: number): Promise<PostDetail> {
+  // Posts of blogs whose authors allowed full text or their comment widget
+  // have their own file with all of it.
+  const detailed = await file<number[]>('details.json').catch(() => [] as number[])
+  if (detailed.includes(id)) return file<PostDetail>(`posts/${id}.json`)
   const idx = await index()
   for (let s = 0; s < idx.feed_shards; s++) {
     const found = (await shard(s)).find((p) => p.id === id)

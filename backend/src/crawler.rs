@@ -25,6 +25,8 @@ const LAST_SYNC_KEY: &str = "last_directory_sync";
 const FULL_FEED_MIN_CHARS: usize = 500;
 /// Article pages fetched per blog per crawl, for full-text blogs only.
 const PAGES_PER_CRAWL: i64 = 3;
+/// An about page shorter than this is taken as not found.
+const ABOUT_HTML_MIN_CHARS: usize = 40;
 const MAX_BACKOFF_SECS: i64 = 7 * 86400;
 /// Posts per batched comment-count request.
 const COUNT_BATCH: i64 = 20;
@@ -301,10 +303,12 @@ impl Crawler {
             None => discovery::fetch_page(&self.http, &Url::parse(&blog.homepage_url)?).await?,
         };
         let info = profile::from_home(&home.html, &home.url);
-        // Linked about page, else one guess at <site>/about/.
-        let about_url = info
-            .about
-            .clone()
+        // The page the author named, else the linked one, else one guess at <site>/about/.
+        let about_url = blog
+            .about_page
+            .as_deref()
+            .and_then(|u| Url::parse(u).ok())
+            .or_else(|| info.about.clone())
             .or_else(|| discovery::dir_url(&home.url).join("about/").ok());
         let about = match about_url {
             Some(u) => discovery::fetch_page(&self.http, &u)
@@ -320,6 +324,11 @@ impl Crawler {
             .or_else(|| comments::native(info.generator.as_deref()));
 
         let about_text = about.as_ref().and_then(|p| profile::about_text(&p.html));
+        // The whole page, formatted, for authors who asked for it.
+        let about_html = about
+            .as_ref()
+            .filter(|_| blog.about_full)
+            .and_then(|p| crate::fulltext::main_content(&p.html, &p.url, ABOUT_HTML_MIN_CHARS));
         // Many authors list their accounts only on the about page.
         let mut social = info.social.clone();
         if let Some(p) = &about {
@@ -340,6 +349,7 @@ impl Crawler {
                 generator: info.generator.as_deref(),
                 comment_system_json: system_json.as_deref(),
                 framable: home.frame_blocked.map(|blocked| !blocked),
+                about_html: about_html.as_deref(),
             },
         )
         .await?;
@@ -526,7 +536,9 @@ impl Crawler {
         if max_age > 0 {
             items.retain(|i| i.published.is_none_or(|p| p.timestamp() >= t - max_age));
         }
-        items.truncate(self.c().max_items_per_feed);
+        if self.c().max_items_per_feed > 0 {
+            items.truncate(self.c().max_items_per_feed);
+        }
 
         let new = self.store_items(blog, &items, t).await?;
         if new > 0 && self.c().max_posts_per_blog > 0 {

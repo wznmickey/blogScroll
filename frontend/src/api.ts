@@ -56,7 +56,7 @@ export interface PostQuery {
   /** Newest-first feeds: start at this post (inclusive) instead of the top. */
   startAt?: { sort_at: number; id: number }
   /** Only posts with a cover image, or only those without one. */
-  media?: 'cover' | 'text'
+  media?: 'cover'
 }
 
 export interface BlogQuery {
@@ -98,7 +98,7 @@ const liveApi = {
       ...q,
       // The cursor is exclusive: one past the post itself.
       cursor: cursor ?? (startAt ? `${startAt.sort_at}.${startAt.id + 1}` : undefined),
-      cover: media === 'cover' ? 1 : media === 'text' ? 'none' : undefined,
+      cover: media === 'cover' ? 1 : undefined,
       blogs: list(blogs),
       follow: list(follow),
       like: list(like),

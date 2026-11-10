@@ -57,6 +57,17 @@ pub struct ServerConfig {
     pub static_dir: Option<PathBuf>,
     /// API responses kept in memory (each lives 1–10 minutes).
     pub api_cache_entries: usize,
+    /// Who runs the site; shown on the about page.
+    pub maintainer: Option<Maintainer>,
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Maintainer {
+    pub name: String,
+    /// Their own site, e.g. their blog's homepage.
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -66,6 +77,7 @@ impl Default for ServerConfig {
             site_name: "博客瀑布".into(),
             static_dir: Some("../frontend/dist".into()),
             api_cache_entries: 512,
+            maintainer: None,
         }
     }
 }
@@ -112,7 +124,7 @@ pub struct CrawlerConfig {
     /// Ask a blog's comment service for counts at most this often (hours).
     /// One batched request per blog; 0 disables comment-service counts.
     pub comment_count_hours: u32,
-    /// Only the newest N entries of a feed are read on each fetch.
+    /// Only the newest N entries of a feed are read on each fetch; 0 (the default) reads them all.
     pub max_items_per_feed: usize,
     /// Older posts beyond this many per blog are deleted; 0 (the default) keeps them all.
     pub max_posts_per_blog: usize,
@@ -141,7 +153,7 @@ impl Default for CrawlerConfig {
             tick_secs: 30,
             profile_refresh_days: 30,
             comment_count_hours: 24,
-            max_items_per_feed: 20,
+            max_items_per_feed: 0,
             max_posts_per_blog: 0,
             max_post_age_days: 0,
         }
@@ -224,6 +236,25 @@ pub struct PolicyConfig {
     pub embed_comments: Vec<Grant>,
     /// Feed URLs set by hand (skips discovery).
     pub feed_overrides: Vec<FeedOverride>,
+    /// About-page settings an author asked for.
+    pub about: Vec<AboutPolicy>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AboutPolicy {
+    pub site: String,
+    /// The about page, instead of the one found from the homepage.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Keep the whole page, formatted, rather than a short excerpt.
+    #[serde(default)]
+    pub full: bool,
+    /// The author's own introduction, shown instead of the page's.
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub note: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -271,5 +302,26 @@ impl Default for BackupConfig {
             push: true,
             allow_shrink: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The configs in the repository load (unknown keys are errors).
+    #[test]
+    fn shipped_configs_load() {
+        for path in [
+            "config.example.toml",
+            "../deploy/config.actions.toml",
+            "../deploy/config.docker.toml",
+        ] {
+            let cfg = Config::load(Path::new(path)).unwrap_or_else(|e| panic!("{path}: {e:#}"));
+            assert_eq!(cfg.crawler.max_items_per_feed, 0, "{path}");
+        }
+        let actions = Config::load(Path::new("../deploy/config.actions.toml")).unwrap();
+        assert_eq!(actions.server.maintainer.unwrap().name, "静静");
+        assert!(actions.policy.about[0].full);
     }
 }

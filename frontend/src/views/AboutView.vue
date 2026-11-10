@@ -1,6 +1,17 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { isStatic, meta } from '../api'
-import { fullDate } from '../format'
+import { fullDate, hostOf } from '../format'
+import { openInReader } from '../reader'
+
+const maintainer = computed(() => meta.value?.maintainer ?? null)
+
+function openBlog(e: MouseEvent) {
+  const m = maintainer.value
+  if (!m?.url) return
+  const blog = { id: m.blog?.id ?? 0, name: m.blog?.name ?? m.name, icon: null }
+  if (openInReader({ url: m.url, title: blog.name, blog }, e)) e.preventDefault()
+}
 </script>
 
 <template>
@@ -10,6 +21,21 @@ import { fullDate } from '../format'
       <p>
         这里把独立博客的最新文章做成瀑布流，方便随手翻阅、发现新的博主。点开任意卡片会看到摘要，阅读全文请到原博客。
       </p>
+
+      <template v-if="maintainer">
+        <h2>维护者</h2>
+        <p class="maintainer">
+          本站由 <b>{{ maintainer.name }}</b> 维护。
+          <template v-if="maintainer.url">
+            博客：<a :href="maintainer.url" target="_blank" rel="noopener me" @click="openBlog">{{
+              maintainer.blog?.name ?? hostOf(maintainer.url)
+            }}</a>
+            <template v-if="maintainer.blog">
+              （<RouterLink :to="`/blog/${maintainer.blog.id}`">在本站浏览</RouterLink>）
+            </template>
+          </template>
+        </p>
+      </template>
 
       <h2>数据来源</h2>
       <ul>
