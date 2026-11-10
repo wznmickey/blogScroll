@@ -1,18 +1,25 @@
 <script setup lang="ts">
 import { computed, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { api, channelTags, meta, tagsInfo } from '../api'
+import { api, meta, tagLabel, tagsInfo } from '../api'
 import BlogAvatar from '../components/BlogAvatar.vue'
 import ChipBar, { type Chip } from '../components/ChipBar.vue'
+import FollowButton from '../components/FollowButton.vue'
+import { follows } from '../follow'
 import { hostOf, relativeTime } from '../format'
 import type { BlogSort, BlogSummary } from '../types'
 
 const route = useRoute()
 const router = useRouter()
 
+const FOLLOWING = '@following'
+
 // Kept alive while a blog page is open (so going back keeps the list and
 // scroll position); only follow the URL while this is the current route.
 const tag = ref('')
+/** A content area id, or FOLLOWING. */
+const topic = ref('')
+const kind = ref('')
 const sort = ref<BlogSort>('recent')
 const q = ref('')
 watch(
@@ -21,11 +28,17 @@ watch(
     if (route.name !== 'blogs') return
     const str = (v: unknown) => (typeof v === 'string' ? v : '')
     tag.value = str(route.query.tag)
+    topic.value = route.query.following === '1' ? FOLLOWING : str(route.query.topic)
+    kind.value = str(route.query.kind)
     sort.value = route.query.sort === 'posts' || route.query.sort === 'name' ? route.query.sort : 'recent'
     q.value = str(route.query.q)
   },
   { immediate: true, deep: true },
 )
+const followingOnly = computed(() => topic.value === FOLLOWING)
+// The list of followed blogs is read when the filter is applied, so
+// unfollowing one in the list does not make it vanish under the cursor.
+const followIds = ref<number[]>([])
 const text = ref(q.value)
 
 const blogs = ref<BlogSummary[]>([])
@@ -37,8 +50,10 @@ let generation = 0
 
 const chips = computed<Chip[]>(() => [
   { value: '', label: '全部', count: meta.value?.stats.blogs },
-  ...channelTags(tagsInfo.value).map((t) => ({ value: t.tag, label: t.label, count: t.blogs })),
+  { value: FOLLOWING, label: '我的关注', count: follows.value.length },
+  ...(tagsInfo.value?.topics ?? []).filter((t) => t.blogs > 0).map((t) => ({ value: t.id, label: t.label, count: t.blogs })),
 ])
+const kinds = computed(() => tagsInfo.value?.kinds ?? [])
 const sorts: { id: BlogSort; label: string }[] = [
   { id: 'recent', label: '最近更新' },
   { id: 'posts', label: '文章最多' },
@@ -46,7 +61,21 @@ const sorts: { id: BlogSort; label: string }[] = [
 ]
 
 function setQuery(patch: Record<string, string>) {
-  const query: Record<string, string> = { tag: tag.value, sort: sort.value, q: q.value, ...patch }
+  const query: Record<string, string> = {
+    tag: tag.value,
+    topic: followingOnly.value ? '' : topic.value,
+    following: followingOnly.value ? '1' : '',
+    kind: kind.value,
+    sort: sort.value,
+    q: q.value,
+    ...patch,
+  }
+  if (query.topic === FOLLOWING) {
+    query.topic = ''
+    query.following = '1'
+  } else if ('topic' in patch) {
+    query.following = ''
+  }
   if (query.sort === 'recent') delete query.sort
   for (const k of Object.keys(query)) if (!query[k]) delete query[k]
   router.replace({ query })
@@ -64,7 +93,19 @@ async function loadMore() {
   loading.value = true
   error.value = false
   try {
-    const page = await api.blogs({ offset: offset.value, tag: tag.value || undefined, sort: sort.value, q: q.value || undefined })
+    if (followingOnly.value && !followIds.value.length) {
+      offset.value = null
+      return
+    }
+    const page = await api.blogs({
+      offset: offset.value,
+      tag: tag.value || undefined,
+      topic: followingOnly.value ? undefined : topic.value || undefined,
+      kind: kind.value || undefined,
+      ids: followingOnly.value ? followIds.value : undefined,
+      sort: sort.value,
+      q: q.value || undefined,
+    })
     if (gen !== generation) return
     blogs.value.push(...page.items)
     offset.value = page.next_cursor ? Number(page.next_cursor) : null
@@ -76,8 +117,9 @@ async function loadMore() {
 }
 
 watch(
-  () => [tag.value, sort.value, q.value],
+  () => [tag.value, topic.value, kind.value, sort.value, q.value],
   () => {
+    followIds.value = [...follows.value]
     generation++
     blogs.value = []
     offset.value = 0
@@ -106,23 +148,41 @@ onBeforeUnmount(() => {
     <header class="head">
       <h1>博客</h1>
       <div class="controls">
-        <input v-model="text" type="search" placeholder="搜索博客名或网址" aria-label="搜索博客" />
+        <input v-model="text" type="search" placeholder="搜索博主名、网址或简介" aria-label="搜索博主" />
+        <select
+          v-if="kinds.length > 1"
+          :value="kind"
+          aria-label="来源类型"
+          @change="setQuery({ kind: ($event.target as HTMLSelectElement).value })"
+        >
+          <option value="">全部来源</option>
+          <option v-for="k in kinds" :key="k.id" :value="k.id">{{ k.label }} {{ k.blogs }}</option>
+        </select>
         <select :value="sort" aria-label="排序" @change="setQuery({ sort: ($event.target as HTMLSelectElement).value })">
           <option v-for="o in sorts" :key="o.id" :value="o.id">{{ o.label }}</option>
         </select>
       </div>
     </header>
-    <ChipBar :chips="chips" :active="tag" label="按标签筛选" class="filters" @select="(t) => setQuery({ tag: t })" />
+    <ChipBar :chips="chips" :active="topic" label="按领域筛选" class="filters" @select="(t) => setQuery({ topic: t })" />
+    <p v-if="tag" class="tag-note">
+      开往标签：{{ tagLabel(tag) }}
+      <button type="button" @click="setQuery({ tag: '' })">清除</button>
+    </p>
 
     <ul class="grid">
       <li v-for="b in blogs" :key="b.id">
         <RouterLink :to="`/blog/${b.id}`" class="card">
           <BlogAvatar :name="b.name" :icon="b.icon" :size="48" />
           <div class="info">
-            <h2>{{ b.name }}</h2>
+            <div class="name-row">
+              <h2>{{ b.name }}</h2>
+              <FollowButton :blog-id="b.id" small />
+            </div>
             <p class="host">{{ hostOf(b.homepage) }}</p>
             <p v-if="b.description" class="desc">{{ b.description }}</p>
             <p class="tags">
+              <span v-if="b.kind && b.kind.id !== 'blog'" class="kind">{{ b.kind.label }}</span>
+              <span v-for="t in b.topics ?? []" :key="t.id" class="topic">{{ t.label }}</span>
               <span v-for="t in b.tags" :key="t.directory + t.tag">{{ t.label }}</span>
             </p>
             <p class="stats">
@@ -140,6 +200,7 @@ onBeforeUnmount(() => {
     <div ref="sentinel" class="status">
       <span v-if="loading" class="spinner" aria-label="加载中" />
       <button v-else-if="error" class="btn btn-ghost" @click="loadMore">加载失败，点此重试</button>
+      <p v-else-if="!blogs.length && followingOnly" class="hint">还没有关注任何博主，点卡片上的「关注」试试</p>
       <p v-else-if="!blogs.length" class="hint">没有找到博客</p>
       <p v-else-if="offset === null" class="hint">— 共 {{ blogs.length }} 个 —</p>
     </div>
@@ -203,7 +264,31 @@ h1 {
   border-color: color-mix(in srgb, var(--text) 25%, transparent);
 }
 .info {
+  flex: 1;
   min-width: 0;
+}
+.name-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.tags .topic {
+  background: color-mix(in srgb, var(--link) 12%, transparent);
+  color: var(--link);
+}
+.tags .kind {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.tag-note {
+  margin: -8px 4px 14px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+.tag-note button {
+  margin-left: 8px;
+  color: var(--link);
 }
 h2 {
   margin: 0;

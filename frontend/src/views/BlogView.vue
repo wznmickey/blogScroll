@@ -3,8 +3,10 @@ import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from '../api'
 import BlogAvatar from '../components/BlogAvatar.vue'
+import FollowButton from '../components/FollowButton.vue'
 import Waterfall from '../components/Waterfall.vue'
 import { hostOf, relativeTime } from '../format'
+import { socialLabel } from '../social'
 import type { BlogDetail } from '../types'
 
 const route = useRoute()
@@ -31,22 +33,6 @@ const load = (cursor: string | null) => api.posts({ mode: 'latest', blog: id.val
 
 /** "Hexo 7.3.0" → "Hexo" */
 const engine = computed(() => blog.value?.generator?.split(/\s+/)[0] ?? null)
-
-const SOCIAL: Record<string, string> = {
-  github: 'GitHub',
-  gitee: 'Gitee',
-  bilibili: 'B站',
-  weibo: '微博',
-  zhihu: '知乎',
-  x: 'X',
-  telegram: 'Telegram',
-  instagram: 'Instagram',
-  youtube: 'YouTube',
-  douban: '豆瓣',
-  xiaohongshu: '小红书',
-  link: '个人主页',
-}
-const socialLabel = (kind: string) => SOCIAL[kind] ?? kind
 </script>
 
 <template>
@@ -54,11 +40,23 @@ const socialLabel = (kind: string) => SOCIAL[kind] ?? kind
     <section v-if="blog" class="profile">
       <BlogAvatar :name="blog.name" :icon="blog.icon" :size="88" />
       <div class="info">
-        <h1>{{ blog.name }}</h1>
+        <div class="title-row">
+          <h1>{{ blog.name }}</h1>
+          <FollowButton :blog-id="blog.id" />
+        </div>
         <a :href="blog.homepage" target="_blank" rel="noopener" class="home">{{ hostOf(blog.homepage) }} ↗</a>
         <p v-if="blog.description" class="desc">{{ blog.description }}</p>
         <p class="chips">
+          <span v-if="blog.kind && blog.kind.id !== 'blog'" class="chip source">{{ blog.kind.label }}</span>
           <span v-for="d in blog.directories" :key="d.directory" class="chip source">收录于{{ d.name }}</span>
+          <RouterLink
+            v-for="t in blog.topics ?? []"
+            :key="t.id"
+            :to="{ path: '/', query: { topic: t.id } }"
+            class="chip link topic"
+            :title="t.share ? `约 ${Math.round(t.share * 100)}% 的文章` : undefined"
+            >{{ t.label }}</RouterLink
+          >
           <RouterLink
             v-for="t in blog.tags"
             :key="t.directory + t.tag"
@@ -69,6 +67,9 @@ const socialLabel = (kind: string) => SOCIAL[kind] ?? kind
           <span v-if="blog.full_text" class="chip">作者已授权全文</span>
           <span v-if="engine" class="chip">{{ engine }}</span>
           <span v-if="blog.comment_system" class="chip">评论 · {{ blog.comment_system }}</span>
+        </p>
+        <p v-if="blog.top_tags?.length" class="top-tags">
+          <RouterLink v-for="t in blog.top_tags" :key="t" :to="{ path: '/', query: { category: t } }">#{{ t }}</RouterLink>
         </p>
         <p v-if="blog.social.length" class="social">
           <a v-for="s in blog.social" :key="s.url" :href="s.url" target="_blank" rel="noopener me">{{
@@ -107,11 +108,28 @@ const socialLabel = (kind: string) => SOCIAL[kind] ?? kind
 .info {
   min-width: 0;
 }
+.title-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
 h1 {
   margin: 0;
   font-size: 24px;
   line-height: 1.3;
   word-break: break-word;
+}
+.chip.topic {
+  background: color-mix(in srgb, var(--link) 12%, transparent);
+  color: var(--link);
+}
+.top-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 8px 0 0;
+  color: var(--link);
+  font-size: 13px;
 }
 .home {
   color: var(--link);

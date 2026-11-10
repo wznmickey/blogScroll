@@ -1,15 +1,21 @@
 # 博客漫游 · Blog Waterfall
 
-从博客圈子（目前是 [开往 Travellings](https://www.travellings.cn)）的成员列表出发，读取各博客的 RSS，把最新文章做成小红书式的瀑布流。支持桌面和手机网页。
+从博客圈子（目前是 [开往 Travellings](https://www.travellings.cn)）的成员列表出发，读取各博客的 RSS，把最新文章做成小红书式的瀑布流。也可以在配置里加入任意 RSS 来源（资讯、周刊、播客……）。支持桌面和手机网页。
 
 - 后端：Rust（axum + sqlx/SQLite + reqwest + feed-rs），负责同步成员列表、发现并抓取 RSS、提供 API、托管前端
 - 前端：TypeScript + Vue 3 + Vite，瀑布流 / 无限滚动 / 详情弹层（手机为全屏页）
 
-筛选：「推荐 / 最新」两种排序 × 开往标签频道（博客、技术、生活、综合……）× 「只看有图」；点文章的 `#标签` 看同标签文章；搜索框聚焦时给出热门标签；`/blogs` 是全部成员博客的目录，可按标签筛选、搜索、按更新时间 / 文章数 / 名称排序。
+- 「推荐 / 最新 / 关注」三个页签 × 领域频道（编程开发、人工智能、旅行……）× 来源类型 × 「只看有图」
+- 点文章的 `#标签` 看同标签文章；文章详情旁边有博主简介（来自关于页）和「相似文章」
+- 搜索同时找博主（名称、网址、简介、关于页、领域）和文章，输入时下拉提示博主
+- 「关注」存在本机浏览器的 cookie 里（无需账号）；推荐会参考关注的博主和最近读过的文章
+- `/blogs` 是全部来源的目录，可按领域、来源类型、「我的关注」筛选，搜索，按更新时间 / 文章数 / 名称排序
 
 ```
 backend/    Rust 服务端（feed-server）
-  src/sources/     博客目录（开往……），扩展点
+  src/sources/     来源：博客目录（开往……，扩展点）和配置里的 RSS / OPML
+  src/feed.rs      RSS 解析；src/clean.rs 修正常见的 RSS 毛病
+  src/analyze.rs   关键词、标签、领域、相似文章（jieba 分词 + TF-IDF）
   src/fulltext.rs  全文抓取，扩展点（默认关闭）
   src/http.rs      所有对外请求都经过这里（限速、条件请求）
   src/cache.rs     本站自己的 HTTP 缓存（API 内存缓存 + ETag，静态资源缓存头）
@@ -39,6 +45,7 @@ cargo run -- crawl --limit 20      # 只抓 20 个到期的博客，然后退出
 cargo run -- crawl --blog 42       # 立刻抓某一个博客
 cargo run -- serve --no-crawl      # 只提供网页和 API
 cargo run -- crawl --sync --all    # 定时任务用：同步（如到期）并抓完所有到期的博客
+cargo run -- analyze               # 重算全部关键词、标签、领域和相似度（serve 每 6 小时自动做）
 cargo run -- export --out DIR      # 导出静态 JSON（静态版前端读取）
 cargo test
 ```
@@ -103,6 +110,51 @@ docker compose up -d          # http://127.0.0.1:8080，前面再挂 Caddy / ngi
 - **存储有上限**：每个博客最多保留最新 50 篇（`max_posts_per_blog`），只收录一年内的文章。
 
 以上都可在 `config.toml` 的 `[crawler]` 中调整。
+
+## RSS 里常见的问题，以及怎么处理
+
+对已收录的约 8000 篇文章做过一次体检，下面这些都由解析器自动修正（`src/feed.rs`、`src/clean.rs`）：
+
+- **日期**：`2026-10-05 10:11:00` 这类没有 `T`、没有时区的写法按 UTC+8 读取；所有条目都是同一个带时分秒的时间（生成器把构建时间写进每一条）视为没有日期；远在未来的日期（如 2077 年）丢弃；没有日期时从网址里取（`/2026/10/05/`、`/202610051011`）。
+- **没有日期的文章**：第一次抓取到的视为「年代不明」，排在所有有日期的文章之后，界面显示「发布日期未知」；之后新出现的按发现时间算。
+- **摘要**：HTML 被转义两次、`<description>` 里直接放 Markdown、「阅读全文 →」「The post … appeared first on …」「…最先出现在…」之类的尾巴、图片文件名和裸链接，都会清理掉。
+- **链接**：Hexo 没配置 `url` 时文章地址是 `http://example.com/...`，改到 RSS 所在的域名。
+- **作者**：`(名字)`、`@用户名 名字`、邮箱都会整理或丢弃。
+- **分类**：「未分类」「默认分类」「Uncategorized」这类不保留。
+- **重复**：Discourse 论坛把每条回复都列成一项（`#post_3`），合并为一个主题；同一篇文章用两个网址发布（标题和摘要都一样）只留一个。
+- **垃圾站**：域名过期被博彩站接手、RSS 大半是博彩标题的来源会被自动隐藏（`flagged = 'spam'`），已存内容删除，之后恢复正常会自动解除。
+- **日志**：网络错误记录具体原因（DNS、超时、证书不匹配……）而不是笼统的 "error sending request"；html5ever 和证书校验库的逐站噪音默认不输出（站点问题仍记在该博客的 `last_error`）。
+
+## 标签、领域与推荐
+
+全部在本地计算，只用 RSS 里给的内容（标题、作者自己的分类、摘要、RSS 正文），不请求文章页，也不调用外部服务（`src/analyze.rs`）：
+
+- **关键词**：jieba 分词 + TF-IDF，标题和分类加权，每篇最多 12 个。
+- **标签**：作者自己的分类（统一大小写和同义写法，如「人工智能」→ AI、docker → Docker），加上关键词里属于「常用标签」的词（至少 3 个博客用过的分类，或领域词表里的词；太宽泛的词如「记录」「工具」不自动添加）。
+- **领域**：16 个固定领域（编程开发、人工智能、运维网络、网络安全、建站博客、数码工具、学习学术、生活随笔、旅行、摄影、阅读影视、游戏动漫、美食、职场财经、设计创作、运动健康），按标签和关键词匹配；博客的领域是其文章中占比 ≥ 25% 的领域。
+- **来源类型**：博客 / 资讯 / 周刊 / 播客 / 视频 / 论坛 / 其他。配置里可以指定；没指定时从 RSS 判断（音频附件 → 播客，Discourse 等论坛网址 → 论坛，标题含「周刊 / Weekly」→ 周刊）。
+- **相似文章**：标签和关键词按全站稀有程度加权成单位向量（`post_terms` 表），余弦相似度排序；只共享一个词的匹配降权，领域一致加分、不一致减分，每个博客最多 2 篇。
+- **推荐**：在原有「新鲜度 + 随机扰动 + 同博客降权」的基础上，加上与「关注的博主近一年写的内容 + 最近读过的文章」的相似度。
+- 新文章入库时就打好标签；全站统计每 6 小时、`export` 之前和 `feed-server analyze` 时重算。
+
+## 自选订阅：纯 RSS 来源
+
+除了博客目录，可以在 `config.toml` 里直接加 RSS（启动时读取，改完重启即可）：
+
+```toml
+[[sources.feeds]]
+url = "https://sspai.com/feed"
+kind = "news"            # blog | news | newsletter | podcast | video | forum | other
+tags = ["科技"]           # 可选
+# name = "少数派"         # 可选；不写就用 RSS 自己的标题
+# homepage = "https://sspai.com/"  # 可选；写了会和同一网站的开往成员合并
+
+[[sources.opml]]          # 从 RSS 阅读器导出的订阅列表
+path = "feeds.opml"       # 相对 config.toml 所在目录
+kind = "blog"
+```
+
+这些来源和开往成员一样抓取、一样受限速规则约束，在 `/blogs` 里显示为「自选订阅」。
 
 ## 博主信息与评论
 
@@ -171,11 +223,14 @@ pub trait Directory: Send + Sync {
 | 路径 | 说明 |
 |---|---|
 | `GET /api/posts?mode=discover&seed=&cursor=` | 推荐：近期文章，按种子轻度打散，同一博客连续出现会降权 |
+| …`&follow=1,2&read=7,8` | 推荐向关注的博主、最近读过的文章的内容倾斜 |
 | `GET /api/posts?mode=latest&cursor=&blog=&q=` | 最新 / 某博客 / 搜索，游标分页 |
-| …`&tag=tech&directory=travellings&cover=1` | 两种模式通用的筛选：目录标签、来源目录、只看有图 |
-| …`&category=旅行` | 按文章自带的分类筛选（按时间排序） |
+| …`&blogs=1,2,3` | 只看这些博客（「关注」页签），按时间排序 |
+| …`&topic=dev&kind=podcast&tag=tech&directory=travellings&cover=1` | 两种模式通用的筛选：领域、来源类型、目录标签、来源目录、只看有图 |
+| …`&category=Docker` | 按标签筛选（作者分类和自动标签，同义写法合并；按时间排序） |
 | `GET /api/posts/{id}` | 详情；`content_html` 仅对授权全文的博客返回 |
-| `GET /api/tags` | 各目录的标签（含博客数、文章数、中文名）和近半年热门文章分类 |
-| `GET /api/blogs?q=&tag=&sort=recent\|posts\|name&offset=` | 博客目录 |
-| `GET /api/blogs/{id}` | 博客主页（含标签） |
+| `GET /api/posts/{id}/related?limit=8` | 相似文章 |
+| `GET /api/tags` | 领域、来源类型、各目录的标签（含博客数、文章数、中文名）和近半年热门标签 |
+| `GET /api/blogs?q=&topic=&kind=&tag=&ids=&sort=recent\|posts\|name&offset=` | 博客目录；有 `q` 时按匹配程度排序（名称 > 网址 > 简介 > 关于页 / 领域） |
+| `GET /api/blogs/{id}` | 博客主页（含标签、领域、类型、常用标签） |
 | `GET /api/meta` | 站点名、数据来源、统计 |

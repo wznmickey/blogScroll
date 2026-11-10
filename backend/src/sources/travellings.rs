@@ -89,6 +89,8 @@ impl Travellings {
                     tags,
                     status,
                     alive,
+                    kind: None,
+                    name_from_feed: false,
                 })
             })
             .collect();

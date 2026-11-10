@@ -1,4 +1,5 @@
-//! Blog directories: where the list of blogs comes from.
+//! Where the list of sources comes from: blog directories (webrings), plus
+//! feeds listed in the config or in OPML files.
 //!
 //! To add a directory (e.g. 十年之约 / foreverblog.cn), implement [`Directory`]
 //! in a new module and register it in [`enabled`]. A directory only has to
@@ -10,6 +11,7 @@ use url::Url;
 use crate::config::Config;
 use crate::http::{PoliteClient, Validators};
 
+pub mod manual;
 pub mod travellings;
 
 #[derive(Debug, Clone)]
@@ -25,6 +27,10 @@ pub struct DirectoryEntry {
     pub status: String,
     /// Whether the directory considers the site alive.
     pub alive: bool,
+    /// Source kind (`news`, `podcast`, ...) when the directory knows it.
+    pub kind: Option<String>,
+    /// No name was given: use the feed's own title (and site link) once fetched.
+    pub name_from_feed: bool,
 }
 
 pub enum DirectoryFetch {
@@ -47,6 +53,10 @@ pub trait Directory: Send + Sync {
     fn tag_labels(&self) -> &'static [(&'static str, &'static str)] {
         &[]
     }
+    /// Read from local files, so it can be synced at every start.
+    fn is_local(&self) -> bool {
+        false
+    }
     /// Fetches the complete member list. Called about once a day.
     fn fetch<'a>(
         &'a self,
@@ -59,6 +69,12 @@ pub fn enabled(cfg: &Config) -> Vec<Box<dyn Directory>> {
     let mut out: Vec<Box<dyn Directory>> = Vec::new();
     if cfg.sources.travellings.enabled {
         out.push(Box::new(travellings::Travellings::new(cfg.sources.travellings.clone())));
+    }
+    if !cfg.sources.feeds.is_empty() || !cfg.sources.opml.is_empty() {
+        out.push(Box::new(manual::Manual::new(
+            cfg.sources.feeds.clone(),
+            cfg.sources.opml.clone(),
+        )));
     }
     out
 }

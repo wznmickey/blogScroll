@@ -24,6 +24,12 @@ impl Config {
         let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let mut cfg: Config = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
         cfg.apply_env();
+        let dir = path.parent().unwrap_or(Path::new(""));
+        for o in &mut cfg.sources.opml {
+            if o.path.is_relative() {
+                o.path = dir.join(&o.path);
+            }
+        }
         Ok(cfg)
     }
 
@@ -142,6 +148,39 @@ impl Default for CrawlerConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct SourcesConfig {
     pub travellings: TravellingsConfig,
+    /// Feeds you add yourself: news sites, podcasts, newsletters, any RSS.
+    pub feeds: Vec<FeedSource>,
+    /// Feed-reader exports (OPML); every feed in them is added like `feeds`.
+    pub opml: Vec<OpmlSource>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeedSource {
+    pub url: String,
+    /// Shown instead of the feed's own title.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The site the feed belongs to. Give it to merge with a webring member.
+    #[serde(default)]
+    pub homepage: Option<String>,
+    /// blog | news | newsletter | podcast | video | forum | other
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpmlSource {
+    /// Relative paths are relative to the config file's directory.
+    pub path: PathBuf,
+    /// Kind for every feed in the file.
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

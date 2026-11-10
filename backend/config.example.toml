@@ -46,6 +46,20 @@ fallback_url = "https://backup.api.travellings.cn/list.json"
 # RUN = all good, LOST = site up but webring badge missing.
 live_statuses = ["RUN", "LOST"]
 
+# Any RSS / Atom / JSON feed, not only blogs. Read at every start.
+# kind: blog | news | newsletter | podcast | video | forum | other
+# Without `name`, the feed's own title is used; give `homepage` to merge
+# with a webring member of the same site.
+# [[sources.feeds]]
+# url = "https://sspai.com/feed"
+# kind = "news"
+# tags = ["科技"]
+
+# Every feed in an OPML export from a feed reader (path relative to this file).
+# [[sources.opml]]
+# path = "feeds.opml"
+# kind = "blog"
+
 [policy]
 # Authors who asked to be left out. Their sites are never requested and
 # their stored posts are deleted on the next start / sync.

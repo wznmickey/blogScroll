@@ -58,6 +58,7 @@ pub struct BlogRow {
     pub profile_at: Option<i64>,
     pub comment_system: Option<String>,
     pub comments_next_at: i64,
+    pub from_feed_meta: bool,
 }
 
 impl BlogRow {
@@ -70,7 +71,7 @@ macro_rules! blog_columns {
     () => {
         "id, name, homepage_url, feed_url, feed_url_origin, content_policy, \
          etag, last_modified, refresh_secs, discovery_at, failures, content_hash, \
-         profile_at, comment_system, comments_next_at"
+         profile_at, comment_system, comments_next_at, from_feed_meta"
     };
 }
 
@@ -108,11 +109,14 @@ pub async fn save_directory(
         };
         let feed = e.feed_url.as_ref().map(|u| u.to_string());
         let blog_id: i64 = sqlx::query_scalar(
-            "INSERT INTO blogs (site_key, name, homepage_url, feed_url, feed_url_origin, refresh_secs, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, CASE WHEN ?4 IS NULL THEN NULL ELSE 'directory' END, ?5, ?6, ?6)
+            "INSERT INTO blogs (site_key, name, homepage_url, feed_url, feed_url_origin, refresh_secs, created_at, updated_at,
+                                kind, from_feed_meta)
+             VALUES (?1, ?2, ?3, ?4, CASE WHEN ?4 IS NULL THEN NULL ELSE 'directory' END, ?5, ?6, ?6, ?7, ?8)
              ON CONFLICT(site_key) DO UPDATE SET
-                name = excluded.name,
-                homepage_url = excluded.homepage_url,
+                name = CASE WHEN ?8 THEN blogs.name ELSE excluded.name END,
+                homepage_url = CASE WHEN ?8 THEN blogs.homepage_url ELSE excluded.homepage_url END,
+                from_feed_meta = ?8,
+                kind = COALESCE(excluded.kind, blogs.kind),
                 feed_url = CASE WHEN excluded.feed_url IS NOT NULL AND blogs.feed_url_origin IS NOT 'manual'
                                 THEN excluded.feed_url ELSE blogs.feed_url END,
                 feed_url_origin = CASE WHEN excluded.feed_url IS NOT NULL AND blogs.feed_url_origin IS NOT 'manual'
@@ -126,6 +130,8 @@ pub async fn save_directory(
         .bind(&feed)
         .bind(refresh_secs)
         .bind(now)
+        .bind(&e.kind)
+        .bind(e.name_from_feed)
         .fetch_one(&mut *tx)
         .await?;
 
@@ -285,7 +291,7 @@ pub async fn due_for_enrich(
         "SELECT ",
         blog_columns!(),
         " FROM blogs
-         WHERE active = 1 AND excluded = 0 AND failures = 0 AND last_checked_at IS NOT NULL
+         WHERE active = 1 AND excluded = 0 AND flagged IS NULL AND failures = 0 AND last_checked_at IS NOT NULL
            AND ((?2 > 0 AND (profile_at IS NULL OR profile_at <= ?1 - ?2))
              OR (?3 > 0 AND comment_system IS NOT NULL AND comments_next_at <= ?1))
          ORDER BY profile_at IS NOT NULL, profile_at, comments_next_at
@@ -417,32 +423,68 @@ pub async fn record_failure(
     Ok(())
 }
 
-/// Inserts or refreshes a post. Returns `true` when the post is new.
+pub struct Upserted {
+    pub id: i64,
+    pub is_new: bool,
+}
+
+/// How an entry is stored, beyond what the feed says.
+pub struct Entry<'a> {
+    /// Place in the feed (0 = first).
+    pub position: i64,
+    /// The blog had no posts before this fetch.
+    pub first_fetch: bool,
+    pub keywords_json: &'a str,
+    /// (HTML, source) for blogs that allowed full text.
+    pub content: Option<(&'a str, &'a str)>,
+}
+
+/// Inserts or refreshes a post.
+///
+/// An entry without a usable date that arrives with a blog's first fetch is
+/// backlog of unknown age: it sorts below every dated post, in feed order,
+/// and is never shown as new. One that shows up later appeared just now.
 pub async fn upsert_post(
-    pool: &SqlitePool,
+    conn: &mut sqlx::SqliteConnection,
     blog_id: i64,
     item: &ParsedItem,
     now: i64,
-    undated_sort_at: i64,
-    content: Option<(&str, &str)>,
-) -> sqlx::Result<bool> {
+    e: &Entry<'_>,
+) -> sqlx::Result<Upserted> {
     let published = item.published.map(|d| d.timestamp());
-    let sort_at = published.unwrap_or(undated_sort_at).min(now);
-    let first_seen: i64 = sqlx::query_scalar(
+    let backlog_sort = -e.position;
+    let (sort_at, backlog) = match published {
+        Some(p) => (p.min(now), false),
+        None if e.first_fetch => (backlog_sort, true),
+        None => (now - e.position, false),
+    };
+    let (id, first_seen): (i64, i64) = sqlx::query_as(
         "INSERT INTO posts (blog_id, guid, url, title, excerpt, cover_url, author, tags,
                             published_at, first_seen_at, sort_at, content_html, content_source,
-                            comments_url, comment_count)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                            comments_url, comment_count, undated, keywords)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
          ON CONFLICT(blog_id, guid) DO UPDATE SET
             url = excluded.url, title = excluded.title, excerpt = excluded.excerpt,
             cover_url = excluded.cover_url, author = excluded.author, tags = excluded.tags,
+            sort_at = CASE
+                WHEN excluded.published_at IS NOT NULL THEN MIN(excluded.published_at, posts.first_seen_at)
+                -- Lost a date the new parser rules reject (e.g. the build time on every entry).
+                WHEN posts.published_at IS NOT NULL THEN
+                    CASE WHEN posts.first_seen_at = (SELECT MIN(p2.first_seen_at) FROM posts p2 WHERE p2.blog_id = posts.blog_id)
+                         THEN ?18 ELSE posts.first_seen_at END
+                ELSE posts.sort_at END,
+            undated = CASE
+                WHEN excluded.published_at IS NOT NULL THEN 0
+                WHEN posts.published_at IS NOT NULL THEN
+                    posts.first_seen_at = (SELECT MIN(p2.first_seen_at) FROM posts p2 WHERE p2.blog_id = posts.blog_id)
+                ELSE posts.undated END,
             published_at = excluded.published_at,
-            sort_at = MIN(COALESCE(excluded.published_at, posts.sort_at), posts.first_seen_at),
             content_html = COALESCE(excluded.content_html, posts.content_html),
             content_source = COALESCE(excluded.content_source, posts.content_source),
             comments_url = COALESCE(excluded.comments_url, posts.comments_url),
-            comment_count = COALESCE(excluded.comment_count, posts.comment_count)
-         RETURNING first_seen_at",
+            comment_count = COALESCE(excluded.comment_count, posts.comment_count),
+            keywords = excluded.keywords
+         RETURNING id, first_seen_at",
     )
     .bind(blog_id)
     .bind(&item.guid)
@@ -455,13 +497,65 @@ pub async fn upsert_post(
     .bind(published)
     .bind(now)
     .bind(sort_at)
-    .bind(content.map(|c| c.0))
-    .bind(content.map(|c| c.1))
+    .bind(e.content.map(|c| c.0))
+    .bind(e.content.map(|c| c.1))
     .bind(item.comments_url.as_ref().map(|u| u.as_str()))
     .bind(item.comment_count)
-    .fetch_one(pool)
+    .bind(backlog)
+    .bind(e.keywords_json)
+    .bind(backlog_sort)
+    .fetch_one(&mut *conn)
     .await?;
-    Ok(first_seen == now)
+    Ok(Upserted {
+        id,
+        is_new: first_seen == now,
+    })
+}
+
+pub async fn post_count(pool: &SqlitePool, blog_id: i64) -> sqlx::Result<i64> {
+    sqlx::query_scalar("SELECT COUNT(*) FROM posts WHERE blog_id = ?")
+        .bind(blog_id)
+        .fetch_one(pool)
+        .await
+}
+
+/// Name and site link from the feed, for sources added by feed URL alone.
+pub async fn set_feed_meta(
+    pool: &SqlitePool,
+    blog_id: i64,
+    name: Option<&str>,
+    homepage: Option<&str>,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE blogs SET name = COALESCE(?, name), homepage_url = COALESCE(?, homepage_url)
+         WHERE id = ? AND from_feed_meta = 1",
+    )
+    .bind(name)
+    .bind(homepage)
+    .bind(blog_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// What the feed says about itself: a podcast, a spam site, or nothing special.
+pub async fn set_feed_signals(
+    pool: &SqlitePool,
+    blog_id: i64,
+    detected_kind: Option<&str>,
+    spam: bool,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE blogs SET detected_kind = ?,
+                flagged = CASE WHEN ? THEN 'spam' WHEN flagged = 'spam' THEN NULL ELSE flagged END
+         WHERE id = ?",
+    )
+    .bind(detected_kind)
+    .bind(spam)
+    .bind(blog_id)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 pub struct Profile<'a> {
@@ -538,6 +632,14 @@ pub async fn save_comment_counts(
     tx.commit().await
 }
 
+pub async fn delete_posts(pool: &SqlitePool, blog_id: i64) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM posts WHERE blog_id = ?")
+        .bind(blog_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// Keeps only the newest `keep` posts of a blog, so storage stays bounded
 /// no matter how long a blog has been followed.
 pub async fn prune_posts(pool: &SqlitePool, blog_id: i64, keep: i64) -> sqlx::Result<u64> {
@@ -589,6 +691,8 @@ mod tests {
             tags: tags.iter().map(|t| t.to_string()).collect(),
             status: "RUN".into(),
             alive: true,
+            kind: None,
+            name_from_feed: false,
         }
     }
 
@@ -656,6 +760,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn undated_backlog_sorts_last_but_new_undated_posts_do_not() {
+        let pool = connect_memory().await;
+        save_directory(&pool, "d", &[entry("a", &[])], 3600, 100).await.unwrap();
+        let item = |guid: &str, published: Option<i64>| crate::feed::ParsedItem {
+            guid: guid.into(),
+            url: Url::parse(&format!("https://a.example/{guid}")).unwrap(),
+            title: guid.into(),
+            excerpt: String::new(),
+            cover: None,
+            author: None,
+            tags: vec![],
+            published: published.and_then(|t| chrono::DateTime::from_timestamp(t, 0)),
+            body_html: None,
+            comments_url: None,
+            comment_count: None,
+        };
+        let e = |position, first_fetch| Entry {
+            position,
+            first_fetch,
+            keywords_json: "[]",
+            content: None,
+        };
+        let mut conn = pool.acquire().await.unwrap();
+        // First fetch: a dated post and an undated one of unknown age.
+        upsert_post(&mut conn, 1, &item("dated", Some(1_000_000)), 2_000_000, &e(0, true))
+            .await
+            .unwrap();
+        upsert_post(&mut conn, 1, &item("old", None), 2_000_000, &e(1, true))
+            .await
+            .unwrap();
+        // Later: a new undated entry appeared just now.
+        let up = upsert_post(&mut conn, 1, &item("fresh", None), 3_000_000, &e(0, false))
+            .await
+            .unwrap();
+        assert!(up.is_new);
+        // Re-parsed with stricter rules, the first post loses its (bogus) date.
+        let up = upsert_post(&mut conn, 1, &item("dated", None), 3_000_000, &e(2, false))
+            .await
+            .unwrap();
+        assert!(!up.is_new);
+        drop(conn);
+
+        let rows: Vec<(String, i64, bool)> =
+            sqlx::query_as("SELECT guid, sort_at, undated FROM posts ORDER BY sort_at DESC")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            rows,
+            [
+                ("fresh".into(), 3_000_000, false),
+                ("old".into(), -1, true),
+                ("dated".into(), -2, true),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn prune_keeps_newest_posts() {
         let pool = connect_memory().await;
         save_directory(&pool, "d", &[entry("a", &[])], 3600, 100).await.unwrap();
@@ -673,7 +835,14 @@ mod tests {
                 comments_url: None,
                 comment_count: None,
             };
-            upsert_post(&pool, 1, &item, 2_000_000, 0, None).await.unwrap();
+            let mut conn = pool.acquire().await.unwrap();
+            let e = Entry {
+                position: 0,
+                first_fetch: false,
+                keywords_json: "[]",
+                content: None,
+            };
+            upsert_post(&mut conn, 1, &item, 2_000_000, &e).await.unwrap();
         }
         assert_eq!(prune_posts(&pool, 1, 4).await.unwrap(), 6);
         let left: Vec<String> = sqlx::query_scalar("SELECT guid FROM posts ORDER BY sort_at DESC")

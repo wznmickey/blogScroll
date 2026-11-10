@@ -51,8 +51,41 @@ pub enum FetchError {
     },
     #[error("response larger than {0} bytes")]
     TooLarge(usize),
-    #[error("{0}")]
+    #[error("{}", network_message(.0))]
     Network(#[from] reqwest::Error),
+}
+
+/// reqwest's own message ("error sending request for url (...)") hides the
+/// cause; the source chain has it (DNS failure, certificate for another
+/// name, connection refused, ...).
+fn network_message(e: &reqwest::Error) -> String {
+    let kind = if e.is_timeout() {
+        "timeout"
+    } else if e.is_connect() {
+        "connect"
+    } else if e.is_decode() {
+        "decode"
+    } else if e.is_redirect() {
+        "redirect"
+    } else if e.is_body() {
+        "body"
+    } else {
+        "request"
+    };
+    let mut parts: Vec<String> = Vec::new();
+    let mut cur = std::error::Error::source(e);
+    while let Some(c) = cur {
+        let msg = c.to_string();
+        if !parts.iter().any(|p| p.contains(&msg)) {
+            parts.push(msg);
+        }
+        cur = c.source();
+    }
+    if parts.is_empty() {
+        e.to_string()
+    } else {
+        format!("{kind}: {}", parts.join(": "))
+    }
 }
 
 impl FetchError {

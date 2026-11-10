@@ -54,6 +54,7 @@ pub fn from_home(page: &str, base: &Url) -> HomeInfo {
     let doc = Html::parse_document(page);
     HomeInfo {
         description: meta(&doc, &["description", "og:description", "twitter:description"])
+            .and_then(|d| crate::clean::description(&d))
             .map(|d| truncate_chars(&redact(&d), DESCRIPTION_CHARS)),
         avatar: avatar(&doc, base),
         about: about_link(&doc, base),

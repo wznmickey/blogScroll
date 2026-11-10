@@ -7,6 +7,7 @@ use reqwest::StatusCode;
 use sqlx::SqlitePool;
 use url::Url;
 
+use crate::analyze;
 use crate::comments::{self, CommentSystem};
 use crate::config::{Config, CrawlerConfig};
 use crate::db::{self, BlogRow, Success};
@@ -31,6 +32,9 @@ const COUNT_BATCH: i64 = 20;
 const COUNT_REFUSED_PAUSE_SECS: i64 = 30 * 86400;
 /// Blogs per profile / comment pass.
 const ENRICH_ROUND: i64 = 200;
+/// Corpus-wide tag statistics are recomputed this often (new posts are
+/// tagged as they arrive, against the last statistics).
+const RETAG_EVERY: Duration = Duration::from_secs(6 * 3600);
 
 pub struct Crawler {
     pool: SqlitePool,
@@ -93,7 +97,15 @@ impl Crawler {
 
     /// Background loop: daily directory sync plus feed refreshes as they fall due.
     pub async fn run(self: Arc<Self>) {
+        let mut last_retag: Option<std::time::Instant> = None;
         loop {
+            if last_retag.is_none_or(|t| t.elapsed() >= RETAG_EVERY) {
+                match analyze::retag_all(&self.pool).await {
+                    Ok(s) => tracing::info!(?s, "tags and topics recomputed"),
+                    Err(e) => tracing::warn!(error = %e, "retag failed"),
+                }
+                last_retag = Some(std::time::Instant::now());
+            }
             if let Err(e) = self.sync_directories_if_due().await {
                 tracing::warn!(error = %e, "directory sync failed");
             }
@@ -123,8 +135,18 @@ impl Crawler {
     }
 
     pub async fn sync_directories(&self) -> anyhow::Result<()> {
+        self.sync(false).await
+    }
+
+    /// Sources read from local files (`[[sources.feeds]]`, OPML), so config
+    /// edits apply at start without waiting for the daily sync.
+    pub async fn sync_local_directories(&self) -> anyhow::Result<()> {
+        self.sync(true).await
+    }
+
+    async fn sync(&self, local_only: bool) -> anyhow::Result<()> {
         let mut any_ok = false;
-        for dir in &self.directories {
+        for dir in self.directories.iter().filter(|d| !local_only || d.is_local()) {
             let key = format!("directory_validators:{}", dir.id());
             let validators: Option<Validators> = db::kv_get(&self.pool, &key)
                 .await?
@@ -146,7 +168,7 @@ impl Crawler {
             }
         }
         db::apply_policy(&self.pool, &self.cfg).await?;
-        if any_ok {
+        if any_ok && !local_only {
             db::kv_set(&self.pool, LAST_SYNC_KEY, &now().to_string()).await?;
         }
         Ok(())
@@ -471,7 +493,18 @@ impl Crawler {
             }
         };
 
-        let mut items = parsed.items;
+        let spam = parsed.looks_like_spam();
+        db::set_feed_signals(&self.pool, blog.id, parsed.detected_kind(), spam).await?;
+        if blog.from_feed_meta {
+            let link = parsed.link.as_ref().map(|u| u.as_str());
+            db::set_feed_meta(&self.pool, blog.id, parsed.title.as_deref(), link).await?;
+        }
+        if spam {
+            tracing::warn!(blog = %blog.homepage_url, "feed is mostly gambling spam; hiding the source");
+            db::delete_posts(&self.pool, blog.id).await?;
+        }
+
+        let mut items = if spam { Vec::new() } else { parsed.items };
         items.sort_by_key(|i| std::cmp::Reverse(i.published));
         let max_age = self.c().max_post_age_days as i64 * 86400;
         if max_age > 0 {
@@ -479,19 +512,11 @@ impl Crawler {
         }
         items.truncate(self.c().max_items_per_feed);
 
-        let full_text = blog.full_text_allowed();
-        let mut new = 0;
-        for (idx, item) in items.iter().enumerate() {
-            let content = if full_text { feed_full_text(item) } else { None };
-            let content_ref = content.as_deref().map(|c| (c, "feed"));
-            if db::upsert_post(&self.pool, blog.id, item, t, t - idx as i64, content_ref).await? {
-                new += 1;
-            }
-        }
+        let new = self.store_items(blog, &items, t).await?;
         if new > 0 {
             db::prune_posts(&self.pool, blog.id, self.c().max_posts_per_blog as i64).await?;
         }
-        if full_text {
+        if blog.full_text_allowed() {
             self.fetch_full_text(blog).await?;
         }
 
@@ -517,6 +542,49 @@ impl Crawler {
         )
         .await?;
         Ok(Outcome::Updated { new })
+    }
+
+    /// Saves a feed's entries with their keywords, tags and topics. Keyword
+    /// extraction is CPU work and runs off the async threads.
+    async fn store_items(&self, blog: &BlogRow, items: &[feed::ParsedItem], t: i64) -> anyhow::Result<usize> {
+        if items.is_empty() {
+            return Ok(0);
+        }
+        let first_fetch = db::post_count(&self.pool, blog.id).await? == 0;
+        let texts: Vec<(String, Vec<String>, String, Option<String>)> = items
+            .iter()
+            .map(|i| (i.title.clone(), i.tags.clone(), i.excerpt.clone(), i.body_html.clone()))
+            .collect();
+        let keywords: Vec<Vec<(String, f32)>> = tokio::task::spawn_blocking(move || {
+            texts
+                .iter()
+                .map(|(title, tags, excerpt, body)| analyze::keywords(title, tags, excerpt, body.as_deref()))
+                .collect()
+        })
+        .await?;
+
+        let corpus = analyze::corpus();
+        let full_text = blog.full_text_allowed();
+        let mut new = 0;
+        let mut tx = self.pool.begin().await?;
+        for (idx, (item, kw)) in items.iter().zip(&keywords).enumerate() {
+            let content = if full_text { feed_full_text(item) } else { None };
+            let content_ref = content.as_deref().map(|c| (c, "feed"));
+            let kw_json = serde_json::to_string(kw)?;
+            let entry = db::Entry {
+                position: idx as i64,
+                first_fetch,
+                keywords_json: &kw_json,
+                content: content_ref,
+            };
+            let up = db::upsert_post(&mut tx, blog.id, item, t, &entry).await?;
+            new += usize::from(up.is_new);
+            let derived = analyze::derive(&item.tags, kw, &corpus);
+            analyze::save_derived(&mut tx, up.id, &derived).await?;
+        }
+        tx.commit().await?;
+        analyze::update_blog_topics(&self.pool, &[blog.id]).await?;
+        Ok(new)
     }
 
     /// Only reached for blogs whose authors allowed full-text fetching.

@@ -6,6 +6,7 @@
 //! meta.json         = GET /api/meta
 //! tags.json         = GET /api/tags
 //! feed-N.json       newest posts, newest first, `shard_size` per file (= latest mode)
+//! related.json      { post id: [related post ids] }, limited to posts in the feed files
 //! blogs.json        every blog (= GET /api/blogs, all pages)
 //! blogs/{id}.json   { blog: GET /api/blogs/{id}, posts: [...] }
 //! ```
@@ -21,6 +22,8 @@ use axum::body::Body;
 use axum::http::Request;
 use serde_json::{Value, json};
 use tower::ServiceExt;
+
+const RELATED_PER_POST: usize = 8;
 
 pub struct ExportOptions {
     /// How many of the newest posts go into the feed shards.
@@ -62,6 +65,25 @@ pub async fn export(app: Router, out: &Path, opts: &ExportOptions) -> anyhow::Re
     for (i, shard) in shards.iter().enumerate() {
         write(&tmp.join(format!("feed-{i}.json")), &Value::from(shard.to_vec()))?;
     }
+
+    // Related posts, resolved by the client from the feed files it loads.
+    let exported: std::collections::HashSet<i64> = posts.iter().filter_map(|p| p["id"].as_i64()).collect();
+    let mut related = serde_json::Map::new();
+    for id in &exported {
+        let list = get(&app, &format!("/api/posts/{id}/related?limit=16")).await?;
+        let ids: Vec<i64> = list
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|p| p["id"].as_i64())
+            .filter(|i| exported.contains(i))
+            .take(RELATED_PER_POST)
+            .collect();
+        if !ids.is_empty() {
+            related.insert(id.to_string(), json!(ids));
+        }
+    }
+    write(&tmp.join("related.json"), &Value::Object(related))?;
 
     let blogs = paged(&app, usize::MAX, |c| {
         format!("/api/blogs?limit=200&offset={}", c.unwrap_or("0"))
@@ -152,6 +174,17 @@ mod tests {
         assert_eq!(read("blogs/1.json")["posts"].as_array().unwrap().len(), 5);
         assert_eq!(read("blogs/1.json")["blog"]["name"], "Blog 1");
         assert!(read("tags.json")["directories"].is_array());
+        let related = read("related.json");
+        let first = related
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .clone();
+        assert!(!first.is_empty() && first.len() <= RELATED_PER_POST);
         assert!(!out.join("blogs/3.json").exists(), "inactive blogs are not exported");
         assert!(!out.join("stale").exists(), "old output is replaced");
         std::fs::remove_dir_all(&dir).unwrap();

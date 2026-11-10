@@ -1,10 +1,14 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { api, cachedPost } from '../api'
-import { fullDate, hostOf } from '../format'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { useRoute } from 'vue-router'
+import { api, cachedPost, rememberPosts } from '../api'
+import { markRead } from '../follow'
+import { fullDate, hostOf, hue, initial } from '../format'
 import type { PostCard, PostDetail } from '../types'
+import BlogAboutCard from './BlogAboutCard.vue'
 import BlogAvatar from './BlogAvatar.vue'
 import CommentEmbed from './CommentEmbed.vue'
+import FollowButton from './FollowButton.vue'
 import TextCover from './TextCover.vue'
 
 const props = defineProps<{ id: number }>()
@@ -18,10 +22,25 @@ const post = computed<PostCard | PostDetail | undefined>(() => detail.value ?? c
 const hasCover = computed(() => !!post.value?.cover && !coverFailed.value)
 const comments = computed(() => detail.value?.comments ?? null)
 const commentsLink = computed(() => post.value?.comments_url ?? post.value?.url)
+const ownTags = computed(() => post.value?.tags ?? [])
+const autoTags = computed(() => post.value?.auto_tags ?? [])
+
+const route = useRoute()
+const related = ref<PostCard[]>([])
+const brokenThumbs = reactive(new Set<number>())
+const relatedLink = (id: number) => ({ path: route.path, query: { ...route.query, p: String(id) } })
 
 onMounted(async () => {
   document.addEventListener('keydown', onKey)
   document.documentElement.style.overflow = 'hidden'
+  markRead(props.id)
+  api
+    .related(props.id, 6)
+    .then((r) => {
+      rememberPosts(r)
+      related.value = r
+    })
+    .catch(() => {})
   try {
     detail.value = await api.post(props.id)
   } catch {
@@ -59,7 +78,7 @@ function onKey(e: KeyboardEvent) {
             <BlogAvatar :name="post.blog.name" :icon="post.blog.icon" :size="30" />
             <span>{{ post.blog.name }}</span>
           </RouterLink>
-          <a :href="post.blog.homepage" target="_blank" rel="noopener" class="btn btn-ghost visit">访问博客</a>
+          <FollowButton :blog-id="post.blog.id" small />
         </header>
 
         <div class="media">
@@ -79,7 +98,7 @@ function onKey(e: KeyboardEvent) {
               <BlogAvatar :name="post.blog.name" :icon="post.blog.icon" :size="36" />
               <span>{{ post.blog.name }}</span>
             </RouterLink>
-            <a :href="post.blog.homepage" target="_blank" rel="noopener" class="btn btn-ghost visit">访问博客</a>
+            <FollowButton :blog-id="post.blog.id" />
           </header>
 
           <div class="scroll">
@@ -91,14 +110,31 @@ function onKey(e: KeyboardEvent) {
                 以上为 RSS 摘要。为尊重作者，完整内容请到原博客阅读。
               </p>
             </template>
-            <p v-if="post.tags.length" class="tags">
-              <RouterLink v-for="t in post.tags" :key="t" :to="{ path: '/', query: { category: t } }">#{{ t }}</RouterLink>
+            <p v-if="ownTags.length || autoTags.length || post.topics?.length" class="tags">
+              <RouterLink
+                v-for="t in post.topics ?? []"
+                :key="t.id"
+                :to="{ path: '/', query: { topic: t.id } }"
+                class="topic"
+                >{{ t.label }}</RouterLink
+              >
+              <RouterLink v-for="t in ownTags" :key="t" :to="{ path: '/', query: { category: t } }">#{{ t }}</RouterLink>
+              <RouterLink
+                v-for="t in autoTags"
+                :key="t"
+                :to="{ path: '/', query: { category: t } }"
+                class="auto"
+                title="根据摘要自动提取的标签"
+                >#{{ t }}</RouterLink
+              >
             </p>
             <p class="date">
-              {{ fullDate(post.published_at ?? post.sort_at) }}
+              {{ post.undated ? '发布日期未知' : fullDate(post.published_at ?? post.sort_at) }}
               <template v-if="post.author && post.author !== post.blog.name"> · {{ post.author }}</template>
             </p>
             <p v-if="error" class="note">详情加载失败，可直接阅读原文。</p>
+
+            <BlogAboutCard :blog="post.blog" />
 
             <section v-if="post.comment_count != null || comments" class="comments">
               <header class="comments-head">
@@ -108,6 +144,32 @@ function onKey(e: KeyboardEvent) {
                 <a :href="commentsLink" target="_blank" rel="noopener" class="comments-go">去原文评论 ↗</a>
               </header>
               <CommentEmbed v-if="comments?.embed" :key="post.id" :config="comments.embed" />
+            </section>
+
+            <section v-if="related.length" class="related">
+              <h2>相似文章</h2>
+              <ul>
+                <li v-for="r in related" :key="r.id">
+                  <RouterLink :to="relatedLink(r.id)" replace class="rel">
+                    <img
+                      v-if="r.cover && !brokenThumbs.has(r.id)"
+                      :src="r.cover"
+                      alt=""
+                      loading="lazy"
+                      referrerpolicy="no-referrer"
+                      class="thumb"
+                      @error="brokenThumbs.add(r.id)"
+                    />
+                    <span v-else class="thumb thumb-text" :style="{ '--h': hue(r.blog.name) }">{{
+                      initial(r.title)
+                    }}</span>
+                    <span class="rel-text">
+                      <span class="rel-title">{{ r.title }}</span>
+                      <span class="rel-blog">{{ r.blog.name }}</span>
+                    </span>
+                  </RouterLink>
+                </li>
+              </ul>
             </section>
           </div>
 
@@ -211,10 +273,6 @@ function onKey(e: KeyboardEvent) {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.visit {
-  height: 32px;
-  font-size: 13px;
-}
 .scroll {
   flex: 1;
   overflow-y: auto;
@@ -244,10 +302,81 @@ function onKey(e: KeyboardEvent) {
 .tags {
   display: flex;
   flex-wrap: wrap;
+  align-items: baseline;
   gap: 4px 10px;
   margin: 12px 0 0;
   color: var(--link);
   font-size: 14px;
+}
+.tags .topic {
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  line-height: 22px;
+}
+.tags .auto {
+  opacity: 0.7;
+}
+.related {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.related h2 {
+  margin: 0 0 10px;
+  font-size: 15px;
+}
+.related ul {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.rel {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.thumb {
+  flex: none;
+  width: 64px;
+  height: 64px;
+  border-radius: 8px;
+  object-fit: cover;
+  background: var(--surface);
+}
+.thumb-text {
+  display: grid;
+  place-items: center;
+  background: hsl(var(--h) 60% 88%);
+  color: hsl(var(--h) 45% 35%);
+  font-size: 22px;
+  font-weight: 700;
+}
+.rel-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.rel-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  font-size: 14px;
+  line-height: 1.45;
+}
+.rel:hover .rel-title {
+  color: var(--link);
+}
+.rel-blog {
+  color: var(--text-3);
+  font-size: 12px;
 }
 .date {
   margin: 12px 0 0;

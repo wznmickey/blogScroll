@@ -254,7 +254,9 @@ fn giscus(html: &str, lower: &str) -> Option<CommentSystem> {
 
 // ---------- counts in RSS ----------
 
-static ITEM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<(?:item|entry)[\s>].*?</(?:item|entry)>").unwrap());
+/// One RSS `<item>` / Atom `<entry>`, in document order.
+pub(crate) static ITEM: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?s)<(?:item|entry)[\s>].*?</(?:item|entry)>").unwrap());
 static ITEM_COUNT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"<(?:slash:comments|thr:total)>\s*(\d{1,7})\s*</(?:slash:comments|thr:total)>").unwrap()
 });

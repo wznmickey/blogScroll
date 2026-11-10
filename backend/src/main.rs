@@ -1,5 +1,7 @@
+mod analyze;
 mod api;
 mod cache;
+mod clean;
 mod comments;
 mod config;
 mod crawler;
@@ -79,6 +81,9 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
+    /// Recompute keywords, tags, topics and related-post vectors for every post
+    /// (normally done by `serve` every few hours, and before `export`).
+    Analyze,
     /// Write the site's data as static JSON (for GitHub Pages and similar).
     Export {
         /// Output directory, e.g. ../frontend/dist/data
@@ -95,7 +100,14 @@ enum Command {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,sqlx=warn,tower_http=info".into()))
+        // html5ever warns about every odd page it parses, and the TLS verifier
+        // logs each bad certificate as an error; both are per-site problems
+        // that the crawler records on the blog (last_error) anyway.
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                "info,sqlx=warn,tower_http=info,html5ever=error,rustls_platform_verifier=off".into()
+            }),
+        )
         .init();
 
     let cli = Cli::parse();
@@ -119,6 +131,8 @@ async fn main() -> anyhow::Result<()> {
         directories,
         Box::new(fulltext::ArticleExtractor),
     )?);
+
+    crawler.sync_local_directories().await?;
 
     match cli.command.unwrap_or(Command::Serve { no_crawl: false }) {
         Command::Sync => crawler.sync_directories().await?,
@@ -156,11 +170,17 @@ async fn main() -> anyhow::Result<()> {
             }
             println!("refreshed {total} blogs");
         }
+        Command::Analyze => {
+            let s = analyze::retag_all(&pool).await?;
+            println!("{s:#?}");
+        }
         Command::Export {
             out,
             feed_posts,
             shard_size,
         } => {
+            let s = analyze::retag_all(&pool).await?;
+            println!("analyzed {} posts", s.posts);
             let state = AppState {
                 pool: pool.clone(),
                 site_name: cfg.server.site_name.clone(),
@@ -177,7 +197,14 @@ async fn main() -> anyhow::Result<()> {
             );
         }
         Command::Serve { no_crawl } => {
-            if !no_crawl {
+            if no_crawl {
+                let pool = pool.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = analyze::retag_all(&pool).await {
+                        tracing::warn!(error = %e, "retag failed");
+                    }
+                });
+            } else {
                 tokio::spawn(crawler.clone().run());
             }
             let state = AppState {

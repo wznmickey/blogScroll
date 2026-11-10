@@ -56,7 +56,9 @@ function onLoad(e: Event) {
         </svg>
         {{ post.comment_count }}
       </span>
-      <time v-else class="time" :datetime="new Date(post.sort_at * 1000).toISOString()">{{ relativeTime(post.sort_at) }}</time>
+      <time v-else-if="!post.undated" class="time" :datetime="new Date(post.sort_at * 1000).toISOString()">{{
+        relativeTime(post.sort_at)
+      }}</time>
     </footer>
   </article>
 </template>

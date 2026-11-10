@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { meta, tagsInfo } from '../api'
+import { api, meta, tagsInfo } from '../api'
+import { hostOf } from '../format'
+import type { BlogSummary } from '../types'
+import BlogAvatar from './BlogAvatar.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -11,6 +14,32 @@ const siteName = computed(() => meta.value?.site_name ?? '博客漫游')
 const logo = `${import.meta.env.BASE_URL}favicon.svg`
 const hot = computed(() => tagsInfo.value?.categories.slice(0, 24) ?? [])
 const showHot = computed(() => focused.value && !text.value.trim() && hot.value.length > 0)
+
+// Bloggers matching what is typed, as suggestions under the box.
+const suggestions = ref<BlogSummary[]>([])
+const showSuggest = computed(() => focused.value && !!text.value.trim() && suggestions.value.length > 0)
+let suggestTimer: ReturnType<typeof setTimeout> | undefined
+watch(text, (v) => {
+  clearTimeout(suggestTimer)
+  const q = v.trim()
+  if (!q) {
+    suggestions.value = []
+    return
+  }
+  suggestTimer = setTimeout(async () => {
+    try {
+      const page = await api.blogs({ q, limit: 5 })
+      if (text.value.trim() === q) suggestions.value = page.items
+    } catch {
+      suggestions.value = []
+    }
+  }, 200)
+})
+
+function openBlog(id: number) {
+  router.push(`/blog/${id}`)
+  blur()
+}
 
 watch(
   () => route.query.q,
@@ -47,7 +76,7 @@ function pick(category: string) {
           id="search-input"
           v-model="text"
           type="search"
-          placeholder="搜索文章或博客"
+          placeholder="搜索文章或博主"
           enterkeyhint="search"
           autocomplete="off"
           @focus="focused = true"
@@ -61,6 +90,17 @@ function pick(category: string) {
           </svg>
         </button>
         <!-- mousedown.prevent keeps focus in the input until the click lands. -->
+        <div v-if="showSuggest" class="hot suggest" @mousedown.prevent>
+          <p>博主</p>
+          <button v-for="b in suggestions" :key="b.id" type="button" class="sug" @click="openBlog(b.id)">
+            <BlogAvatar :name="b.name" :icon="b.icon" :size="28" />
+            <span class="sug-text">
+              <span class="sug-name">{{ b.name }}</span>
+              <span class="sug-sub">{{ b.description || hostOf(b.homepage) }}</span>
+            </span>
+          </button>
+          <button type="button" class="sug all" @click="submit">搜索“{{ text.trim() }}”的文章和博主 ↵</button>
+        </div>
         <div v-if="showHot" class="hot" @mousedown.prevent>
           <p>热门标签</p>
           <div class="hot-list">
@@ -128,7 +168,7 @@ function pick(category: string) {
 .search input:focus {
   box-shadow: 0 0 0 2px var(--accent-soft);
 }
-.search button {
+.search > button {
   position: absolute;
   right: 6px;
   top: 50%;
@@ -183,6 +223,48 @@ function pick(category: string) {
 }
 .hot-list button:hover {
   color: var(--link);
+}
+.suggest {
+  padding: 10px 8px 8px;
+}
+.suggest p {
+  padding: 0 6px;
+}
+.sug {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px;
+  border-radius: 10px;
+  text-align: left;
+}
+.sug:hover {
+  background: var(--surface);
+}
+.sug-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.sug-name,
+.sug-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sug-name {
+  font-size: 14px;
+}
+.sug-sub {
+  color: var(--text-3);
+  font-size: 12px;
+}
+.sug.all {
+  justify-content: center;
+  margin-top: 4px;
+  color: var(--link);
+  font-size: 13px;
 }
 @media (max-width: 639px) {
   .inner {

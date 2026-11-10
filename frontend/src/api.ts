@@ -15,6 +15,7 @@ async function get<T>(path: string, params: Params = {}): Promise<T> {
 }
 
 export interface PostQuery {
+  /** `following` is `latest` limited to `blogs`. */
   mode?: FeedMode
   cursor?: string | null
   seed?: number
@@ -23,8 +24,18 @@ export interface PostQuery {
   limit?: number
   /** Directory tag of the blog (开往: tech, life, ...). */
   tag?: string
-  /** Category from the post's own feed. */
+  /** A tag of the post: its own category or one derived from its keywords. */
   category?: string
+  /** Content area id (dev, travel, ...). */
+  topic?: string
+  /** Source kind id (blog, news, podcast, ...). */
+  kind?: string
+  /** Only these blogs. */
+  blogs?: number[]
+  /** Discover leans towards what these blogs write about ... */
+  follow?: number[]
+  /** ... and towards posts like these. */
+  read?: number[]
   /** Only posts with a cover image. */
   cover?: boolean
 }
@@ -34,8 +45,14 @@ export interface BlogQuery {
   limit?: number
   q?: string
   tag?: string
+  topic?: string
+  kind?: string
+  /** Only these blogs. */
+  ids?: number[]
   sort?: BlogSort
 }
+
+const list = (ids?: number[]) => (ids?.length ? ids.join(',') : undefined)
 
 /** Built for static hosting (GitHub Pages): data comes from exported JSON files. */
 export const isStatic = import.meta.env.VITE_STATIC === '1'
@@ -43,9 +60,18 @@ export const isStatic = import.meta.env.VITE_STATIC === '1'
 const liveApi = {
   meta: () => get<Meta>('/api/meta'),
   tags: () => get<TagsInfo>('/api/tags'),
-  posts: ({ cover, ...q }: PostQuery) => get<Page<PostCard>>('/api/posts', { ...q, cover: cover ? 1 : undefined }),
+  posts: ({ cover, blogs, follow, read, mode, ...q }: PostQuery) =>
+    get<Page<PostCard>>('/api/posts', {
+      ...q,
+      mode: mode === 'following' ? 'latest' : mode,
+      cover: cover ? 1 : undefined,
+      blogs: list(blogs),
+      follow: list(follow),
+      read: list(read),
+    }),
   post: (id: number) => get<PostDetail>(`/api/posts/${id}`),
-  blogs: (q: BlogQuery) => get<Page<BlogSummary>>('/api/blogs', { ...q }),
+  related: (id: number, limit = 8) => get<PostCard[]>(`/api/posts/${id}/related`, { limit }),
+  blogs: ({ ids, ...q }: BlogQuery) => get<Page<BlogSummary>>('/api/blogs', { ...q, ids: list(ids) }),
   blog: (id: number) => get<BlogDetail>(`/api/blogs/${id}`),
 }
 
@@ -83,6 +109,37 @@ export function loadTags() {
     .tags()
     .then((t) => (tagsInfo.value = t))
     .catch(() => {})
+}
+
+/** Blog profiles, shared by the post view's about panel and the blog page. */
+const blogCache = new Map<number, Promise<BlogDetail>>()
+export function blogDetail(id: number): Promise<BlogDetail> {
+  let p = blogCache.get(id)
+  if (!p) {
+    p = api.blog(id)
+    p.catch(() => blogCache.delete(id))
+    blogCache.set(id, p)
+    if (blogCache.size > 200) blogCache.delete(blogCache.keys().next().value!)
+  }
+  return p
+}
+
+export function topicLabel(id: string): string {
+  return tagsInfo.value?.topics.find((t) => t.id === id)?.label ?? id
+}
+
+export function kindLabel(id: string): string {
+  return tagsInfo.value?.kinds.find((k) => k.id === id)?.label ?? KIND_LABELS[id] ?? id
+}
+
+const KIND_LABELS: Record<string, string> = {
+  blog: '博客',
+  news: '资讯',
+  newsletter: '周刊',
+  podcast: '播客',
+  video: '视频',
+  forum: '论坛',
+  other: '其他',
 }
 
 /** Directory tags across all directories, merged by tag name, busiest first. */
