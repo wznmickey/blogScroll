@@ -258,6 +258,8 @@ pub struct BackupConfig {
     pub every_hours: u32,
     /// Push after each commit.
     pub push: bool,
+    /// Commit even a snapshot with far fewer blogs or posts than the last.
+    pub allow_shrink: bool,
 }
 
 impl Default for BackupConfig {
@@ -267,6 +269,7 @@ impl Default for BackupConfig {
             remote: None,
             every_hours: 6,
             push: true,
+            allow_shrink: false,
         }
     }
 }

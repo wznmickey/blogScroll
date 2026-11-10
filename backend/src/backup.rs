@@ -36,6 +36,9 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(300);
 const LAST_BACKUP_KEY: &str = "last_backup";
 /// After a failed scheduled backup, try again this much later.
 const RETRY_SECS: i64 = 3600;
+/// A snapshot with this much less than the last one is not committed without
+/// `allow_shrink`: it is more likely a lost database than a real change.
+const MAX_SHRINK: f64 = 0.1;
 const COMMITTER: [&str; 4] = [
     "-c",
     "user.name=blogScroll",
@@ -355,6 +358,33 @@ async fn ensure_repo(cfg: &BackupConfig, dir: &Path, batch_ssh: bool) -> anyhow:
     Ok(())
 }
 
+/// Refuses to replace the last snapshot with one far smaller (a database
+/// that was lost and started again, say); history would keep the old one,
+/// but the latest snapshot is what a restore uses.
+async fn check_shrink(pool: &SqlitePool, dir: &Path, allow: bool) -> anyhow::Result<()> {
+    let Ok(text) = std::fs::read_to_string(dir.join("meta.json")) else {
+        return Ok(());
+    };
+    let Ok(last) = serde_json::from_str::<Meta>(&text) else {
+        return Ok(());
+    };
+    let (blogs, posts): (i64, i64) =
+        sqlx::query_as("SELECT (SELECT COUNT(*) FROM blogs), (SELECT COUNT(*) FROM posts)")
+            .fetch_one(pool)
+            .await?;
+    let shrinks = |now: i64, before: usize| (now as f64) < before as f64 * (1.0 - MAX_SHRINK);
+    if !allow && (shrinks(blogs, last.blogs) || shrinks(posts, last.posts)) {
+        bail!(
+            "the last backup has {} blogs and {} posts, this database {blogs} and {posts}; not committing a \
+             snapshot that much smaller (a lost or restarted database?). Restore it from the backup, or \
+             pass --allow-shrink if the drop is intended",
+            last.blogs,
+            last.posts
+        );
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 pub struct BackupOutcome {
     pub snapshot: SnapshotStats,
@@ -389,6 +419,7 @@ pub async fn backup(pool: &SqlitePool, cfg: &BackupConfig) -> anyhow::Result<Bac
                 )?;
         }
     }
+    check_shrink(pool, dir, cfg.allow_shrink).await?;
     let snapshot = write_snapshot(pool, dir).await?;
     git(dir, &["add", "--all"], b).await?;
     let changed = git(dir, &["status", "--porcelain"], b).await?.lines().count();
@@ -485,108 +516,107 @@ pub async fn restore(
 
     let t = now();
     let mut stats = RestoreStats::default();
-    for chunk in paths.chunks(100) {
-        let mut tx = pool.begin().await?;
-        for path in chunk {
-            let file: BlogFile = serde_json::from_str(&std::fs::read_to_string(path)?)
-                .with_context(|| format!("reading {}", path.display()))?;
-            let b = &file.blog;
-            let next_check = if b.feed_url.is_some() {
-                0
-            } else {
-                t + discovery_retry_secs
-            };
+    // All or nothing: a restore that fails halfway leaves the database empty.
+    let mut tx = pool.begin().await?;
+    for path in &paths {
+        let file: BlogFile = serde_json::from_str(&std::fs::read_to_string(path)?)
+            .with_context(|| format!("reading {}", path.display()))?;
+        let b = &file.blog;
+        let next_check = if b.feed_url.is_some() {
+            0
+        } else {
+            t + discovery_retry_secs
+        };
+        sqlx::query(
+            "INSERT INTO blogs (id, site_key, name, homepage_url, icon_url, feed_url, feed_url_origin, active,
+                excluded, content_policy, refresh_secs, next_check_at, discovery_at, created_at, updated_at,
+                description, avatar_url, about_url, about_text, social_links, generator, profile_at,
+                comment_system, embed_comments, kind, detected_kind, flagged, from_feed_meta)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(b.id)
+        .bind(&b.site_key)
+        .bind(&b.name)
+        .bind(&b.homepage_url)
+        .bind(&b.icon_url)
+        .bind(&b.feed_url)
+        .bind(&b.feed_url_origin)
+        .bind(b.active)
+        .bind(b.excluded)
+        .bind(&b.content_policy)
+        .bind(refresh_secs)
+        .bind(next_check)
+        .bind(b.feed_url.is_none().then_some(t))
+        .bind(b.created_at)
+        .bind(t)
+        .bind(&b.description)
+        .bind(&b.avatar_url)
+        .bind(&b.about_url)
+        .bind(&b.about_text)
+        .bind(&b.social_links)
+        .bind(&b.generator)
+        .bind(t)
+        .bind(&b.comment_system)
+        .bind(b.embed_comments)
+        .bind(&b.kind)
+        .bind(&b.detected_kind)
+        .bind(&b.flagged)
+        .bind(b.from_feed_meta)
+        .execute(&mut *tx)
+        .await?;
+        for d in &file.directories {
             sqlx::query(
-                "INSERT INTO blogs (id, site_key, name, homepage_url, icon_url, feed_url, feed_url_origin, active,
-                    excluded, content_policy, refresh_secs, next_check_at, discovery_at, created_at, updated_at,
-                    description, avatar_url, about_url, about_text, social_links, generator, profile_at,
-                    comment_system, embed_comments, kind, detected_kind, flagged, from_feed_meta)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO directory_entries (directory, external_id, blog_id, status, tags, active, last_seen_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
             )
+            .bind(&d.directory)
+            .bind(&d.external_id)
             .bind(b.id)
-            .bind(&b.site_key)
-            .bind(&b.name)
-            .bind(&b.homepage_url)
-            .bind(&b.icon_url)
-            .bind(&b.feed_url)
-            .bind(&b.feed_url_origin)
-            .bind(b.active)
-            .bind(b.excluded)
-            .bind(&b.content_policy)
-            .bind(refresh_secs)
-            .bind(next_check)
-            .bind(b.feed_url.is_none().then_some(t))
-            .bind(b.created_at)
+            .bind(&d.status)
+            .bind(&d.tags)
+            .bind(d.active)
             .bind(t)
-            .bind(&b.description)
-            .bind(&b.avatar_url)
-            .bind(&b.about_url)
-            .bind(&b.about_text)
-            .bind(&b.social_links)
-            .bind(&b.generator)
-            .bind(t)
-            .bind(&b.comment_system)
-            .bind(b.embed_comments)
-            .bind(&b.kind)
-            .bind(&b.detected_kind)
-            .bind(&b.flagged)
-            .bind(b.from_feed_meta)
             .execute(&mut *tx)
             .await?;
-            for d in &file.directories {
-                sqlx::query(
-                    "INSERT INTO directory_entries (directory, external_id, blog_id, status, tags, active, last_seen_at)
-                     VALUES (?, ?, ?, ?, ?, ?, ?)",
-                )
-                .bind(&d.directory)
-                .bind(&d.external_id)
-                .bind(b.id)
-                .bind(&d.status)
-                .bind(&d.tags)
-                .bind(d.active)
-                .bind(t)
-                .execute(&mut *tx)
-                .await?;
-            }
-            for tag in &file.tags {
-                sqlx::query("INSERT INTO blog_tags (blog_id, directory, tag) VALUES (?, ?, ?)")
-                    .bind(b.id)
-                    .bind(&tag.directory)
-                    .bind(&tag.tag)
-                    .execute(&mut *tx)
-                    .await?;
-            }
-            for p in &file.posts {
-                sqlx::query(
-                    "INSERT INTO posts (id, blog_id, guid, url, title, excerpt, cover_url, author, tags, published_at,
-                        first_seen_at, sort_at, undated, keywords, content_html, content_source, comments_url)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                )
-                .bind(p.id)
-                .bind(b.id)
-                .bind(&p.guid)
-                .bind(&p.url)
-                .bind(&p.title)
-                .bind(&p.excerpt)
-                .bind(&p.cover_url)
-                .bind(&p.author)
-                .bind(&p.tags)
-                .bind(p.published_at)
-                .bind(p.first_seen_at)
-                .bind(p.sort_at)
-                .bind(p.undated)
-                .bind(&p.keywords)
-                .bind(&p.content_html)
-                .bind(&p.content_source)
-                .bind(&p.comments_url)
-                .execute(&mut *tx)
-                .await?;
-            }
-            stats.blogs += 1;
-            stats.posts += file.posts.len();
         }
-        tx.commit().await?;
+        for tag in &file.tags {
+            sqlx::query("INSERT INTO blog_tags (blog_id, directory, tag) VALUES (?, ?, ?)")
+                .bind(b.id)
+                .bind(&tag.directory)
+                .bind(&tag.tag)
+                .execute(&mut *tx)
+                .await?;
+        }
+        for p in &file.posts {
+            sqlx::query(
+                "INSERT INTO posts (id, blog_id, guid, url, title, excerpt, cover_url, author, tags, published_at,
+                    first_seen_at, sort_at, undated, keywords, content_html, content_source, comments_url)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(p.id)
+            .bind(b.id)
+            .bind(&p.guid)
+            .bind(&p.url)
+            .bind(&p.title)
+            .bind(&p.excerpt)
+            .bind(&p.cover_url)
+            .bind(&p.author)
+            .bind(&p.tags)
+            .bind(p.published_at)
+            .bind(p.first_seen_at)
+            .bind(p.sort_at)
+            .bind(p.undated)
+            .bind(&p.keywords)
+            .bind(&p.content_html)
+            .bind(&p.content_source)
+            .bind(&p.comments_url)
+            .execute(&mut *tx)
+            .await?;
+        }
+        stats.blogs += 1;
+        stats.posts += file.posts.len();
     }
+    tx.commit().await?;
     crate::analyze::retag_all(pool).await?;
     Ok(stats)
 }
@@ -618,6 +648,7 @@ mod tests {
             remote: Some(format!("file://{}", remote.display())),
             every_hours: 0,
             push: true,
+            allow_shrink: false,
         };
         let first = backup(&st.pool, &cfg).await.unwrap();
         assert!(first.committed && first.pushed);
@@ -629,6 +660,19 @@ mod tests {
             .unwrap();
         let second = backup(&st.pool, &cfg).await.unwrap();
         assert!(second.committed, "the existing working copy is reused");
+
+        // A database that lost most of its posts is not committed over the backup.
+        sqlx::query("DELETE FROM posts WHERE id > 3")
+            .execute(&st.pool)
+            .await
+            .unwrap();
+        let err = backup(&st.pool, &cfg).await.unwrap_err().to_string();
+        assert!(err.contains("--allow-shrink"), "{err}");
+        let allowed = BackupConfig {
+            allow_shrink: true,
+            ..cfg
+        };
+        assert!(backup(&st.pool, &allowed).await.unwrap().committed);
         std::fs::remove_dir_all(&base).unwrap();
     }
 

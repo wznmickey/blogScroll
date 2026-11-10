@@ -11,7 +11,8 @@
 # run, and rebuild the database from it when the Actions cache is gone (caches
 # are evicted after 7 days unused or beyond 10 GB):
 #   3. In that repository: Settings → Deploy keys → add a key with write access.
-#   4. Here: Secrets → BACKUP_DEPLOY_KEY = the private half of that key;
+#   4. Here: Secrets → BACKUP_DEPLOY_KEY = the private half of that key: the
+#            whole file without .pub, from -----BEGIN to -----END;
 #            Variables → BACKUP_REPO = owner/name, e.g. you/blogscroll-data.
 # Backups only ever add commits; see "备份到 GitHub 私有仓库" in README.md.
 name: Crawl & publish (GitHub Pages)
@@ -69,19 +70,37 @@ jobs:
         working-directory: backend
         run: cargo build --release --locked
 
+      # A key that cannot be used turns the backup steps off for this run;
+      # crawling and publishing go on.
       - name: Use the backup repository's deploy key
+        id: key
         if: vars.BACKUP_REPO != ''
+        continue-on-error: true
         env:
           DEPLOY_KEY: ${{ secrets.BACKUP_DEPLOY_KEY }}
         run: |
           install -m 700 -d ~/.ssh
-          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/backup_key
+          # Pasted keys can come with Windows line ends.
+          printf '%s\n' "$DEPLOY_KEY" | tr -d '\r' > ~/.ssh/backup_key
           chmod 600 ~/.ssh/backup_key
+          if ! ssh-keygen -y -P '' -f ~/.ssh/backup_key > /dev/null 2>&1; then
+            case "$DEPLOY_KEY" in
+              '') echo "::error::Secret BACKUP_DEPLOY_KEY is empty." ;;
+              ssh-*) echo "::error::Secret BACKUP_DEPLOY_KEY holds a public key. It needs the private one: the whole key file without .pub, from -----BEGIN to -----END." ;;
+              *) echo "::error::Secret BACKUP_DEPLOY_KEY is not a usable private key. It needs the whole key file without .pub, from -----BEGIN to -----END, and no passphrase." ;;
+            esac
+            rm -f ~/.ssh/backup_key
+            exit 1
+          fi
           echo "GIT_SSH_COMMAND=ssh -i $HOME/.ssh/backup_key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new" >> "$GITHUB_ENV"
+          echo "ok=true" >> "$GITHUB_OUTPUT"
 
-      # No cache to carry on from: start from the last backup instead of from nothing.
+      # No cache to carry on from: start from the last backup instead of from
+      # nothing. The restore is all or nothing; if it fails, crawling starts
+      # afresh (and the backup step refuses to commit the much smaller result).
       - name: Restore crawler database from the backup
-        if: vars.BACKUP_REPO != '' && steps.cache.outputs.cache-matched-key == ''
+        if: steps.key.outputs.ok == 'true' && steps.cache.outputs.cache-matched-key == ''
+        continue-on-error: true
         working-directory: backend
         run: |
           git clone --quiet --depth 1 "git@github.com:${{ vars.BACKUP_REPO }}.git" "$RUNNER_TEMP/backup"
@@ -99,7 +118,7 @@ jobs:
       # Commits only when something changed; never force-pushes. A failure here
       # does not stop the site from being published.
       - name: Back up to the git repository
-        if: always() && vars.BACKUP_REPO != ''
+        if: always() && steps.key.outputs.ok == 'true'
         continue-on-error: true
         working-directory: backend
         run: >-

@@ -178,7 +178,7 @@ blogs/<id>.json    一个博客一个文件：博客信息、所属目录、全�
 
 4. `cargo run -- backup` 先手动跑一次确认能推送，之后交给 `serve`。
 
-用 GitHub Actions 部署（上文 B）时不需要 `[backup]`：设好 Secret `BACKUP_DEPLOY_KEY` 和 Variable `BACKUP_REPO`，工作流每次抓完会运行 `feed-server backup --git-dir … --remote …`；Actions 缓存丢失时，先 `feed-server restore` 从这个仓库恢复数据库再抓。一个备份仓库只给一处写：服务器和 Actions 不要同时往同一个仓库备份（本来也不该两边同时抓），否则两边历史分叉，备份会停下来等你处理。
+用 GitHub Actions 部署（上文 B）时不需要 `[backup]`：设好 Secret `BACKUP_DEPLOY_KEY`（**私钥**：不带 `.pub` 的那个文件，从 `-----BEGIN` 到 `-----END` 整段；公钥是贴到备份仓库的 Deploy keys 里的）和 Variable `BACKUP_REPO`，工作流每次抓完会运行 `feed-server backup --git-dir … --remote …`；Actions 缓存丢失时，先 `feed-server restore` 从这个仓库恢复数据库再抓。一个备份仓库只给一处写：服务器和 Actions 不要同时往同一个仓库备份（本来也不该两边同时抓），否则两边历史分叉，备份会停下来等你处理。
 
 提交者显示为 `blogScroll <backup@blogscroll.invalid>`，不会用到你本机的 git 身份。推送失败时提交留在本地，下次一起推。Docker 镜像里已带 git 和 ssh，把 key 挂进容器即可。
 
@@ -187,6 +187,7 @@ blogs/<id>.json    一个博客一个文件：博客信息、所属目录、全�
 - 推送是 `git push origin HEAD`：明确写出的 refspec、不带 `+`，所以不会强推，git 配置里写了强推的 refspec 也不影响；
 - 每次备份前先 `git fetch`，只用快进（`merge --ff-only`）接上远端的新提交（比如你在 GitHub 上改了 README，或另一台机器推过）；两边历史分叉时这一轮直接停止并报错，不提交、不推送，等你手工合并（`git pull --rebase`，不要用 `--force`）；
 - `README.md` 只在第一次生成，之后归你编辑，备份不会改回去；
+- 新快照的博客数或文章数比上一次备份少 10% 以上时不提交（多半是数据库丢了、从头抓起），要么先从备份恢复，要么确认是有意的再加 `--allow-shrink`；恢复是一个事务，要么完整恢复，要么什么都不写；
 - ssh 以 BatchMode 运行，遇到陌生主机密钥或要输口令时直接失败，不会卡在终端里等输入（你自己配了 `core.sshCommand` 或 `GIT_SSH_COMMAND` 时用你的）。
 
 GitHub 那边还可以再加一道锁：仓库 Settings → Rules → Rulesets 新建规则，目标选全部分支，勾选 *Block force pushes* 和 *Restrict deletions*，Bypass 列表留空（deploy key 也受约束）。注意 GitHub Free 账号的**私有**仓库不能用 rulesets 和分支保护，需要 GitHub Pro（学生可通过 GitHub Student Developer Pack 免费获得）；用不了时就只靠上面程序这边的保证。
