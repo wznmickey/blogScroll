@@ -744,7 +744,8 @@ impl Crawler {
             };
             let up = db::upsert_post(&mut tx, blog.id, item, t, &entry).await?;
             new += usize::from(up.is_new);
-            let derived = analyze::derive(blog.id, &item.tags, kw, &corpus);
+            let mut derived = analyze::derive(blog.id, &item.tags, kw, &corpus);
+            derived.nsfw = analyze::is_nsfw(&item.title, &item.tags);
             analyze::save_derived(&mut tx, up.id, &derived).await?;
         }
         tx.commit().await?;

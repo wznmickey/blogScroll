@@ -1404,6 +1404,45 @@ pub struct Derived {
     pub terms: Vec<(String, f32, bool)>,
     /// Display form of each tag key.
     pub labels: Vec<(String, String)>,
+    /// Adult content (see `is_nsfw`); set by the caller, which has the title.
+    pub nsfw: bool,
+}
+
+/// Words that mark adult content in a title or the author's tags. Latin ones
+/// count as whole words only ("r18", not "r1800").
+const NSFW_WORDS: &[&str] = &[
+    "nsfw",
+    "r18",
+    "r-18",
+    "hentai",
+    "porn",
+    "18禁",
+    "成人向",
+    "成人内容",
+    "色情",
+    "涩图",
+    "色图",
+    "里番",
+    "工口",
+    "エロ",
+];
+
+/// Whether a post is adult content (R18 / NSFW), hidden unless a reader asks.
+pub fn is_nsfw(title: &str, tags: &[String]) -> bool {
+    let has = |text: &str| {
+        let text = text.to_lowercase();
+        NSFW_WORDS.iter().any(|w| {
+            if !w.is_ascii() {
+                return text.contains(w);
+            }
+            text.match_indices(w).any(|(i, _)| {
+                let before = text[..i].chars().next_back();
+                let after = text[i + w.len()..].chars().next();
+                !before.is_some_and(|c| c.is_ascii_alphanumeric()) && !after.is_some_and(|c| c.is_ascii_alphanumeric())
+            })
+        })
+    };
+    has(title) || tags.iter().any(|t| has(t))
 }
 
 /// Term key → (raw weight, is a tag): own tags weigh 1, keywords their score.
@@ -1472,6 +1511,7 @@ pub fn derive(blog_id: i64, own_tags: &[String], keywords: &[(String, f32)], cor
         category,
         terms,
         labels,
+        nsfw: false,
     }
 }
 
@@ -1646,9 +1686,10 @@ fn decide(p: &[f32]) -> String {
 
 /// Writes a post's derived data, replacing its old terms.
 pub async fn save_derived(conn: &mut sqlx::SqliteConnection, post_id: i64, d: &Derived) -> sqlx::Result<()> {
-    sqlx::query("UPDATE posts SET auto_tags = ?, category = ? WHERE id = ?")
+    sqlx::query("UPDATE posts SET auto_tags = ?, category = ?, nsfw = ? WHERE id = ?")
         .bind(serde_json::to_string(&d.auto_tags).unwrap_or_else(|_| "[]".into()))
         .bind(&d.category)
+        .bind(d.nsfw)
         .bind(post_id)
         .execute(&mut *conn)
         .await?;
@@ -1772,7 +1813,8 @@ pub async fn retag_all(pool: &SqlitePool) -> anyhow::Result<RetagStats> {
     for chunk in posts.chunks(500) {
         let mut tx = pool.begin().await?;
         for p in chunk {
-            let d = derive(p.blog_id, &p.tags, &p.keywords, &corpus);
+            let mut d = derive(p.blog_id, &p.tags, &p.keywords, &corpus);
+            d.nsfw = p.nsfw;
             if p.keywords_changed {
                 sqlx::query("UPDATE posts SET keywords = ? WHERE id = ?")
                     .bind(serde_json::to_string(&p.keywords)?)
@@ -1812,6 +1854,7 @@ struct Prepared {
     tags: Vec<String>,
     keywords: Vec<(String, f32)>,
     keywords_changed: bool,
+    nsfw: bool,
 }
 
 fn prepare(rows: Vec<PostText>) -> (Vec<Prepared>, RetagStats) {
@@ -1834,6 +1877,7 @@ fn prepare(rows: Vec<PostText>) -> (Vec<Prepared>, RetagStats) {
             Prepared {
                 id: r.id,
                 blog_id: r.blog_id,
+                nsfw: is_nsfw(&r.title, &tags),
                 tags,
                 keywords,
                 keywords_changed: changed,
@@ -1889,6 +1933,15 @@ fn preferred_labels(posts: &[Prepared]) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adult_content_by_title_or_tag() {
+        assert!(is_nsfw("周末涩图分享", &[]));
+        assert!(is_nsfw("Some art", &["R18".into()]));
+        assert!(is_nsfw("[NSFW] gallery", &[]));
+        assert!(!is_nsfw("R1800 路由器评测", &[]), "whole words only");
+        assert!(!is_nsfw("成人高考经验", &["教育".into()]));
+    }
 
     #[test]
     fn tags_fold_synonyms_and_casing() {

@@ -76,7 +76,7 @@ pub async fn export(app: Router, out: &Path, opts: &ExportOptions) -> anyhow::Re
 
     let posts = paged(&app, opts.feed_posts, |c| {
         format!(
-            "/api/posts?mode=latest&limit=100{}",
+            "/api/posts?mode=latest&nsfw=1&limit=100{}",
             c.map(|c| format!("&cursor={c}")).unwrap_or_default()
         )
     })
@@ -118,7 +118,7 @@ pub async fn export(app: Router, out: &Path, opts: &ExportOptions) -> anyhow::Re
         let blog = get(&app, &format!("/api/blogs/{id}")).await?;
         let posts = paged(&app, usize::MAX, |c| {
             format!(
-                "/api/posts?mode=latest&blog={id}&limit=100{}",
+                "/api/posts?mode=latest&nsfw=1&blog={id}&limit=100{}",
                 c.map(|c| format!("&cursor={c}")).unwrap_or_default()
             )
         })
@@ -210,14 +210,16 @@ fn write_pages(
         return Ok(());
     }
     std::fs::write(dir.join("404.html"), seo::not_found(&site))?;
-    page(seo::home(&site, meta, posts))?;
+    // Adult content stays out of what search engines see.
+    let shown = |ps: &[Value]| ps.iter().filter(|p| p["nsfw"] != true).cloned().collect::<Vec<_>>();
+    page(seo::home(&site, meta, &shown(posts)))?;
     page(seo::blogs(&site, blogs))?;
     let blog_dir = dir.join("blog");
     if blog_dir.exists() {
         std::fs::remove_dir_all(&blog_dir)?;
     }
     for (blog, posts) in blog_pages {
-        page(seo::blog(&site, blog, posts))?;
+        page(seo::blog(&site, blog, &shown(posts)))?;
     }
     let mut map: Vec<(String, Option<i64>)> = vec![
         (String::new(), posts.first().and_then(|p| p["sort_at"].as_i64())),

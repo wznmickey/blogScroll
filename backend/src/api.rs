@@ -57,6 +57,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/tags", get(tags))
         .route("/api/tags/search", get(search_tags))
         .route("/api/posts", get(list_posts))
+        .route("/api/interest", get(reader_interest))
         .route("/api/posts/{id}", get(get_post))
         .route("/api/posts/{id}/related", get(related_posts))
         .route("/api/blogs", get(list_blogs))
@@ -129,6 +130,35 @@ macro_rules! visible {
 }
 
 /// Parses `1,2,3` into a JSON array for `json_each`, at most `max` ids.
+fn ids(s: &Option<String>, max: usize) -> Vec<i64> {
+    non_empty(s)
+        .map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).take(max).collect())
+        .unwrap_or_default()
+}
+
+/// Comma-separated values, trimmed, made into `f`, at most `max` (each short).
+fn list(s: &Option<String>, max: usize, f: impl Fn(&str) -> String) -> Vec<String> {
+    non_empty(s)
+        .map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|x| !x.is_empty() && x.chars().count() <= 100)
+                .map(f)
+                .filter(|x| !x.is_empty())
+                .take(max)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `https://www.A.com/x` → `a.com`.
+fn host_key(s: &str) -> String {
+    let s = s.to_lowercase();
+    let s = s.split_once("://").map_or(s.as_str(), |(_, rest)| rest);
+    let s = s.split(['/', '?', '#']).next().unwrap_or_default();
+    s.strip_prefix("www.").unwrap_or(s).to_string()
+}
+
 fn id_list(s: &Option<String>, max: usize) -> Option<String> {
     let ids: Vec<i64> = non_empty(s)?
         .split(',')
@@ -576,6 +606,25 @@ pub struct PostQuery {
     /// `1`: only posts with comments (a known count above 0).
     #[serde(default)]
     comments: Option<String>,
+    /// What the reader does not want to see: blogs (`1,2`), sites
+    /// (`a.com,b.org`, their subdomains too), and words or tags (`抽奖,广告`)
+    /// in a title, an excerpt or among a post's tags.
+    #[serde(default)]
+    block_blogs: Option<String>,
+    #[serde(default)]
+    block_hosts: Option<String>,
+    #[serde(default)]
+    block_words: Option<String>,
+    /// `1`: also adult content (R18 / NSFW), left out otherwise.
+    #[serde(default)]
+    nsfw: Option<String>,
+    /// Only blogs listed in one of these directories (`travellings,feeds`).
+    #[serde(default)]
+    directories: Option<String>,
+    /// The reader's own weights for 推荐 (反推荐 turns them round), in
+    /// `Weights` order: `interest,category,blog,seen,shown,noise,same_blog,per_blog`.
+    #[serde(default)]
+    w: Option<String>,
 }
 
 /// What a post must have to be listed (filters `cover`, `text`, `comments`),
@@ -612,6 +661,10 @@ struct PostRow {
     blog_tags: String,
     blog_kind: String,
     blog_framable: Option<bool>,
+    nsfw: bool,
+    /// What made up its place in 推荐 / 反推荐 (JSON), only there.
+    #[sqlx(default)]
+    why: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -653,6 +706,12 @@ pub struct PostCard {
     /// From the feed (`slash:comments`) or the blog's comment service.
     comment_count: Option<i64>,
     comments_url: Option<String>,
+    /// Adult content: only listed when asked for (`nsfw=1`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    nsfw: bool,
+    /// In 推荐 and 反推荐: each part of the post's score, in days of freshness.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    why: Option<serde_json::Value>,
     blog: BlogRef,
 }
 
@@ -676,6 +735,8 @@ impl From<PostRow> for PostCard {
             has_full_text: r.has_full_text,
             comment_count: r.comment_count,
             comments_url: r.comments_url,
+            nsfw: r.nsfw,
+            why: r.why.and_then(|w| serde_json::from_str(&w).ok()),
             blog: BlogRef {
                 id: r.blog_id,
                 name: r.blog_name,
@@ -703,13 +764,15 @@ macro_rules! post_columns {
      b.id AS blog_id, b.name AS blog_name, b.homepage_url AS blog_homepage,
      COALESCE(b.avatar_custom, b.avatar_url, b.icon_url) AS blog_icon,
      (SELECT json_group_array(DISTINCT bt.tag) FROM blog_tags bt WHERE bt.blog_id = b.id) AS blog_tags,
-     COALESCE(b.kind, b.detected_kind, 'blog') AS blog_kind, b.framable AS blog_framable"
+     COALESCE(b.kind, b.detected_kind, 'blog') AS blog_kind, b.framable AS blog_framable, p.nsfw"
     };
 }
 
 /// Filters shared by both feed modes, on parameters ?10–?16: directory tag,
 /// directory, what posts must have (`only` bits), tag key, category (a
-/// top-level one includes its sub-categories), kind, blog ids (JSON).
+/// top-level one includes its sub-categories), kind, and the rest as one JSON
+/// object (`Filters::more`): only these blogs, what the reader blocked,
+/// adult content, directories.
 macro_rules! post_filters {
     () => {
         " AND (?10 IS NULL OR EXISTS (SELECT 1 FROM blog_tags bt WHERE bt.blog_id = b.id AND bt.tag = ?10))
@@ -722,7 +785,19 @@ macro_rules! post_filters {
           AND (?13 IS NULL OR EXISTS (SELECT 1 FROM post_terms pt WHERE pt.post_id = p.id AND pt.is_tag = 1 AND pt.term = ?13))
           AND (?14 IS NULL OR p.category = ?14 OR substr(p.category, 1, length(?14) + 1) = ?14 || '/')
           AND (?15 IS NULL OR COALESCE(b.kind, b.detected_kind, 'blog') = ?15)
-          AND (?16 IS NULL OR b.id IN (SELECT value FROM json_each(?16)))"
+          AND (json_extract(?16, '$.blogs') IS NULL OR b.id IN (SELECT value FROM json_each(?16, '$.blogs')))
+          AND b.id NOT IN (SELECT value FROM json_each(?16, '$.block_blogs'))
+          AND NOT EXISTS (SELECT 1 FROM json_each(?16, '$.block_hosts') h
+                 WHERE instr(lower(b.homepage_url) || '/', '://' || h.value || '/') > 0
+                    OR instr(lower(b.homepage_url) || '/', '.' || h.value || '/') > 0)
+          AND NOT EXISTS (SELECT 1 FROM json_each(?16, '$.block_words') w
+                 WHERE instr(lower(p.title), w.value) > 0 OR instr(lower(p.excerpt), w.value) > 0)
+          AND NOT EXISTS (SELECT 1 FROM post_terms pt JOIN json_each(?16, '$.block_tags') t ON t.value = pt.term
+                 WHERE pt.post_id = p.id AND pt.is_tag = 1)
+          AND (json_extract(?16, '$.nsfw') OR p.nsfw = 0)
+          AND (json_extract(?16, '$.directories') IS NULL OR EXISTS (SELECT 1 FROM directory_entries de
+                 WHERE de.blog_id = b.id AND de.active = 1
+                   AND de.directory IN (SELECT value FROM json_each(?16, '$.directories'))))"
     };
 }
 
@@ -734,7 +809,10 @@ struct Filters<'a> {
     tag: Option<String>,
     category: Option<&'a str>,
     kind: Option<&'a str>,
-    blogs: Option<String>,
+    /// Only these blogs (the 关注 feed).
+    blogs: Option<Vec<i64>>,
+    /// The JSON object for ?16, see `post_filters!`.
+    more: String,
 }
 
 impl Filters<'_> {
@@ -749,7 +827,7 @@ impl Filters<'_> {
             .bind(self.tag.as_deref())
             .bind(self.category)
             .bind(self.kind)
-            .bind(self.blogs.as_deref())
+            .bind(&self.more)
     }
 }
 
@@ -796,7 +874,22 @@ async fn list_posts(State(st): State<AppState>, Query(q): Query<PostQuery>) -> A
         tag: non_empty(&q.tag).map(analyze::tag_key),
         category: non_empty(&q.category),
         kind: non_empty(&q.kind),
-        blogs: id_list(&q.blogs, 500),
+        blogs: non_empty(&q.blogs).map(|_| ids(&q.blogs, 500)),
+        more: String::new(),
+    };
+    let words = list(&q.block_words, 100, |w| w.to_lowercase());
+    let f = Filters {
+        more: serde_json::json!({
+            "blogs": f.blogs,
+            "block_blogs": ids(&q.block_blogs, 1000),
+            "block_hosts": list(&q.block_hosts, 200, host_key),
+            "block_tags": words.iter().map(|w| analyze::tag_key(w)).collect::<Vec<_>>(),
+            "block_words": words,
+            "nsfw": truthy(&q.nsfw),
+            "directories": non_empty(&q.directories).map(|_| list(&q.directories, 20, str::to_string)),
+        })
+        .to_string(),
+        ..f
     };
     let discover = q.mode.as_deref() != Some("latest") && q.blog.is_none() && search.is_none() && f.blogs.is_none();
     if discover {
@@ -809,12 +902,42 @@ async fn list_posts(State(st): State<AppState>, Query(q): Query<PostQuery>) -> A
         };
         let explore = q.mode.as_deref() == Some("explore");
         let interest = interest(&st.pool, &signals, explore).await?;
-        let leaning = if explore { &EXPLORE } else { &FOR_YOU };
+        let weights = non_empty(&q.w).and_then(Weights::parse).unwrap_or(DEFAULT_WEIGHTS);
+        let leaning = &weights.leaning(explore);
         let seed = q.seed.unwrap_or(0);
         discover_posts(&st.pool, limit, q.cursor.as_deref(), seed, &interest, leaning, &f).await
     } else {
         latest_posts(&st.pool, limit, q.cursor.as_deref(), q.blog, search, &f).await
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InterestQuery {
+    #[serde(default)]
+    follow: Option<String>,
+    #[serde(default)]
+    like: Option<String>,
+    #[serde(default)]
+    save: Option<String>,
+    #[serde(default)]
+    read: Option<String>,
+}
+
+/// What 推荐 makes of the reader's signals (the same as `list_posts` gets):
+/// their top terms and their categories' shares, for the settings page.
+async fn reader_interest(State(st): State<AppState>, Query(q): Query<InterestQuery>) -> ApiResult<serde_json::Value> {
+    let signals = Signals {
+        follow: id_list(&q.follow, 500),
+        like: id_list(&q.like, 200),
+        save: id_list(&q.save, 200),
+        read: id_list(&q.read, 100),
+        shown: None,
+    };
+    let i = interest(&st.pool, &signals, false).await?;
+    let parse = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap_or_default();
+    Ok(Json(
+        serde_json::json!({ "terms": parse(&i.terms), "categories": parse(&i.categories) }),
+    ))
 }
 
 async fn latest_posts(
@@ -1012,31 +1135,93 @@ struct Leaning {
     blog: f64,
     seen: f64,
     shown: f64,
+    /// Up to this much seeded noise, and this much less for each newer post
+    /// of the same blog.
+    noise: f64,
+    same_blog: f64,
     per_blog: i64,
 }
 
-/// 推荐: towards what the reader likes, and the blogs they follow.
-const FOR_YOU: Leaning = Leaning {
+/// The reader's settings for 推荐, all in days of freshness except
+/// `per_blog`; 反推荐 is worked out from them (`leaning`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Weights {
+    interest: f64,
+    category: f64,
+    blog: f64,
+    seen: f64,
+    shown: f64,
+    noise: f64,
+    same_blog: f64,
+    per_blog: i64,
+}
+
+/// 推荐 as it comes: towards what the reader likes, and the blogs they follow.
+const DEFAULT_WEIGHTS: Weights = Weights {
     interest: 40.0,
     category: 12.0,
     blog: 5.0,
     seen: 60.0,
     shown: 10.0,
+    noise: 14.0,
+    same_blog: 5.0,
     per_blog: 8,
 };
 
-/// 反推荐: the other way round. What is close to their reading, in their usual
-/// categories or from blogs they already know moves down, and fewer posts
-/// per blog take part, so the feed opens onto areas and blogs they have not
-/// been to.
-const EXPLORE: Leaning = Leaning {
-    interest: -40.0,
-    category: -24.0,
-    blog: -20.0,
-    seen: 60.0,
-    shown: 10.0,
-    per_blog: 3,
-};
+impl Weights {
+    /// `interest,category,blog,seen,shown,noise,same_blog,per_blog`, each
+    /// kept within a sensible range; `None` if any is missing or not a number.
+    fn parse(s: &str) -> Option<Weights> {
+        let v: Vec<f64> = s
+            .split(',')
+            .map(|x| x.trim().parse::<f64>())
+            .collect::<Result<_, _>>()
+            .ok()?;
+        let [interest, category, blog, seen, shown, noise, same_blog, per_blog] = v[..] else {
+            return None;
+        };
+        if v.iter().any(|x| !x.is_finite()) {
+            return None;
+        }
+        Some(Weights {
+            interest: interest.clamp(0.0, 100.0),
+            category: category.clamp(0.0, 50.0),
+            blog: blog.clamp(0.0, 50.0),
+            seen: seen.clamp(0.0, 365.0),
+            shown: shown.clamp(0.0, 60.0),
+            noise: noise.clamp(0.0, 60.0),
+            same_blog: same_blog.clamp(0.0, 30.0),
+            per_blog: (per_blog.round() as i64).clamp(1, 30),
+        })
+    }
+
+    /// 推荐 as set; 反推荐 the other way round: what is close to their
+    /// reading, in their usual categories or from blogs they already know
+    /// moves down, and fewer posts per blog take part, so the feed opens onto
+    /// areas and blogs they have not been to.
+    fn leaning(&self, explore: bool) -> Leaning {
+        let base = Leaning {
+            interest: self.interest,
+            category: self.category,
+            blog: self.blog,
+            seen: self.seen,
+            shown: self.shown,
+            noise: self.noise,
+            same_blog: self.same_blog,
+            per_blog: self.per_blog,
+        };
+        if !explore {
+            return base;
+        }
+        Leaning {
+            interest: -self.interest,
+            category: -2.0 * self.category,
+            blog: -4.0 * self.blog,
+            per_blog: self.per_blog.min(3),
+            ..base
+        }
+    }
+}
 
 /// Score = age in days, plus up to two weeks of seeded noise, minus five days
 /// for each newer post of the same blog. Keeps the feed fresh, mixed, and
@@ -1068,25 +1253,32 @@ async fn discover_posts(
             FROM post_terms pt JOIN interest i ON i.term = pt.term
             GROUP BY pt.post_id
          ),
-         cat AS (SELECT key AS id, value AS w FROM json_each(?6))
+         cat AS (SELECT key AS id, value AS w FROM json_each(?6)),
+         scored AS (
+            SELECT r.post_id, p.undated, p.sort_at,
+                   ((p.id * 2654435761 + ?1) % 1000003) / 1000003.0 * ?22 AS noise,
+                   -(r.rn - 1) * ?23 AS same_blog,
+                   COALESCE(sim.s, 0) * ?5 AS interest,
+                   (COALESCE(c1.w, 0) + COALESCE(c2.w, 0)) * ?17 AS category,
+                   (p.blog_id IN (SELECT value FROM json_each(?7))) * ?18 AS blog,
+                   -(p.id IN (SELECT value FROM json_each(?8))) * ?19 AS seen,
+                   -(p.id IN (SELECT value FROM json_each(?20))) * ?21 AS shown
+            FROM ranked r JOIN posts p ON p.id = r.post_id
+            LEFT JOIN sim ON sim.post_id = p.id
+            LEFT JOIN cat c1 ON c1.id = p.category
+            LEFT JOIN cat c2 ON c2.id = substr(p.category, 1, instr(p.category || '/', '/') - 1)
+                            AND c2.id <> p.category
+            WHERE r.rn <= ?9
+         )
          SELECT ",
         post_columns!(),
-        "
-         FROM ranked r JOIN posts p ON p.id = r.post_id JOIN blogs b ON b.id = p.blog_id
-         LEFT JOIN sim ON sim.post_id = p.id
-         LEFT JOIN cat c1 ON c1.id = p.category
-         LEFT JOIN cat c2 ON c2.id = substr(p.category, 1, instr(p.category || '/', '/') - 1)
-                         AND c2.id <> p.category
-         WHERE r.rn <= ?9
-         ORDER BY p.undated,
-                  p.sort_at / 86400.0
-                  + ((p.id * 2654435761 + ?1) % 1000003) / 1000003.0 * 14.0
-                  - (r.rn - 1) * 5.0
-                  + COALESCE(sim.s, 0) * ?5
-                  + (COALESCE(c1.w, 0) + COALESCE(c2.w, 0)) * ?17
-                  + (p.blog_id IN (SELECT value FROM json_each(?7))) * ?18
-                  - (p.id IN (SELECT value FROM json_each(?8))) * ?19
-                  - (p.id IN (SELECT value FROM json_each(?20))) * ?21 DESC,
+        ",
+         json_object('age_days', round((unixepoch() - s.sort_at) / 86400.0, 1), 'noise', round(s.noise, 1),
+                     'same_blog', s.same_blog, 'interest', round(s.interest, 1), 'category', round(s.category, 1),
+                     'blog', s.blog, 'seen', s.seen, 'shown', s.shown) AS why
+         FROM scored s JOIN posts p ON p.id = s.post_id JOIN blogs b ON b.id = p.blog_id
+         ORDER BY s.undated,
+                  s.sort_at / 86400.0 + s.noise + s.same_blog + s.interest + s.category + s.blog + s.seen + s.shown DESC,
                   p.id DESC
          LIMIT ?2 OFFSET ?3"
     ))
@@ -1106,6 +1298,8 @@ async fn discover_posts(
         .bind(leaning.seen)
         .bind(&interest.shown)
         .bind(leaning.shown)
+        .bind(leaning.noise)
+        .bind(leaning.same_blog)
         .fetch_all(pool)
         .await?;
     let next_cursor = (rows.len() as i64 == limit).then(|| (offset + limit).to_string());
@@ -1793,6 +1987,79 @@ pub(crate) mod tests {
         let items = v["items"].as_array().unwrap();
         assert_eq!(items.len(), 4);
         assert!(items.iter().all(|it| it["tags"][0] == "日记"));
+    }
+
+    #[tokio::test]
+    async fn readers_block_blogs_sites_words_and_adult_content() {
+        let st = seeded().await;
+        let count = |v: &serde_json::Value| v["items"].as_array().unwrap().len();
+        let (_, v) = get_json(&st, "/api/posts?mode=latest&limit=100").await;
+        assert_eq!(count(&v), 10, "blogs 1 and 2 are live");
+        let (_, v) = get_json(&st, "/api/posts?mode=latest&limit=100&block_blogs=1").await;
+        assert!(ids(&v, "/blog/id").iter().all(|&b| b == 2));
+        let (_, v) = get_json(
+            &st,
+            "/api/posts?mode=latest&limit=100&block_hosts=https://www.B2.example/x",
+        )
+        .await;
+        assert!(ids(&v, "/blog/id").iter().all(|&b| b == 1), "a site, by its address");
+        let (_, v) = get_json(&st, "/api/posts?mode=latest&limit=100&block_hosts=2.example").await;
+        assert_eq!(count(&v), 10, "not a different site that ends the same");
+        // A word in the title, and a tag.
+        let (_, v) = get_json(&st, "/api/posts?mode=latest&limit=100&block_words=post%201-").await;
+        assert!(ids(&v, "/blog/id").iter().all(|&b| b == 2));
+        let (_, v) = get_json(&st, "/api/posts?mode=latest&limit=100&block_words=%E6%97%A5%E8%AE%B0").await;
+        assert_eq!(count(&v), 6, "posts tagged 日记 go");
+        // Adult content only when asked for.
+        sqlx::query("UPDATE posts SET nsfw = 1 WHERE id = 1")
+            .execute(&st.pool)
+            .await
+            .unwrap();
+        let (_, v) = get_json(&st, "/api/posts?mode=latest&limit=100").await;
+        assert!(!ids(&v, "/id").contains(&1));
+        let (_, v) = get_json(&st, "/api/posts?mode=latest&limit=100&nsfw=1").await;
+        assert!(ids(&v, "/id").contains(&1));
+        assert_eq!(
+            v["items"].as_array().unwrap().iter().find(|it| it["id"] == 1).unwrap()["nsfw"],
+            true
+        );
+        // Directories.
+        let (_, v) = get_json(&st, "/api/posts?mode=latest&limit=100&directories=travellings").await;
+        assert_eq!(count(&v), 9);
+        let (_, v) = get_json(&st, "/api/posts?mode=latest&limit=100&directories=elsewhere").await;
+        assert_eq!(count(&v), 0);
+    }
+
+    #[tokio::test]
+    async fn readers_weigh_recommendations_and_see_why() {
+        let st = seeded().await;
+        let (_, v) = get_json(&st, "/api/posts?limit=100&seed=1").await;
+        let why = &v["items"][0]["why"];
+        assert!(why["age_days"].as_f64().unwrap() > 0.0 && why["noise"].as_f64().unwrap() <= 14.0);
+        // No noise and no penalty for a blog's later posts: strictly newest first.
+        let (_, v) = get_json(&st, "/api/posts?limit=100&seed=1&w=40,12,5,60,10,0,0,30").await;
+        let order: Vec<i64> = v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|it| it["sort_at"].as_i64().unwrap())
+            .collect();
+        assert!(order.windows(2).all(|w| w[0] >= w[1]), "{order:?}");
+        assert_eq!(v["items"][0]["why"]["noise"], 0.0);
+        // One per blog.
+        let (_, v) = get_json(&st, "/api/posts?limit=100&seed=1&w=40,12,5,60,10,14,5,1").await;
+        assert_eq!(v["items"].as_array().unwrap().len(), 2);
+        // Nonsense falls back to the defaults.
+        let (_, v) = get_json(&st, "/api/posts?limit=100&seed=1&w=1,2,x").await;
+        assert_eq!(v["items"].as_array().unwrap().len(), 10);
+        // 反推荐 turns them round.
+        assert_eq!(
+            Weights::parse("40,12,5,60,10,14,5,8").unwrap().leaning(true).blog,
+            -20.0,
+            "as the old 反推荐"
+        );
+        let (_, v) = get_json(&st, "/api/interest?like=1,2").await;
+        assert!(v["terms"].is_object() && v["categories"].is_object());
     }
 
     #[tokio::test]
