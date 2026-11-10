@@ -16,7 +16,7 @@ use crate::util::truncate_chars;
 pub const EXCERPT_CHARS: usize = 240;
 /// Bump when parsing changes, so stored posts are re-parsed once even if
 /// their feed did not change (it is part of the crawler's content hash).
-pub const PARSER_VERSION: u32 = 5;
+pub const PARSER_VERSION: u32 = 6;
 /// Dates further ahead than this are typos (2077) or scheduled posts; ignored.
 const FUTURE_SLACK_SECS: i64 = 2 * 86400;
 
@@ -202,13 +202,15 @@ fn convert_entry(entry: &Entry, feed_url: &Url) -> Option<ParsedItem> {
     let content = entry
         .content
         .as_ref()
-        .and_then(|c| c.body.clone())
-        .filter(|s| !s.trim().is_empty());
+        .and_then(|c| c.body.as_deref())
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| html::unglue_attributes(s).into_owned());
     let summary = entry
         .summary
         .as_ref()
-        .map(|t| t.content.clone())
-        .filter(|s| !s.trim().is_empty());
+        .map(|t| t.content.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| html::unglue_attributes(s).into_owned());
 
     let excerpt_source = summary.as_deref().or(content.as_deref()).unwrap_or_default();
     let excerpt = truncate_chars(&clean::excerpt_text(excerpt_source), EXCERPT_CHARS);
@@ -464,6 +466,29 @@ mod tests {
   </item>
 </channel>
 </rss>"#;
+
+    /// Hexo's feed drops the line break in `<img\nsrc="…">`.
+    #[test]
+    fn glued_attributes_are_read() {
+        let rss = r#"<?xml version="1.0"?><rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+            <channel><title>t</title><link>https://b.example/</link>
+            <item><title>修手机</title><link>https://b.example/2026/fix/</link>
+            <content:encoded><![CDATA[<p>文字</p><p><imgsrc="https://img.example/shot.png" /></p><p><ahref="https://x.example/">链接</a></p>]]></content:encoded>
+            </item></channel></rss>"#;
+        let f = parse(rss.as_bytes(), &Url::parse("https://b.example/atom.xml").unwrap()).unwrap();
+        let it = &f.items[0];
+        assert_eq!(it.cover.as_ref().unwrap().as_str(), "https://img.example/shot.png");
+        assert!(
+            it.body_html
+                .as_deref()
+                .unwrap()
+                .contains(r#"<a href="https://x.example/">"#)
+        );
+        assert_eq!(
+            html::unglue_attributes("<imgs alt=x><aside class=a>"),
+            "<imgs alt=x><aside class=a>"
+        );
+    }
 
     #[test]
     fn parses_rss_items() {

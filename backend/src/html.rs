@@ -1,8 +1,25 @@
 //! Small HTML helpers. They only ever look at markup we already have
 //! (feed content, or a homepage fetched once for feed discovery).
 
+use std::borrow::Cow;
+use std::sync::LazyLock;
+
+use regex::Regex;
 use scraper::{ElementRef, Html, Node, Selector};
 use url::Url;
+
+/// Feed generators that drop line breaks (Hexo's, for one) glue a tag's name
+/// to an attribute written on the next line: `<img\nsrc="…">` comes out as
+/// `<imgsrc="…">`, which no parser reads as an image. Puts the space back.
+pub fn unglue_attributes(html: &str) -> Cow<'_, str> {
+    static GLUED: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"(?i)<(img|a|source|video|audio|iframe|span|div|p)(src|href|alt|class|id|width|height|title|style|srcset|loading|data-[a-z-]+)=",
+        )
+        .unwrap()
+    });
+    GLUED.replace_all(html, "<$1 $2=")
+}
 
 /// Visible text of an HTML fragment with whitespace collapsed.
 /// Code blocks, scripts and styles are skipped; they make terrible excerpts.
