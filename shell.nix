@@ -9,5 +9,6 @@ pkgs.mkShell {
     cmake
     pkg-config
     nodejs_22
+    git
   ];
 }

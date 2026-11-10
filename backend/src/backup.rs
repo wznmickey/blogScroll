@@ -365,6 +365,9 @@ pub struct BackupOutcome {
 /// Writes the snapshot, commits it if anything changed, and pushes.
 pub async fn backup(pool: &SqlitePool, cfg: &BackupConfig) -> anyhow::Result<BackupOutcome> {
     let dir = cfg.git_dir.as_deref().context("backup.git_dir is not set")?;
+    // git runs in more than one directory (the clone in the parent), so a
+    // relative path like "data/backup" must not be read from each of them.
+    let dir = &std::path::absolute(dir)?;
     let b = use_batch_ssh(dir).await;
     ensure_repo(cfg, dir, b).await?;
     let has_origin = git(dir, &["remote"], b).await?.lines().any(|r| r == "origin");
@@ -591,6 +594,43 @@ pub async fn restore(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A relative `git_dir` (as in config.toml) is cloned where it says, and
+    /// a second run finds it there.
+    #[tokio::test]
+    async fn relative_git_dir_is_cloned_once_in_place() {
+        if std::process::Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let st = crate::api::tests::seeded().await;
+        let base = PathBuf::from(format!("target/backup-relative-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let remote = std::path::absolute(base.join("remote.git")).unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "--quiet", "--bare"])
+            .arg(&remote)
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let cfg = BackupConfig {
+            git_dir: Some(base.join("data/backup")),
+            remote: Some(format!("file://{}", remote.display())),
+            every_hours: 0,
+            push: true,
+        };
+        let first = backup(&st.pool, &cfg).await.unwrap();
+        assert!(first.committed && first.pushed);
+        assert!(base.join("data/backup/.git").exists(), "cloned where configured");
+        assert!(!base.join("data/data").exists());
+        sqlx::query("UPDATE posts SET title = 'changed' WHERE id = 1")
+            .execute(&st.pool)
+            .await
+            .unwrap();
+        let second = backup(&st.pool, &cfg).await.unwrap();
+        assert!(second.committed, "the existing working copy is reused");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 
     #[tokio::test]
     async fn snapshot_round_trips_and_only_rewrites_what_changed() {
