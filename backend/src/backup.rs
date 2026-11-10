@@ -13,6 +13,10 @@
 //! everything derived (categories, term vectors, comment counts) is left
 //! out; a restore rebuilds it. git itself (credentials, remote) is the
 //! user's: we run the `git` command in their working copy.
+//!
+//! History is only ever added to: what was pushed from elsewhere is taken in
+//! by fast-forward before each backup, a parted history stops the backup
+//! instead of being overwritten, and the push is never a forced one.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -264,7 +268,12 @@ pub async fn write_snapshot(pool: &SqlitePool, dir: &Path) -> anyhow::Result<Sna
         posts: stats.posts,
     };
     stats.changed += usize::from(write_if_changed(&dir.join("meta.json"), &pretty(&meta)?)?);
-    stats.changed += usize::from(write_if_changed(&dir.join("README.md"), README)?);
+    // Written once; after that the README is the repository owner's to edit.
+    let readme = dir.join("README.md");
+    if !readme.exists() {
+        std::fs::write(&readme, README)?;
+        stats.changed += 1;
+    }
     Ok(stats)
 }
 
@@ -280,15 +289,20 @@ fn write_if_changed(path: &Path, content: &str) -> anyhow::Result<bool> {
     Ok(true)
 }
 
-/// Runs git in `dir` without ever waiting for a password prompt.
-async fn git(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
-    let run = Command::new("git")
-        .args(COMMITTER)
+/// Runs git in `dir` without ever waiting for input: no password prompt, and
+/// with `batch_ssh` ssh fails on an unknown host key or a passphrase instead
+/// of asking in the terminal the server runs in.
+async fn git(dir: &Path, args: &[&str], batch_ssh: bool) -> anyhow::Result<String> {
+    let mut cmd = Command::new("git");
+    cmd.args(COMMITTER)
         .args(args)
         .current_dir(dir)
         .env("GIT_TERMINAL_PROMPT", "0")
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    if batch_ssh {
+        cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
+    }
+    let run = cmd.output();
     let out = tokio::time::timeout(GIT_TIMEOUT, run)
         .await
         .with_context(|| format!("git {} timed out", args.join(" ")))?
@@ -303,7 +317,19 @@ async fn git(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-async fn ensure_repo(cfg: &BackupConfig, dir: &Path) -> anyhow::Result<()> {
+/// Batch-mode ssh, unless the user set up their own ssh command (which may
+/// pick the deploy key), in the environment or in git's config.
+async fn use_batch_ssh(dir: &Path) -> bool {
+    if std::env::var_os("GIT_SSH_COMMAND").is_some() || std::env::var_os("GIT_SSH").is_some() {
+        return false;
+    }
+    let probe = if dir.join(".git").exists() { dir } else { Path::new(".") };
+    git(probe, &["config", "--get", "core.sshCommand"], false)
+        .await
+        .map_or(true, |s| s.trim().is_empty())
+}
+
+async fn ensure_repo(cfg: &BackupConfig, dir: &Path, batch_ssh: bool) -> anyhow::Result<()> {
     if dir.join(".git").exists() {
         return Ok(());
     }
@@ -319,7 +345,7 @@ async fn ensure_repo(cfg: &BackupConfig, dir: &Path) -> anyhow::Result<()> {
         .unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent)?;
     let target = dir.to_string_lossy();
-    git(parent, &["clone", "--quiet", remote, &target]).await?;
+    git(parent, &["clone", "--quiet", remote, &target], batch_ssh).await?;
     Ok(())
 }
 
@@ -333,10 +359,30 @@ pub struct BackupOutcome {
 /// Writes the snapshot, commits it if anything changed, and pushes.
 pub async fn backup(pool: &SqlitePool, cfg: &BackupConfig) -> anyhow::Result<BackupOutcome> {
     let dir = cfg.git_dir.as_deref().context("backup.git_dir is not set")?;
-    ensure_repo(cfg, dir).await?;
+    let b = use_batch_ssh(dir).await;
+    ensure_repo(cfg, dir, b).await?;
+    let has_origin = git(dir, &["remote"], b).await?.lines().any(|r| r == "origin");
+    let push = cfg.push && has_origin;
+    if push {
+        // Take in what was pushed from elsewhere (an edited README, another
+        // machine), by fast-forward only. If the histories have parted, stop:
+        // a backup adds commits, it never overwrites any.
+        git(dir, &["fetch", "--quiet", "origin"], b).await?;
+        if git(dir, &["rev-parse", "--verify", "--quiet", "@{upstream}"], b)
+            .await
+            .is_ok()
+        {
+            git(dir, &["merge", "--ff-only", "--quiet", "@{upstream}"], b)
+                .await
+                .context(
+                    "the backup repository has commits that do not follow this copy's; nothing was committed \
+                     or pushed. Combine them by hand (git pull --rebase), never with --force",
+                )?;
+        }
+    }
     let snapshot = write_snapshot(pool, dir).await?;
-    git(dir, &["add", "--all"]).await?;
-    let changed = git(dir, &["status", "--porcelain"]).await?.lines().count();
+    git(dir, &["add", "--all"], b).await?;
+    let changed = git(dir, &["status", "--porcelain"], b).await?.lines().count();
     let committed = changed > 0;
     if committed {
         let message = format!(
@@ -346,14 +392,14 @@ pub async fn backup(pool: &SqlitePool, cfg: &BackupConfig) -> anyhow::Result<Bac
             snapshot.posts,
             changed
         );
-        git(dir, &["commit", "--quiet", "-m", &message]).await?;
+        git(dir, &["commit", "--quiet", "-m", &message], b).await?;
     }
-    // Also pushes commits a failed push left behind.
-    let has_origin = git(dir, &["remote"]).await?.lines().any(|r| r == "origin");
-    let pushed = cfg.push && has_origin;
-    if pushed {
-        git(dir, &["push", "--quiet", "origin", "HEAD"]).await?;
+    // Also pushes commits a failed push left behind. The refspec is explicit
+    // and has no `+`, so this is never a forced push, whatever the config says.
+    if push {
+        git(dir, &["push", "--quiet", "--set-upstream", "origin", "HEAD"], b).await?;
     }
+    let pushed = push;
     crate::db::kv_set(pool, LAST_BACKUP_KEY, &now().to_string()).await?;
     Ok(BackupOutcome {
         snapshot,

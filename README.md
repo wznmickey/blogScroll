@@ -179,6 +179,27 @@ blogs/<id>.json    一个博客一个文件：博客信息、所属目录、全�
 
 提交者显示为 `blogScroll <backup@blogscroll.invalid>`，不会用到你本机的 git 身份。推送失败时提交留在本地，下次一起推。Docker 镜像里已带 git 和 ssh，把 key 挂进容器即可。
 
+**只追加、不覆盖。** 备份程序这边保证：
+
+- 推送是 `git push origin HEAD`：明确写出的 refspec、不带 `+`，所以不会强推，git 配置里写了强推的 refspec 也不影响；
+- 每次备份前先 `git fetch`，只用快进（`merge --ff-only`）接上远端的新提交（比如你在 GitHub 上改了 README，或另一台机器推过）；两边历史分叉时这一轮直接停止并报错，不提交、不推送，等你手工合并（`git pull --rebase`，不要用 `--force`）；
+- `README.md` 只在第一次生成，之后归你编辑，备份不会改回去；
+- ssh 以 BatchMode 运行，遇到陌生主机密钥或要输口令时直接失败，不会卡在终端里等输入（你自己配了 `core.sshCommand` 或 `GIT_SSH_COMMAND` 时用你的）。
+
+GitHub 那边还可以再加一道锁：仓库 Settings → Rules → Rulesets 新建规则，目标选全部分支，勾选 *Block force pushes* 和 *Restrict deletions*，Bypass 列表留空（deploy key 也受约束）。注意 GitHub Free 账号的**私有**仓库不能用 rulesets 和分支保护，需要 GitHub Pro（学生可通过 GitHub Student Developer Pack 免费获得）；用不了时就只靠上面程序这边的保证。
+
+deploy key 只给这一个仓库用，建议在 `~/.ssh/config` 里给它一个单独的主机名，免得和你平时的 GitHub key 混在一起：
+
+```text
+Host github-blogscroll-backup
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/blogscroll_backup
+  IdentitiesOnly yes
+```
+
+然后 `remote = "git@github-blogscroll-backup:<你>/<私有仓库>.git"`。
+
 恢复：把 `[database] path` 指向一个新文件，`cargo run -- restore --from data/backup`。博客、目录关系、文章（含已授权的全文）原样恢复，分类和标签当场重算；之后每个 RSS 会完整读一次，没找到 RSS 的博客一周后再找。
 
 ## 在页面右侧阅读原文
