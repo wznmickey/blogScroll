@@ -1,5 +1,6 @@
 import { shallowRef } from 'vue'
 import type { Hide } from './channels'
+import { WEIGHT_INFO, type Weights } from './options'
 import { staticApi } from './staticApi'
 import type {
   BlogDetail,
@@ -8,13 +9,14 @@ import type {
   CategoryNode,
   CategoryRef,
   FeedMode,
+  InterestProfile,
   Meta,
   Page,
   PostCard,
   PostDetail,
   TagCount,
-  TagsInfo,
   TagStat,
+  TagsInfo,
 } from './types'
 
 type Params = Record<string, string | number | null | undefined>
@@ -58,6 +60,24 @@ export interface PostQuery {
   startAt?: { sort_at: number; id: number }
   /** Posts to leave out. */
   hide?: Hide
+  /** What the reader blocked (settings): blogs, sites, words or tags. */
+  blockBlogs?: number[]
+  blockHosts?: string[]
+  blockWords?: string[]
+  /** Also adult content (R18 / NSFW). */
+  nsfw?: boolean
+  /** Only blogs from these directories. */
+  directories?: string[]
+  /** The reader's own weights for 推荐 / 反推荐. */
+  weights?: Weights
+}
+
+/** The signals 推荐 reads, for its picture of the reader (settings). */
+export interface InterestQuery {
+  follow?: number[]
+  like?: number[]
+  save?: number[]
+  read?: number[]
 }
 
 export interface BlogQuery {
@@ -94,7 +114,24 @@ const liveApi = {
   tags: () => get<TagsInfo>('/api/tags'),
   /** Tags whose name contains `q`, most used first. */
   searchTags: (q: string, limit = 20) => get<TagStat[]>('/api/tags/search', { q, limit }),
-  posts: async ({ hide, blogs, follow, like, save, read, shown, startAt, cursor, ...q }: PostQuery) => {
+  posts: async ({
+    hide,
+    blogs,
+    follow,
+    like,
+    save,
+    read,
+    shown,
+    startAt,
+    cursor,
+    blockBlogs,
+    blockHosts,
+    blockWords,
+    nsfw,
+    directories,
+    weights,
+    ...q
+  }: PostQuery) => {
     const page = await get<Page<PostCard>>('/api/posts', {
       ...q,
       // The cursor is exclusive: one past the post itself.
@@ -102,6 +139,12 @@ const liveApi = {
       cover: hide?.noCover ? 1 : undefined,
       text: hide?.shortExcerpt ? 1 : undefined,
       comments: hide?.noComments ? 1 : undefined,
+      block_blogs: list(blockBlogs),
+      block_hosts: blockHosts?.length ? blockHosts.join(',') : undefined,
+      block_words: blockWords?.length ? blockWords.join(',') : undefined,
+      nsfw: nsfw ? 1 : undefined,
+      directories: directories?.join(','),
+      w: weights ? WEIGHT_INFO.map(({ key }) => weights[key]).join(',') : undefined,
       blogs: list(blogs),
       follow: list(follow),
       like: list(like),
@@ -112,6 +155,8 @@ const liveApi = {
     return { ...page, items: page.items.map(withCategory) }
   },
   post: async (id: number) => withCategory(await get<PostDetail>(`/api/posts/${id}`)),
+  interest: ({ follow, like, save, read }: InterestQuery) =>
+    get<InterestProfile>('/api/interest', { follow: list(follow), like: list(like), save: list(save), read: list(read) }),
   related: async (id: number, limit = 8) =>
     (await get<PostCard[]>(`/api/posts/${id}/related`, { limit })).map(withCategory),
   blogs: ({ ids, ...q }: BlogQuery) => get<Page<BlogSummary>>('/api/blogs', { ...q, ids: list(ids) }),

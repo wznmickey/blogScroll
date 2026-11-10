@@ -28,6 +28,27 @@ const ownTags = computed(() => post.value?.tags ?? [])
 const autoTags = computed(() => post.value?.auto_tags ?? [])
 const category = computed(() => (post.value?.category && post.value.category.id !== 'other' ? post.value.category : null))
 
+// Opened from 推荐 / 反推荐: what put it where it was (the card keeps it).
+const WHY_LABELS = {
+  noise: '随机打散',
+  same_blog: '同一博主的第几篇',
+  interest: '和你的兴趣相近',
+  category: '你常看的分类',
+  blog: '你关注 / 读过的博主',
+  seen: '已经看过',
+  shown: '刷到过没点开',
+} as const
+const why = computed(() => {
+  const w = card.value?.why
+  if (!w) return null
+  const parts = (Object.keys(WHY_LABELS) as (keyof typeof WHY_LABELS)[])
+    .map((k) => ({ label: WHY_LABELS[k], days: Math.round(w[k] * 10) / 10 }))
+    .filter((p) => p.days !== 0)
+  const sum = parts.reduce((s, p) => s + p.days, 0)
+  return { age: w.age_days, parts, effective: Math.round((w.age_days - sum) * 10) / 10 }
+})
+const days = (d: number) => `${d > 0 ? '提前' : '推后'} ${Math.abs(d)} 天`
+
 const route = useRoute()
 const related = ref<PostCard[]>([])
 const brokenThumbs = reactive(new Set<number>())
@@ -137,6 +158,19 @@ function ahead(url: string, title: string, delay?: number) {
                 以上为 RSS 摘要。为尊重作者，完整内容请到原博客阅读。
               </p>
             </template>
+            <details v-if="why" class="why">
+              <summary>为什么推荐这篇</summary>
+              <ul>
+                <li><span>发布于 {{ why.age }} 天前</span><span class="w">起点</span></li>
+                <li v-for="p in why.parts" :key="p.label">
+                  <span>{{ p.label }}</span><span class="w" :class="{ up: p.days > 0 }">{{ days(p.days) }}</span>
+                </li>
+              </ul>
+              <p>
+                排序时相当于 {{ why.effective >= 0 ? `${why.effective} 天前` : `${-why.effective} 天后` }}发布的文章。
+                <RouterLink to="/settings">调整推荐权重</RouterLink>
+              </p>
+            </details>
             <p v-if="category" class="category">
               <span class="label">分类</span>
               <RouterLink :to="{ path: '/', query: { c: `cat:${category.id}` } }">{{ categoryName(category) }}</RouterLink>
@@ -251,6 +285,8 @@ function ahead(url: string, title: string, delay?: number) {
   animation: fade 0.18s ease-out;
 }
 .sheet {
+  /* Text size (settings). */
+  zoom: var(--zoom, 1);
   position: relative;
   display: flex;
   width: min(1120px, 100%);
@@ -373,6 +409,42 @@ function ahead(url: string, title: string, delay?: number) {
   border-radius: 4px;
   background: var(--surface);
   font-size: 0.9em;
+}
+.why {
+  margin: 12px 0;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 13px;
+}
+.why summary {
+  cursor: pointer;
+  color: var(--text);
+}
+.why ul {
+  margin: 8px 0 4px;
+  padding: 0;
+  list-style: none;
+}
+.why li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 0;
+}
+.why .w {
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.why .w.up {
+  color: var(--accent);
+}
+.why p {
+  margin: 4px 0 0;
+}
+.why a {
+  color: var(--link);
 }
 .note {
   margin: 12px 0;

@@ -13,6 +13,7 @@
   --link: #3478d4;
   --radius-cover: 14px;
   --header-h: 64px;
+  --tabbar-h: 0px;
   --safe-b: env(safe-area-inset-bottom, 0px);
   color-scheme: light;
 }
@@ -40,6 +41,11 @@
     --card: #ffffff;
     --radius-cover: 0;
     --header-h: 52px;
+    --tabbar-h: 54px;
+  }
+  /* Room for the tab bar along the bottom (TabBar.vue). */
+  body {
+    padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
   }
 }
 @media (max-width: 639px) and (prefers-color-scheme: dark) {
@@ -66,6 +72,8 @@ html {
 main {
   position: relative;
   left: calc(-1 * var(--pane-shift, 0px));
+  /* Text size (settings): the page scales with it, the header does not. */
+  zoom: var(--zoom, 1);
   transition: left 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 @media (prefers-reduced-motion: reduce) {

@@ -5,6 +5,7 @@ import { loadMeta, loadTags } from './api'
 import AppHeader from './components/AppHeader.vue'
 import PostDetail from './components/PostDetail.vue'
 import ReaderPane from './components/ReaderPane.vue'
+import TabBar from './components/TabBar.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -39,4 +40,5 @@ function closePost() {
   </main>
   <PostDetail v-if="openPost" :id="openPost" :key="openPost" @close="closePost" />
   <ReaderPane />
+  <TabBar />
 </template>

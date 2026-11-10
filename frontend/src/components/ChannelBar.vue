@@ -12,7 +12,7 @@ import {
   channel,
   COLUMN_CHOICES,
   HIDE_CHOICES,
-  MAX_PINNED,
+  maxPinned,
   moveChannel,
   prefs,
   removeChannel,
@@ -33,6 +33,17 @@ const shownIds = computed(() => new Set([...shown.value.pinned, ...shown.value.r
 const extra = computed(() => (shownIds.value.has(props.active) ? null : channel(props.active, info.value)))
 
 const open = ref(false)
+/** Phones: the filters fold behind the funnel. */
+const filtersOpen = ref(false)
+const filtersOn = computed(() => HIDE_CHOICES.filter((c) => prefs.value.hide[c.key]).length)
+const filtersEl = ref<HTMLElement>()
+function closeFilters(e: PointerEvent) {
+  if (!filtersEl.value?.contains(e.target as Node)) filtersOpen.value = false
+}
+watch(filtersOpen, (o) =>
+  o ? document.addEventListener('pointerdown', closeFilters) : document.removeEventListener('pointerdown', closeFilters),
+)
+onBeforeUnmount(() => document.removeEventListener('pointerdown', closeFilters))
 const note = ref('')
 const tagText = ref('')
 
@@ -48,7 +59,7 @@ const ordered = computed(() => [...shown.value.pinned, ...shown.value.rest])
 const isPinned = (id: ChannelId) => shown.value.pinned.some((c) => c.id === id)
 
 function pin(id: ChannelId) {
-  note.value = togglePin(id, info.value) ? '' : `最多置顶 ${MAX_PINNED} 个频道`
+  note.value = togglePin(id, info.value) ? '' : `最多置顶 ${maxPinned()} 个频道（可在「设置」里改）`
 }
 
 function addTag() {
@@ -123,17 +134,28 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
           </svg>
         </button>
       </div>
-      <div class="filters" role="group" aria-label="只看这些文章">
-        <svg class="funnel" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true">
-          <path d="M4 5h16l-6 7.5V19l-4 1.5v-8z" />
-        </svg>
-        <label v-for="c in HIDE_CHOICES" :key="c.key" class="check" :class="{ on: prefs.hide[c.key] }" :title="c.title">
-          <input v-model="prefs.hide[c.key]" type="checkbox" />
-          <svg v-if="prefs.hide[c.key]" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="m5 12 5 5 9-10" />
+      <div ref="filtersEl" class="filters" :class="{ open: filtersOpen, any: filtersOn }" role="group" aria-label="只看这些文章">
+        <button
+          type="button"
+          class="funnel"
+          :aria-expanded="filtersOpen"
+          :aria-label="filtersOn ? `过滤（已选 ${filtersOn} 项）` : '过滤'"
+          @click="filtersOpen = !filtersOpen"
+        >
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true">
+            <path d="M4 5h16l-6 7.5V19l-4 1.5v-8z" />
           </svg>
-          {{ c.label }}
-        </label>
+          <span v-if="filtersOn" class="count">{{ filtersOn }}</span>
+        </button>
+        <div class="checks">
+          <label v-for="c in HIDE_CHOICES" :key="c.key" class="check" :class="{ on: prefs.hide[c.key] }" :title="c.title">
+            <input v-model="prefs.hide[c.key]" type="checkbox" />
+            <svg v-if="prefs.hide[c.key]" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="m5 12 5 5 9-10" />
+            </svg>
+            {{ c.label }}
+          </label>
+        </div>
       </div>
       <button class="more" :class="{ open }" :aria-expanded="open" aria-label="管理频道" @click="open = !open">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -151,7 +173,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
       </header>
 
       <p class="hint">
-        置顶的频道固定在左侧，最多 {{ MAX_PINNED }} 个；第一个频道是打开首页时显示的频道。
+        置顶的频道固定在左侧，最多 {{ maxPinned() }} 个；第一个频道是打开首页时显示的频道。
         <span v-if="note" class="warn">{{ note }}</span>
       </p>
       <ol class="mine">
@@ -318,9 +340,58 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
   background: var(--surface);
 }
 .funnel {
+  display: flex;
   flex: none;
+  align-items: center;
+  gap: 2px;
   margin-right: 2px;
   color: var(--text-3);
+  /* Only a sign on wide screens, where the boxes are always there. */
+  pointer-events: none;
+}
+.funnel .count {
+  display: none;
+}
+.checks {
+  display: flex;
+  gap: 2px;
+}
+/* Phones: the boxes fold behind the funnel, which says how many are ticked. */
+@media (max-width: 639px) {
+  .filters {
+    position: relative;
+    padding: 2px 6px;
+  }
+  .funnel {
+    height: 26px;
+    margin: 0;
+    pointer-events: auto;
+  }
+  .filters.any .funnel {
+    color: var(--accent);
+  }
+  .funnel .count {
+    display: inline;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .checks {
+    display: none;
+  }
+  .filters.open .checks {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 31;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    padding: 6px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--bg);
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.16);
+  }
 }
 .check {
   position: relative;

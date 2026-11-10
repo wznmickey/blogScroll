@@ -167,6 +167,7 @@ function submit() {
         <RouterLink to="/" class="desktop-only" exact-active-class="active">首页</RouterLink>
         <RouterLink to="/blogs" active-class="active">博客</RouterLink>
         <RouterLink to="/me" active-class="active">我的</RouterLink>
+        <RouterLink to="/settings" active-class="active">设置</RouterLink>
         <RouterLink to="/about" active-class="active">关于</RouterLink>
       </nav>
     </div>
@@ -358,10 +359,8 @@ function submit() {
     height: 34px;
     font-size: 13px;
   }
+  /* The tab bar along the bottom has them (TabBar.vue). */
   .nav {
-    gap: 12px;
-  }
-  .desktop-only {
     display: none;
   }
 }

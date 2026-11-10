@@ -3,6 +3,7 @@
 // browser; included in backups.
 
 import { ref, watch } from 'vue'
+import { options } from './options'
 import type { TagsInfo } from './types'
 
 /**
@@ -92,7 +93,8 @@ export const anyHidden = (h: Hide) => h.noCover || h.shortExcerpt || h.noComment
 
 const KEY = 'channels'
 const DEFAULT_PINNED = ['foryou']
-export const MAX_PINNED = 3
+/** How many channels may be pinned (settings page, 1–6). */
+export const maxPinned = () => options.value.maxPinned
 
 function defaultOrder(info: TagsInfo | null): ChannelId[] {
   return [
@@ -107,7 +109,7 @@ export function cleanPrefs(v: unknown): Prefs {
     Array.isArray(x) ? [...new Set(x.filter((s): s is string => typeof s === 'string' && s.length < 200))] : null
   return {
     order: ids(o.order),
-    pinned: (ids(o.pinned) ?? DEFAULT_PINNED).slice(0, MAX_PINNED),
+    pinned: (ids(o.pinned) ?? DEFAULT_PINNED).slice(0, 6),
     hide: cleanHide(o),
     columns: typeof o.columns === 'number' && Number.isInteger(o.columns) && o.columns >= 1 && o.columns <= 8 ? o.columns : null,
   }
@@ -157,7 +159,7 @@ export function shownChannels(info: TagsInfo | null): { pinned: Channel[]; rest:
   const offered = new Set(allChannels(info).map((c) => c.id))
   // Categories and kinds disappear if the site stops having them; tags stay.
   const usable = order.filter((id) => offered.has(id) || id.startsWith('tag:') || !info)
-  const pinned = prefs.value.pinned.filter((id) => usable.includes(id))
+  const pinned = prefs.value.pinned.filter((id) => usable.includes(id)).slice(0, maxPinned())
   return {
     pinned: pinned.map((id) => channel(id, info)),
     rest: usable.filter((id) => !pinned.includes(id)).map((id) => channel(id, info)),
@@ -215,7 +217,7 @@ export function togglePin(id: ChannelId, info: TagsInfo | null): boolean {
     prefs.value.pinned = prefs.value.pinned.filter((x) => x !== id)
     return true
   }
-  if (prefs.value.pinned.filter((x) => isShown(x, info)).length >= MAX_PINNED) return false
+  if (prefs.value.pinned.filter((x) => isShown(x, info)).length >= maxPinned()) return false
   addChannel(id, info)
   prefs.value.pinned = [...prefs.value.pinned, id]
   return true

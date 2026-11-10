@@ -8,6 +8,7 @@ import Waterfall from '../components/Waterfall.vue'
 import SocialLinks from '../components/SocialLinks.vue'
 import { hostOf, relativeTime } from '../format'
 import { recordShown } from '../library'
+import { isBlocked, options, toggleBlock } from '../options'
 import { openInReader, readerIntent, readerIntentEnd } from '../reader'
 import type { BlogDetail } from '../types'
 
@@ -31,7 +32,9 @@ watch(
   { immediate: true },
 )
 
-const load = (cursor: string | null) => api.posts({ mode: 'latest', blog: id.value, cursor })
+// The blog's own page shows its posts even if the reader blocked it (they came here).
+const load = (cursor: string | null) =>
+  api.posts({ mode: 'latest', blog: id.value, cursor, nsfw: options.value.showNsfw || undefined })
 
 const aboutOpen = ref(false)
 watch(id, () => (aboutOpen.value = false))
@@ -57,6 +60,15 @@ const engine = computed(() => blog.value?.generator?.split(/\s+/)[0] ?? null)
         <div class="title-row">
           <h1>{{ blog.name }}</h1>
           <FollowButton :blog-id="blog.id" />
+          <button
+            type="button"
+            class="block"
+            :class="{ on: isBlocked(blog.id) }"
+            :title="isBlocked(blog.id) ? '推荐、最新和搜索里又会出现这个博主' : '推荐、最新和搜索里不再出现这个博主（可在「设置」里撤销）'"
+            @click="toggleBlock({ id: blog.id, name: blog.name })"
+          >
+            {{ isBlocked(blog.id) ? '已屏蔽' : '屏蔽' }}
+          </button>
         </div>
         <a
           :href="blog.homepage"
@@ -155,6 +167,20 @@ const engine = computed(() => blog.value?.generator?.split(/\s+/)[0] ?? null)
   display: flex;
   align-items: center;
   gap: 14px;
+}
+.block {
+  padding: 4px 10px;
+  border-radius: 999px;
+  color: var(--text-3);
+  font-size: 13px;
+}
+.block:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+.block.on {
+  background: var(--surface);
+  color: var(--text-2);
 }
 h1 {
   margin: 0;

@@ -53,6 +53,10 @@ export interface PostCard {
   /** From the feed (slash:comments) or the blog's comment service. */
   comment_count: number | null
   comments_url: string | null
+  /** Marked adult content (R18 / NSFW); only listed when asked for. */
+  nsfw?: boolean
+  /** In 推荐 / 反推荐: what made up its place, in days of freshness. */
+  why?: Why
   blog: BlogRef
 }
 
@@ -116,6 +120,26 @@ export interface TagRef {
   label: string
 }
 
+/** The parts of a post's score in 推荐 / 反推荐 (api.rs `discover_posts`). */
+export interface Why {
+  age_days: number
+  noise: number
+  same_blog: number
+  interest: number
+  category: number
+  blog: number
+  seen: number
+  shown: number
+}
+
+/** What 推荐 makes of the reader's signals (GET /api/interest). */
+export interface InterestProfile {
+  /** Top terms (keywords, tags), unit length. */
+  terms: Record<string, number>
+  /** Share of the signals per category, also under the top-level one. */
+  categories: Record<string, number>
+}
+
 export interface BlogSummary {
   id: number
   name: string
@@ -131,6 +155,8 @@ export interface BlogSummary {
   /** Main top-level categories. */
   categories: CategoryRef[]
   framable?: boolean | null
+  /** Ids of the directories that list it. */
+  directory_ids?: string[]
 }
 
 export interface SocialLink {

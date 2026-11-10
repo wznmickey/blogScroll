@@ -1,9 +1,10 @@
 // Backup and restore of everything this reader keeps in the browser: followed
-// blogs, likes, saves, history, 刷到过, where they got to in each feed, and
-// the channel bar. A JSON file, so it can
+// blogs, likes, saves, history, 刷到过, where they got to in each feed, the
+// channel bar and the settings page. A JSON file, so it can
 // move to another browser or device, or survive clearing site data.
 
 import { prefs, cleanPrefs } from './channels'
+import { cleanOptions, options, type Options } from './options'
 import { follows, restoreFollows } from './follow'
 import { cleanEntries, entries, LIST_NAMES, restoreList, setSettings, settings, type Entry } from './library'
 import { allPositions, cleanPositions, restorePositions, type Position } from './positions'
@@ -23,6 +24,8 @@ export interface Backup {
   positions: Record<string, Position>
   channels: ReturnType<typeof cleanPrefs>
   settings: { history: boolean; seen: boolean }
+  /** The settings page (weights, blocks, ...); missing in older backups. */
+  options: Options | null
 }
 
 export function makeBackup(): Backup {
@@ -38,6 +41,7 @@ export function makeBackup(): Backup {
     positions: allPositions(),
     channels: JSON.parse(JSON.stringify(prefs.value)),
     settings: { ...settings.value },
+    options: JSON.parse(JSON.stringify(options.value)),
   }
 }
 
@@ -78,6 +82,7 @@ export function parseBackup(text: string): Backup {
       history: (v.settings as { history?: unknown } | undefined)?.history !== false,
       seen: (v.settings as { seen?: unknown } | undefined)?.seen !== false,
     },
+    options: v.options ? cleanOptions(v.options) : null,
   }
 }
 
@@ -91,6 +96,7 @@ export function restoreBackup(b: Backup, mode: 'merge' | 'replace') {
   if (mode === 'replace') {
     prefs.value = b.channels
     setSettings(b.settings)
+    if (b.options) options.value = b.options
     restorePositions(b.positions)
   } else {
     restorePositions({ ...b.positions, ...allPositions() })

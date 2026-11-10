@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { api, categoryName, meta, tagLabel, tagsInfo, type PostQuery } from '../api'
 import { addChannel, anyHidden, channel, homeChannel, isMode, isShown, prefs, upgradeOldQuery, type ChannelId } from '../channels'
 import ChannelBar from '../components/ChannelBar.vue'
+import { readerFilters, weightsFor } from '../options'
 import { useDragScroll } from '../composables/dragScroll'
 import Waterfall from '../components/Waterfall.vue'
 import { follows } from '../follow'
@@ -74,7 +75,7 @@ const subRow = computed(() => {
 
 // Personalisation is read when a feed (re)starts, not on every like.
 const resetKey = computed(() =>
-  [active.value, state.value.latest, state.value.dirtag, state.value.from, JSON.stringify(prefs.value.hide), seed.value].join('|') +
+  [active.value, state.value.latest, state.value.dirtag, state.value.from, JSON.stringify(prefs.value.hide), JSON.stringify([readerFilters(), weightsFor()]), seed.value].join('|') +
   (isFollowing.value ? `|${followIds.value.join('.')}` : ''),
 )
 
@@ -117,6 +118,8 @@ const load = async (cursor: string | null) => {
     cursor,
     startAt: resumeMark.value ?? undefined,
     hide: anyHidden(prefs.value.hide) ? { ...prefs.value.hide } : undefined,
+    ...readerFilters(),
+    weights: weightsFor(),
     dirtag: state.value.dirtag || undefined,
     seed: seed.value,
     mode: active.value === 'explore' ? 'explore' : mixed.value ? 'discover' : 'latest',

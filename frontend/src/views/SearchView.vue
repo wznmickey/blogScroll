@@ -10,6 +10,7 @@ import FollowButton from '../components/FollowButton.vue'
 import PostRow from '../components/PostRow.vue'
 import Waterfall from '../components/Waterfall.vue'
 import { hostOf } from '../format'
+import { readerFilters } from '../options'
 import { LIST_LABELS, recordShown, searchList, type ListName } from '../library'
 import type { BlogSummary, CategoryNode, Page, PostCard, TagStat } from '../types'
 
@@ -105,7 +106,7 @@ function setType(t: string) {
   window.scrollTo({ top: 0 })
 }
 
-const loadPosts = (cursor: string | null) => api.posts({ mode: 'latest', q: q.value, cursor })
+const loadPosts = (cursor: string | null) => api.posts({ mode: 'latest', q: q.value, cursor, ...readerFilters() })
 
 function localPages(name: ListName) {
   return async (cursor: string | null): Promise<Page<PostCard>> => {

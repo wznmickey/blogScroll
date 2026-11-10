@@ -18,6 +18,7 @@ export const router = createRouter({
     { path: '/blog/:id(\\d+)', name: 'blog', component: () => import('./views/BlogView.vue') },
     { path: '/search', name: 'search', component: () => import('./views/SearchView.vue') },
     { path: '/me', name: 'me', component: () => import('./views/MeView.vue') },
+    { path: '/settings', name: 'settings', component: () => import('./views/SettingsView.vue') },
     { path: '/about', name: 'about', component: () => import('./views/AboutView.vue') },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
