@@ -4,8 +4,8 @@ import { socialItems } from '../social'
 import { socialIcon } from '../socialIcons'
 
 // A blogger's accounts as a row of icons in their brand colours; the name
-// shows on hover, and a further account on the same platform keeps its name
-// beside the icon.
+// shows on hover, and where there are several accounts on one platform each
+// keeps its name beside the icon.
 const props = defineProps<{ links: { kind: string; url: string }[] }>()
 
 const items = computed(() => socialItems(props.links).map((s) => ({ ...s, icon: socialIcon(s.kind, s.url) })))

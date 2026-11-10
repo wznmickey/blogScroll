@@ -56,21 +56,21 @@ function handleOf(kind: string, url: string): string {
 export interface SocialItem {
   kind: string
   url: string
-  /** "X", or for a further account on the same platform "X (wznmickeyEn)". */
+  /** "X", or where there are several accounts on the platform "X (wznmickeyEn)". */
   label: string
-  /** The account's name, for a further account on the same platform. */
+  /** The account's name, where there are several accounts on the platform. */
   handle: string | null
 }
 
-/** A list of links named for showing: the first account on a platform by
- *  the platform alone, further ones with their account name too. */
+/** A list of links named for showing: the only account on a platform by
+ *  the platform alone; several accounts on one platform each with its name,
+ *  the first one too, so they can be told apart. */
 export function socialItems(links: { kind: string; url: string }[]): SocialItem[] {
-  const seen = new Set<string>()
+  const count = new Map<string, number>()
+  for (const { kind } of links) count.set(kind, (count.get(kind) ?? 0) + 1)
   return links.map(({ kind, url }) => {
     const platform = socialLabel(kind)
-    const first = !seen.has(kind)
-    seen.add(kind)
-    const handle = first ? null : handleOf(kind, url) || null
+    const handle = (count.get(kind) ?? 0) > 1 ? handleOf(kind, url) || null : null
     return { kind, url, label: handle ? `${platform} (${handle})` : platform, handle }
   })
 }
