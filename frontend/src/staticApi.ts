@@ -3,13 +3,24 @@
 // `feed-server export` writes to <base>/data/. See backend/src/export.rs.
 
 import type { BlogQuery, PostQuery } from './api'
-import type { BlogDetail, BlogSummary, Meta, Page, PostCard, PostDetail, TagsInfo } from './types'
+import { entries } from './library'
+import type { BlogDetail, BlogSummary, Meta, Page, PostCard, PostDetail, TagsInfo, TagStat } from './types'
 
 const DATA = `${import.meta.env.BASE_URL}data/`
-/** Shards (newest first) that "推荐" mixes from. */
+/** Shards (newest first) that "推荐" mixes from when nothing narrows it down. */
 const DISCOVER_SHARDS = 2
-/** Days of freshness a perfect match with the reader's interests is worth (as on the server). */
-const INTEREST_BOOST_DAYS = 40
+/**
+ * As on the server (backend/src/api.rs): days of freshness a perfect match
+ * with the reader's interests and a blog they know are worth (exploring turns
+ * both round), how far back a post already seen goes, posts per blog.
+ */
+const LEANINGS = {
+  discover: { interest: 40, blog: 5, perBlog: 8 },
+  explore: { interest: -40, blog: -20, perBlog: 3 },
+}
+const SEEN_PENALTY_DAYS = 60
+const SHOWN_PENALTY_DAYS = 10
+const WEIGHTS = { like: 3, save: 3, read: 1, follow: 2 }
 
 interface Index {
   generated_at: number
@@ -70,17 +81,20 @@ function page<T>(all: T[], cursor: string | null | undefined, limit: number): Pa
 }
 
 const lower = (s: string) => s.toLowerCase()
+const topOf = (category: string) => category.split('/')[0]
+const tagsOf = (p: PostCard) => [...p.tags, ...(p.auto_tags ?? [])]
 
 function postFilter(q: PostQuery) {
   const blogs = q.blogs ? new Set(q.blogs) : null
-  const category = q.category?.trim().toLowerCase()
+  const tag = q.tag?.trim().toLowerCase()
+  const cat = q.category
   return (p: PostCard) =>
-    (!q.tag || (p.blog.tags ?? []).includes(q.tag)) &&
+    (!q.dirtag || (p.blog.tags ?? []).includes(q.dirtag)) &&
     (!q.cover || !!p.cover) &&
-    (!q.topic || (p.topics ?? []).some((t) => t.id === q.topic)) &&
+    (!cat || p.category.id === cat || p.category.id.startsWith(`${cat}/`)) &&
     (!q.kind || (p.blog.kind ?? 'blog') === q.kind) &&
     (!blogs || blogs.has(p.blog.id)) &&
-    (!category || [...p.tags, ...(p.auto_tags ?? [])].some((t) => lower(t) === category))
+    (!tag || tagsOf(p).some((t) => lower(t) === tag))
 }
 
 /** Same scoring as the server's discover mode (backend/src/api.rs). */
@@ -88,23 +102,30 @@ function noise(id: number, seed: number) {
   return ((id * 2654435761 + seed) % 1000003) / 1000003
 }
 
-/** Reader interests as weighted terms: followed blogs' areas, opened posts' tags and areas. */
-async function interests(q: PostQuery, pool: PostCard[]): Promise<Map<string, number>> {
+/**
+ * The reader's interests as weighted features (`cat:tech`, `cat:tech/ai`,
+ * `tag:rust`), from followed blogs' categories and the cards of liked, saved
+ * and opened posts (kept in this browser, so they need not be in the feed).
+ */
+async function interests(q: PostQuery): Promise<Map<string, number>> {
   const terms = new Map<string, number>()
   const add = (term: string, w: number) => terms.set(term, (terms.get(term) ?? 0) + w)
+  const addPost = (p: PostCard, w: number) => {
+    add(`cat:${p.category.id}`, w)
+    if (p.category.parent) add(`cat:${p.category.parent.id}`, w)
+    for (const t of tagsOf(p)) add(`tag:${lower(t)}`, w)
+  }
   if (q.follow?.length) {
     const followed = new Set(q.follow)
     for (const b of await allBlogs()) {
-      if (followed.has(b.id)) for (const t of b.topics) add(`topic:${t.id}`, t.share ?? 0.5)
+      if (followed.has(b.id)) for (const c of b.categories ?? []) add(`cat:${c.id}`, WEIGHTS.follow * (c.share ?? 0.5))
     }
   }
-  if (q.read?.length) {
-    const read = new Set(q.read)
-    for (const p of pool) {
-      if (!read.has(p.id)) continue
-      for (const t of p.topics ?? []) add(`topic:${t.id}`, 1)
-      for (const t of [...p.tags, ...(p.auto_tags ?? [])]) add(`tag:${lower(t)}`, 1)
-    }
+  for (const name of ['like', 'save', 'read'] as const) {
+    const ids = new Set(q[name] ?? [])
+    if (!ids.size) continue
+    const list = entries(name === 'like' ? 'likes' : name === 'save' ? 'saves' : 'history').value
+    for (const e of list) if (ids.has(e.post.id)) addPost(e.post, WEIGHTS[name])
   }
   const norm = Math.sqrt([...terms.values()].reduce((s, w) => s + w * w, 0))
   if (norm > 0) for (const [k, w] of terms) terms.set(k, w / norm)
@@ -113,29 +134,45 @@ async function interests(q: PostQuery, pool: PostCard[]): Promise<Map<string, nu
 
 function similarity(p: PostCard, terms: Map<string, number>) {
   if (!terms.size) return 0
-  const keys = [
-    ...(p.topics ?? []).map((t) => `topic:${t.id}`),
-    ...[...p.tags, ...(p.auto_tags ?? [])].map((t) => `tag:${lower(t)}`),
-  ]
-  if (!keys.length) return 0
+  const keys = [`cat:${p.category.id}`, ...tagsOf(p).map((t) => `tag:${lower(t)}`)]
+  if (p.category.parent) keys.push(`cat:${p.category.parent.id}`)
   const hit = keys.reduce((s, k) => s + (terms.get(k) ?? 0), 0)
   return hit / Math.sqrt(keys.length)
 }
 
 async function discover(q: PostQuery, limit: number): Promise<Page<PostCard>> {
   const idx = await index()
-  const n = Math.min(DISCOVER_SHARDS, idx.feed_shards)
+  // A narrow channel needs the whole feed to fill a page.
+  const narrow = !!(q.tag || q.category || q.kind || q.dirtag)
+  const n = narrow ? idx.feed_shards : Math.min(DISCOVER_SHARDS, idx.feed_shards)
   const pool = (await Promise.all(Array.from({ length: n }, (_, i) => shard(i)))).flat()
-  const terms = await interests(q, pool)
+  const terms = await interests(q)
+  const explore = q.mode === 'explore'
+  const leaning = LEANINGS[explore ? 'explore' : 'discover']
+  const seen = new Set([...(q.like ?? []), ...(q.save ?? []), ...(q.read ?? [])])
+  const shown = new Set(q.shown ?? [])
+  // Blogs the reader knows: followed ones, and when exploring those they read.
+  const known = new Set(q.follow ?? [])
+  if (explore) {
+    for (const name of ['likes', 'saves', 'history'] as const) {
+      for (const e of entries(name).value) if (seen.has(e.post.id)) known.add(e.post.blog.id)
+    }
+  }
   const seed = Math.abs(q.seed ?? 0) % 2 ** 31
   const perBlog = new Map<number, number>()
   const scored: { p: PostCard; score: number }[] = []
   for (const p of pool.filter(postFilter(q))) {
     const rn = (perBlog.get(p.blog.id) ?? 0) + 1
     perBlog.set(p.blog.id, rn)
-    if (rn > 8) continue
+    if (rn > leaning.perBlog) continue
     const score =
-      p.sort_at / 86400 + noise(p.id, seed) * 14 - (rn - 1) * 5 + similarity(p, terms) * INTEREST_BOOST_DAYS
+      p.sort_at / 86400 +
+      noise(p.id, seed) * 14 -
+      (rn - 1) * 5 +
+      similarity(p, terms) * leaning.interest +
+      (known.has(p.blog.id) ? leaning.blog : 0) -
+      (seen.has(p.id) ? SEEN_PENALTY_DAYS : 0) -
+      (shown.has(p.id) ? SHOWN_PENALTY_DAYS : 0)
     scored.push({ p, score: p.undated ? score - 1e9 : score })
   }
   scored.sort((a, b) => b.score - a.score || b.p.id - a.p.id)
@@ -144,6 +181,17 @@ async function discover(q: PostQuery, limit: number): Promise<Page<PostCard>> {
     q.cursor,
     limit,
   )
+}
+
+/** Position of the first post at or after `start` in the newest-first feed. */
+async function positionOf(start: { sort_at: number; id: number }): Promise<number> {
+  const idx = await index()
+  for (let s = 0; s < idx.feed_shards; s++) {
+    const posts = await shard(s)
+    const i = posts.findIndex((p) => p.sort_at < start.sort_at || (p.sort_at === start.sort_at && p.id <= start.id))
+    if (i >= 0) return s * idx.shard_size + i
+  }
+  return idx.feed_posts
 }
 
 /** Walks the shards newest-first from `cursor` (a global position), loading them as needed. */
@@ -169,18 +217,20 @@ async function posts(q: PostQuery): Promise<Page<PostCard>> {
   if (q.blog !== undefined) return page((await blogFile(q.blog)).posts, q.cursor, limit)
 
   const search = q.q?.trim().toLowerCase()
-  const newestFirst = q.mode === 'latest' || q.mode === 'following' || !!search || !!q.category || !!q.blogs
+  const newestFirst = q.mode === 'latest' || !!search || !!q.blogs
   if (!newestFirst) return discover(q, limit)
 
   const filter = postFilter(q)
+  const cursor = q.cursor ?? (q.startAt ? String(await positionOf(q.startAt)) : null)
   return scan(
     (p) =>
       filter(p) &&
       (!search ||
         lower(p.title).includes(search) ||
         lower(p.excerpt).includes(search) ||
-        lower(p.blog.name).includes(search)),
-    q.cursor,
+        lower(p.blog.name).includes(search) ||
+        tagsOf(p).some((t) => lower(t) === search)),
+    cursor,
     limit,
   )
 }
@@ -210,8 +260,16 @@ function matchRank(b: BlogSummary, needle: string): number | null {
   if (name.includes(needle)) return 2
   if (lower(b.homepage).includes(needle)) return 3
   if (b.description && lower(b.description).includes(needle)) return 4
-  if (b.topics.some((t) => t.label.includes(needle) || needle.includes(t.label))) return 5
+  if ((b.categories ?? []).some((c) => c.label.includes(needle) || needle.includes(c.label))) return 5
   return null
+}
+
+async function searchTags(q: string, limit = 20): Promise<TagStat[]> {
+  const needle = q.trim().toLowerCase()
+  const all = await file<TagStat[]>('tag-index.json')
+  const hits = needle ? all.filter((t) => lower(t.name).includes(needle)) : all
+  // Exact match first; the index is already ordered by use.
+  return [...hits.filter((t) => lower(t.name) === needle), ...hits.filter((t) => lower(t.name) !== needle)].slice(0, limit)
 }
 
 async function blogs(q: BlogQuery): Promise<Page<BlogSummary>> {
@@ -226,8 +284,8 @@ async function blogs(q: BlogQuery): Promise<Page<BlogSummary>> {
   }
   const ranks = new Map<number, number>()
   const all = (await allBlogs())
-    .filter((b) => !q.tag || b.tags.some((t) => t.tag === q.tag))
-    .filter((b) => !q.topic || b.topics.some((t) => t.id === q.topic))
+    .filter((b) => !q.dirtag || b.tags.some((t) => t.tag === q.dirtag))
+    .filter((b) => !q.category || (b.categories ?? []).some((c) => c.id === topOf(q.category!)))
     .filter((b) => !q.kind || b.kind.id === q.kind)
     .filter((b) => !ids || ids.has(b.id))
     .filter((b) => {
@@ -243,6 +301,7 @@ async function blogs(q: BlogQuery): Promise<Page<BlogSummary>> {
 export const staticApi = {
   meta: () => file<Meta>('meta.json'),
   tags: () => file<TagsInfo>('tags.json'),
+  searchTags,
   posts,
   post,
   related,

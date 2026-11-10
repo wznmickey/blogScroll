@@ -2,7 +2,7 @@
 
 [server]
 listen = "127.0.0.1:8080"
-site_name = "博客漫游"
+site_name = "博客瀑布"
 # Built frontend; served at / when it exists.
 static_dir = "../frontend/dist"
 # API responses kept in memory (each lives 1–10 minutes; ETag + Cache-Control are sent).
@@ -13,7 +13,7 @@ path = "data/feed.db"
 
 [crawler]
 # Please identify yourself: site owners should be able to reach you.
-user_agent = "FeedWaterfall/0.1 (RSS reader; polite; +https://github.com/your-name/feed)"
+user_agent = "blogScroll/0.1 (RSS reader; low frequency; honours ETag, Cache-Control and Retry-After)"
 # Requests in flight at once, across all sites.
 max_concurrency = 4
 # Minimum seconds between two requests to the same host.
@@ -35,9 +35,10 @@ profile_refresh_days = 30
 # one batched request per blog this often; 0 turns it off. A 401/403 pauses it for 30 days.
 comment_count_hours = 24
 max_items_per_feed = 20
-# Older posts beyond this many per blog are deleted (keeps the database bounded).
-max_posts_per_blog = 50
-max_post_age_days = 365
+# Keep at most this many posts per blog, deleting the oldest; 0 = keep all (the default).
+max_posts_per_blog = 0
+# Skip feed entries older than this many days; 0 = no limit (the default).
+max_post_age_days = 0
 
 [sources.travellings]
 enabled = true
@@ -85,3 +86,14 @@ exclude = [
 # [[policy.feed_overrides]]
 # site = "https://example.com"
 # feed = "https://example.com/custom/rss.xml"
+
+# Back up what was crawled to a git repository, e.g. a private one on GitHub:
+# a text snapshot (one JSON file per blog) committed when something changed,
+# then pushed. git's own credentials are used: an SSH deploy key with write
+# access, or a token in the remote URL. Restore with
+# `feed-server restore --from <git_dir>` into a new, empty database.
+# [backup]
+# git_dir = "data/backup"                        # relative to this file
+# remote = "git@github.com:you/blogscroll-data.git"  # cloned into git_dir if it is not a repository yet
+# every_hours = 6                                # while serving; 0 = only `feed-server backup`
+# push = true

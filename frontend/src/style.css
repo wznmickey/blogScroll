@@ -60,6 +60,11 @@ html {
   scrollbar-gutter: stable;
 }
 
+/* The reader pane (reader.ts) takes the right part; the site lays out in the rest. */
+#app {
+  padding-right: var(--pane-w, 0px);
+}
+
 body {
   margin: 0;
   background: var(--bg-page);

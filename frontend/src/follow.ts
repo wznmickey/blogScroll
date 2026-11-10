@@ -1,13 +1,11 @@
-// Followed blogs live in a cookie on this device (no account). Recently opened
-// posts are kept in localStorage; both only steer what "推荐" shows first.
+// Followed blogs live in a cookie on this device (no account), so they work
+// the same with the server and on static hosting.
 
 import { readonly, ref } from 'vue'
 
 const COOKIE = 'follows'
 const MAX_FOLLOWS = 500
 const MAX_AGE_DAYS = 400
-const READ_KEY = 'recently-read'
-const MAX_READ = 30
 
 function readCookie(): number[] {
   const raw = document.cookie
@@ -49,24 +47,10 @@ export function toggleFollow(id: number) {
   followed.value = next
 }
 
-function readHistory(): number[] {
-  try {
-    const v = JSON.parse(localStorage.getItem(READ_KEY) ?? '[]')
-    return Array.isArray(v) ? v.filter((n) => Number.isInteger(n)).slice(0, MAX_READ) : []
-  } catch {
-    return []
-  }
-}
-
-export function recentlyRead(): number[] {
-  return readHistory()
-}
-
-export function markRead(id: number) {
-  try {
-    const next = [id, ...readHistory().filter((x) => x !== id)].slice(0, MAX_READ)
-    localStorage.setItem(READ_KEY, JSON.stringify(next))
-  } catch {
-    // Storage blocked (private mode): recommendations just stay generic.
-  }
+/** Restoring a backup: the given blogs, or those added to the current ones. */
+export function restoreFollows(ids: number[], mode: 'merge' | 'replace') {
+  const clean = ids.filter((n) => Number.isInteger(n) && n > 0)
+  const next = [...new Set(mode === 'merge' ? [...readCookie(), ...clean] : clean)].slice(0, MAX_FOLLOWS)
+  writeCookie(next)
+  followed.value = next
 }

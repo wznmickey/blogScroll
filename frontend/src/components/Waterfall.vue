@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch, type ComponentPublicInstance } from 'vue'
 import { rememberPosts } from '../api'
 import { COVER_DEFAULT, textCoverRatio } from '../format'
 import type { Page, PostCard } from '../types'
@@ -9,7 +9,11 @@ const props = defineProps<{
   load: (cursor: string | null) => Promise<Page<PostCard>>
   /** Changing this clears the feed and loads from the start. */
   resetKey: string
+  /** Cards to mark as new. */
+  isFresh?: (post: PostCard) => boolean
 }>()
+/** A card stayed on screen: at least half of it, for IMPRESSION_MS. Once per card per feed. */
+const emit = defineEmits<{ impression: [post: PostCard] }>()
 
 const root = ref<HTMLElement>()
 const sentinel = ref<HTMLElement>()
@@ -29,6 +33,7 @@ let width = 0
 const aspects = new Map<number, number>()
 
 const PRELOAD_PX = 1200
+const IMPRESSION_MS = 600
 
 function columnCount(w: number) {
   if (w < 640) return 2
@@ -70,8 +75,52 @@ function place(newItems: PostCard[], fromScratch: boolean) {
   columns.value = cols
 }
 
+// Impressions: which cards actually stayed on screen.
+const cardPosts = new WeakMap<Element, PostCard>()
+const dwell = new Map<Element, ReturnType<typeof setTimeout>>()
+let impressed = new Set<number>()
+let impressionObserver: IntersectionObserver | undefined
+
+function onVisibility(entries: IntersectionObserverEntry[]) {
+  for (const e of entries) {
+    const post = cardPosts.get(e.target)
+    if (!post || impressed.has(post.id)) continue
+    if (e.isIntersecting) {
+      if (!dwell.has(e.target)) {
+        dwell.set(
+          e.target,
+          setTimeout(() => {
+            dwell.delete(e.target)
+            if (impressed.has(post.id)) return
+            impressed.add(post.id)
+            emit('impression', post)
+          }, IMPRESSION_MS),
+        )
+      }
+    } else {
+      clearTimeout(dwell.get(e.target))
+      dwell.delete(e.target)
+    }
+  }
+}
+
+function trackCard(card: Element | ComponentPublicInstance | null, post: PostCard) {
+  const el = card && '$el' in card ? (card.$el as Element) : card
+  if (!el || cardPosts.get(el) === post || impressed.has(post.id)) return
+  cardPosts.set(el, post)
+  impressionObserver?.observe(el)
+}
+
+function resetImpressions() {
+  for (const t of dwell.values()) clearTimeout(t)
+  dwell.clear()
+  impressed = new Set()
+  impressionObserver?.disconnect()
+}
+
 function reset() {
   generation++
+  resetImpressions()
   items = []
   seen = new Set()
   cursor = null
@@ -138,11 +187,13 @@ onMounted(() => {
     { rootMargin: `0px 0px ${PRELOAD_PX}px 0px` },
   )
   intersectionObserver.observe(sentinel.value!)
+  impressionObserver = new IntersectionObserver(onVisibility, { threshold: 0.5 })
 })
 
 onBeforeUnmount(() => {
   resizeObserver?.disconnect()
   intersectionObserver?.disconnect()
+  resetImpressions()
 })
 
 watch(
@@ -165,7 +216,14 @@ defineExpose({ refresh: () => (reset(), loadMore()) })
   <div ref="root" class="waterfall">
     <div class="columns">
       <div v-for="(col, i) in columns" :key="i" :ref="(el) => setColEl(el, i)" class="column">
-        <FeedCard v-for="post in col" :key="post.id" :post="post" @aspect="(r) => aspects.set(post.id, r)" />
+        <FeedCard
+          v-for="post in col"
+          :key="post.id"
+          :ref="(c) => trackCard(c as ComponentPublicInstance | null, post)"
+          :post="post"
+          :fresh="isFresh?.(post)"
+          @aspect="(r) => aspects.set(post.id, r)"
+        />
       </div>
     </div>
 

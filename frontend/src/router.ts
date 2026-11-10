@@ -9,6 +9,8 @@ export const router = createRouter({
     { path: '/', name: 'home', component: HomeView },
     { path: '/blogs', name: 'blogs', component: () => import('./views/BlogsView.vue') },
     { path: '/blog/:id(\\d+)', name: 'blog', component: () => import('./views/BlogView.vue') },
+    { path: '/search', name: 'search', component: () => import('./views/SearchView.vue') },
+    { path: '/me', name: 'me', component: () => import('./views/MeView.vue') },
     { path: '/about', name: 'about', component: () => import('./views/AboutView.vue') },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],

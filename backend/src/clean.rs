@@ -129,10 +129,20 @@ const NOISE_TAGS: &[&str] = &[
 /// A feed category cleaned for display, or `None` when it carries no meaning.
 pub fn tag(raw: &str) -> Option<String> {
     let t = html::to_text(raw);
-    let t = t.trim().trim_start_matches('#').trim();
+    let t = tag_prefix_free(t.trim().trim_start_matches('#').trim());
     let lower = t.to_lowercase();
     let keep = !t.is_empty() && t.chars().count() <= 24 && !NOISE_TAGS.contains(&lower.as_str());
     keep.then(|| t.to_string())
+}
+
+static TAG_PREFIX: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)^(?:tags?|categor(?:y|ies)|分类|标签)\s*[:：]\s*"));
+
+/// Some feeds spell the kind into the name: "tag:Docker", "category:教程".
+pub fn tag_prefix_free(t: &str) -> &str {
+    match TAG_PREFIX.find(t) {
+        Some(m) if m.end() < t.len() => t[m.end()..].trim(),
+        _ => t,
+    }
 }
 
 /// Hosts that mean "the generator was never configured" (Hexo's default `url`).

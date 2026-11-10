@@ -11,6 +11,7 @@ pub struct Config {
     pub crawler: CrawlerConfig,
     pub sources: SourcesConfig,
     pub policy: PolicyConfig,
+    pub backup: BackupConfig,
 }
 
 impl Config {
@@ -29,6 +30,9 @@ impl Config {
             if o.path.is_relative() {
                 o.path = dir.join(&o.path);
             }
+        }
+        if let Some(p) = cfg.backup.git_dir.as_mut().filter(|p| p.is_relative()) {
+            *p = dir.join(&*p);
         }
         Ok(cfg)
     }
@@ -59,7 +63,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             listen: "127.0.0.1:8080".into(),
-            site_name: "博客漫游".into(),
+            site_name: "博客瀑布".into(),
             static_dir: Some("../frontend/dist".into()),
             api_cache_entries: 512,
         }
@@ -110,9 +114,9 @@ pub struct CrawlerConfig {
     pub comment_count_hours: u32,
     /// Only the newest N entries of a feed are read on each fetch.
     pub max_items_per_feed: usize,
-    /// Older posts beyond this many per blog are deleted, keeping the database bounded.
+    /// Older posts beyond this many per blog are deleted; 0 (the default) keeps them all.
     pub max_posts_per_blog: usize,
-    /// Entries older than this are ignored (0 = keep everything).
+    /// Entries older than this are ignored; 0 (the default) keeps them all.
     pub max_post_age_days: u32,
 }
 
@@ -120,9 +124,9 @@ impl Default for CrawlerConfig {
     fn default() -> Self {
         Self {
             user_agent: concat!(
-                "FeedWaterfall/",
+                "blogScroll/",
                 env!("CARGO_PKG_VERSION"),
-                " (RSS reader; polite; +https://github.com/your-name/feed)"
+                " (RSS reader; low frequency; honours ETag, Cache-Control and Retry-After)"
             )
             .into(),
             max_concurrency: 4,
@@ -138,8 +142,8 @@ impl Default for CrawlerConfig {
             profile_refresh_days: 30,
             comment_count_hours: 24,
             max_items_per_feed: 20,
-            max_posts_per_blog: 50,
-            max_post_age_days: 365,
+            max_posts_per_blog: 0,
+            max_post_age_days: 0,
         }
     }
 }
@@ -236,4 +240,33 @@ pub struct Grant {
 pub struct FeedOverride {
     pub site: String,
     pub feed: String,
+}
+
+/// Commits a text snapshot of what was crawled to a git repository (e.g. a
+/// private one on GitHub). See `backup.rs`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BackupConfig {
+    /// Working copy to write and commit in; unset = no backups. Relative
+    /// paths are relative to the config file's directory.
+    pub git_dir: Option<PathBuf>,
+    /// Cloned into `git_dir` when that is not a repository yet, e.g.
+    /// `git@github.com:you/blogscroll-data.git`. Credentials are git's own
+    /// (an SSH deploy key, or a token in the URL).
+    pub remote: Option<String>,
+    /// While serving, commit this often (hours); 0 = only `feed-server backup`.
+    pub every_hours: u32,
+    /// Push after each commit.
+    pub push: bool,
+}
+
+impl Default for BackupConfig {
+    fn default() -> Self {
+        Self {
+            git_dir: None,
+            remote: None,
+            every_hours: 6,
+            push: true,
+        }
+    }
 }

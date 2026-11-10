@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // The blogger's profile next to one of their posts. Links stay on this site
-// (the blog's page here, its topics and tags); the only way out is the post's
+// (the blog's page here, its categories and tags); the only way out is the post's
 // own "阅读原文" button.
 import { computed, ref, watch } from 'vue'
 import { blogDetail } from '../api'
@@ -56,15 +56,25 @@ const longAbout = computed(() => (about.value?.length ?? 0) > 110)
       </button>
     </div>
 
-    <p v-if="detail?.topics?.length || detail?.top_tags?.length" class="chips">
-      <RouterLink v-for="t in detail?.topics ?? []" :key="t.id" :to="{ path: '/', query: { topic: t.id } }" class="chip topic">
-        {{ t.label }}
-      </RouterLink>
+    <p v-if="detail?.categories?.length" class="chips">
+      <span class="label">常写</span>
       <RouterLink
-        v-for="t in (detail?.top_tags ?? []).slice(0, 5)"
+        v-for="c in detail.categories"
+        :key="c.id"
+        :to="{ path: '/', query: { c: `cat:${c.id}` } }"
+        class="chip topic"
+        :title="c.share ? `约 ${Math.round(c.share * 100)}% 的文章` : undefined"
+      >
+        {{ c.label }}
+      </RouterLink>
+    </p>
+    <p v-if="detail?.top_tags?.length" class="chips tags">
+      <span class="label">标签</span>
+      <RouterLink
+        v-for="t in detail.top_tags.slice(0, 6)"
         :key="t"
-        :to="{ path: '/', query: { category: t } }"
-        class="chip"
+        :to="{ path: '/', query: { c: `tag:${t}` } }"
+        class="tag"
         >#{{ t }}</RouterLink
       >
     </p>
@@ -144,6 +154,7 @@ const longAbout = computed(() => (about.value?.length ?? 0) > 110)
 .chips {
   display: flex;
   flex-wrap: wrap;
+  align-items: baseline;
   gap: 6px;
   margin: 10px 0 0;
 }
@@ -160,6 +171,18 @@ const longAbout = computed(() => (about.value?.length ?? 0) > 110)
 }
 .chip:hover {
   color: var(--text);
+}
+.label {
+  color: var(--text-3);
+  font-size: 12px;
+}
+.chips.tags {
+  gap: 4px 10px;
+  margin-top: 6px;
+}
+.tag {
+  color: var(--link);
+  font-size: 12px;
 }
 .social {
   display: flex;

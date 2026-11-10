@@ -7,4 +7,4 @@
 path = "data/feed.db"
 
 [crawler]
-user_agent = "FeedWaterfall/0.1 (RSS reader; low frequency; honours ETag, Cache-Control and Retry-After)"
+user_agent = "blogScroll/0.1 (RSS reader; low frequency; honours ETag, Cache-Control and Retry-After)"

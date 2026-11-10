@@ -1,6 +1,20 @@
 import { shallowRef } from 'vue'
 import { staticApi } from './staticApi'
-import type { BlogDetail, BlogSort, BlogSummary, FeedMode, Meta, Page, PostCard, PostDetail, TagCount, TagsInfo } from './types'
+import type {
+  BlogDetail,
+  BlogSort,
+  BlogSummary,
+  CategoryNode,
+  CategoryRef,
+  FeedMode,
+  Meta,
+  Page,
+  PostCard,
+  PostDetail,
+  TagCount,
+  TagsInfo,
+  TagStat,
+} from './types'
 
 type Params = Record<string, string | number | null | undefined>
 
@@ -15,27 +29,32 @@ async function get<T>(path: string, params: Params = {}): Promise<T> {
 }
 
 export interface PostQuery {
-  /** `following` is `latest` limited to `blogs`. */
   mode?: FeedMode
   cursor?: string | null
   seed?: number
   blog?: number
+  /** Title, excerpt, blog name, or exactly a tag. */
   q?: string
   limit?: number
   /** Directory tag of the blog (开往: tech, life, ...). */
+  dirtag?: string
+  /** A tag of the post: the author's own or one derived from its keywords. */
   tag?: string
-  /** A tag of the post: its own category or one derived from its keywords. */
+  /** `tech` (with its sub-categories) or `tech/ai`. */
   category?: string
-  /** Content area id (dev, travel, ...). */
-  topic?: string
   /** Source kind id (blog, news, podcast, ...). */
   kind?: string
   /** Only these blogs. */
   blogs?: number[]
-  /** Discover leans towards what these blogs write about ... */
+  /** Personalised discover: followed blogs, and liked, saved and opened posts. */
   follow?: number[]
-  /** ... and towards posts like these. */
+  like?: number[]
+  save?: number[]
   read?: number[]
+  /** Shown lately but not opened: passed over a little. */
+  shown?: number[]
+  /** Newest-first feeds: start at this post (inclusive) instead of the top. */
+  startAt?: { sort_at: number; id: number }
   /** Only posts with a cover image. */
   cover?: boolean
 }
@@ -44,8 +63,9 @@ export interface BlogQuery {
   offset?: number
   limit?: number
   q?: string
-  tag?: string
-  topic?: string
+  dirtag?: string
+  /** A top-level category. */
+  category?: string
   kind?: string
   /** Only these blogs. */
   ids?: number[]
@@ -54,23 +74,43 @@ export interface BlogQuery {
 
 const list = (ids?: number[]) => (ids?.length ? ids.join(',') : undefined)
 
+// A server from before categories (until it is restarted on the new version)
+// sends `topics` instead of `category`, and its popular tags as `categories`.
+const OTHER: CategoryRef = { id: 'other', label: '其他' }
+const withCategory = <T extends PostCard>(p: T): T => (p.category ? p : { ...p, category: OTHER })
+function upgradeTags(t: TagsInfo): TagsInfo {
+  const old = (t.categories as unknown as { id?: string }[]).some((c) => !c.id)
+  return old
+    ? { ...t, categories: [], popular_tags: t.categories as unknown as TagStat[] }
+    : { ...t, popular_tags: t.popular_tags ?? [] }
+}
+
 /** Built for static hosting (GitHub Pages): data comes from exported JSON files. */
 export const isStatic = import.meta.env.VITE_STATIC === '1'
 
 const liveApi = {
   meta: () => get<Meta>('/api/meta'),
   tags: () => get<TagsInfo>('/api/tags'),
-  posts: ({ cover, blogs, follow, read, mode, ...q }: PostQuery) =>
-    get<Page<PostCard>>('/api/posts', {
+  /** Tags whose name contains `q`, most used first. */
+  searchTags: (q: string, limit = 20) => get<TagStat[]>('/api/tags/search', { q, limit }),
+  posts: async ({ cover, blogs, follow, like, save, read, shown, startAt, cursor, ...q }: PostQuery) => {
+    const page = await get<Page<PostCard>>('/api/posts', {
       ...q,
-      mode: mode === 'following' ? 'latest' : mode,
+      // The cursor is exclusive: one past the post itself.
+      cursor: cursor ?? (startAt ? `${startAt.sort_at}.${startAt.id + 1}` : undefined),
       cover: cover ? 1 : undefined,
       blogs: list(blogs),
       follow: list(follow),
+      like: list(like),
+      save: list(save),
       read: list(read),
-    }),
-  post: (id: number) => get<PostDetail>(`/api/posts/${id}`),
-  related: (id: number, limit = 8) => get<PostCard[]>(`/api/posts/${id}/related`, { limit }),
+      shown: list(shown),
+    })
+    return { ...page, items: page.items.map(withCategory) }
+  },
+  post: async (id: number) => withCategory(await get<PostDetail>(`/api/posts/${id}`)),
+  related: async (id: number, limit = 8) =>
+    (await get<PostCard[]>(`/api/posts/${id}/related`, { limit })).map(withCategory),
   blogs: ({ ids, ...q }: BlogQuery) => get<Page<BlogSummary>>('/api/blogs', { ...q, ids: list(ids) }),
   blog: (id: number) => get<BlogDetail>(`/api/blogs/${id}`),
 }
@@ -107,7 +147,7 @@ export const tagsInfo = shallowRef<TagsInfo | null>(null)
 export function loadTags() {
   api
     .tags()
-    .then((t) => (tagsInfo.value = t))
+    .then((t) => (tagsInfo.value = upgradeTags(t)))
     .catch(() => {})
 }
 
@@ -124,8 +164,23 @@ export function blogDetail(id: number): Promise<BlogDetail> {
   return p
 }
 
-export function topicLabel(id: string): string {
-  return tagsInfo.value?.topics.find((t) => t.id === id)?.label ?? id
+/** Every category, top-level ones followed by their sub-categories. */
+export function allCategories(info: TagsInfo | null = tagsInfo.value): CategoryNode[] {
+  return (info?.categories ?? []).flatMap((c) => [c, ...(c.children ?? [])])
+}
+
+export function findCategory(id: string): CategoryNode | undefined {
+  return allCategories().find((c) => c.id === id)
+}
+
+/** "技术 › AI", "旅行". */
+export function categoryName(c: CategoryRef | string): string {
+  if (typeof c !== 'string') return c.parent ? `${c.parent.label} › ${c.label}` : c.label
+  const [top, sub] = c.split('/')
+  const parent = tagsInfo.value?.categories.find((x) => x.id === top)
+  if (!sub) return parent?.label ?? c
+  const child = parent?.children?.find((x) => x.id === c)
+  return child ? `${parent!.label} › ${child.label}` : c
 }
 
 export function kindLabel(id: string): string {

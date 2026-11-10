@@ -1,5 +1,6 @@
 mod analyze;
 mod api;
+mod backup;
 mod cache;
 mod clean;
 mod comments;
@@ -35,7 +36,7 @@ use crate::config::Config;
 use crate::crawler::Crawler;
 
 #[derive(Parser)]
-#[command(about = "RSS waterfall for blog webrings")]
+#[command(about = "blogScroll (博客瀑布): an RSS waterfall for blog webrings")]
 struct Cli {
     #[arg(short, long, env = "FEED_CONFIG", default_value = "config.toml")]
     config: PathBuf,
@@ -81,9 +82,19 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
-    /// Recompute keywords, tags, topics and related-post vectors for every post
+    /// Recompute keywords, tags, categories and related-post vectors for every post
     /// (normally done by `serve` every few hours, and before `export`).
     Analyze,
+    /// Write a text snapshot of everything crawled into `[backup] git_dir`,
+    /// commit it if anything changed, and push (normally done by `serve`
+    /// every `every_hours`).
+    Backup,
+    /// Fill a new, empty database from a backup snapshot directory.
+    Restore {
+        /// The backup repository's working copy.
+        #[arg(long)]
+        from: PathBuf,
+    },
     /// Write the site's data as static JSON (for GitHub Pages and similar).
     Export {
         /// Output directory, e.g. ../frontend/dist/data
@@ -113,6 +124,24 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let cfg = Arc::new(Config::load(&cli.config)?);
     let pool = db::connect(&cfg.database.path).await.context("opening database")?;
+    // Before anything writes to the (empty) database.
+    if let Some(Command::Restore { from }) = &cli.command {
+        let s = backup::restore(
+            &pool,
+            from,
+            cfg.crawler.refresh_secs as i64,
+            cfg.crawler.discovery_retry_secs as i64,
+        )
+        .await?;
+        println!(
+            "restored {} blogs and {} posts from {}",
+            s.blogs,
+            s.posts,
+            from.display()
+        );
+        pool.close().await;
+        return Ok(());
+    }
     db::apply_policy(&pool, &cfg).await?;
 
     let directories = sources::enabled(&cfg);
@@ -174,6 +203,11 @@ async fn main() -> anyhow::Result<()> {
             let s = analyze::retag_all(&pool).await?;
             println!("{s:#?}");
         }
+        Command::Backup => {
+            let o = backup::backup(&pool, &cfg.backup).await?;
+            println!("{o:#?}");
+        }
+        Command::Restore { .. } => unreachable!("handled above"),
         Command::Export {
             out,
             feed_posts,
@@ -206,6 +240,9 @@ async fn main() -> anyhow::Result<()> {
                 });
             } else {
                 tokio::spawn(crawler.clone().run());
+            }
+            if cfg.backup.git_dir.is_some() && cfg.backup.every_hours > 0 {
+                tokio::spawn(backup::run_periodically(pool.clone(), cfg.backup.clone()));
             }
             let state = AppState {
                 pool: pool.clone(),

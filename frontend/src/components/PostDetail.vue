@@ -1,14 +1,16 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { api, cachedPost, rememberPosts } from '../api'
-import { markRead } from '../follow'
+import { api, cachedPost, categoryName, rememberPosts } from '../api'
 import { fullDate, hostOf, hue, initial } from '../format'
+import { recordVisit } from '../library'
+import { openInReader } from '../reader'
 import type { PostCard, PostDetail } from '../types'
 import BlogAboutCard from './BlogAboutCard.vue'
 import BlogAvatar from './BlogAvatar.vue'
 import CommentEmbed from './CommentEmbed.vue'
 import FollowButton from './FollowButton.vue'
+import LibraryButton from './LibraryButton.vue'
 import TextCover from './TextCover.vue'
 
 const props = defineProps<{ id: number }>()
@@ -24,6 +26,7 @@ const comments = computed(() => detail.value?.comments ?? null)
 const commentsLink = computed(() => post.value?.comments_url ?? post.value?.url)
 const ownTags = computed(() => post.value?.tags ?? [])
 const autoTags = computed(() => post.value?.auto_tags ?? [])
+const category = computed(() => (post.value?.category && post.value.category.id !== 'other' ? post.value.category : null))
 
 const route = useRoute()
 const related = ref<PostCard[]>([])
@@ -33,7 +36,7 @@ const relatedLink = (id: number) => ({ path: route.path, query: { ...route.query
 onMounted(async () => {
   document.addEventListener('keydown', onKey)
   document.documentElement.style.overflow = 'hidden'
-  markRead(props.id)
+  if (card.value) recordVisit(card.value)
   api
     .related(props.id, 6)
     .then((r) => {
@@ -43,6 +46,7 @@ onMounted(async () => {
     .catch(() => {})
   try {
     detail.value = await api.post(props.id)
+    if (!card.value) recordVisit(detail.value)
   } catch {
     error.value = true
   }
@@ -55,6 +59,15 @@ onBeforeUnmount(() => {
 
 function onKey(e: KeyboardEvent) {
   if (e.key === 'Escape') emit('close')
+}
+
+// On a wide screen the original opens beside the feed, and this closes.
+function openBeside(e: MouseEvent, url: string, title: string) {
+  const p = post.value
+  if (p && openInReader({ url, title, blog: p.blog, post: p }, e)) {
+    e.preventDefault()
+    emit('close')
+  }
 }
 </script>
 
@@ -110,19 +123,16 @@ function onKey(e: KeyboardEvent) {
                 以上为 RSS 摘要。为尊重作者，完整内容请到原博客阅读。
               </p>
             </template>
-            <p v-if="ownTags.length || autoTags.length || post.topics?.length" class="tags">
-              <RouterLink
-                v-for="t in post.topics ?? []"
-                :key="t.id"
-                :to="{ path: '/', query: { topic: t.id } }"
-                class="topic"
-                >{{ t.label }}</RouterLink
-              >
-              <RouterLink v-for="t in ownTags" :key="t" :to="{ path: '/', query: { category: t } }">#{{ t }}</RouterLink>
+            <p v-if="category" class="category">
+              <span class="label">分类</span>
+              <RouterLink :to="{ path: '/', query: { c: `cat:${category.id}` } }">{{ categoryName(category) }}</RouterLink>
+            </p>
+            <p v-if="ownTags.length || autoTags.length" class="tags">
+              <RouterLink v-for="t in ownTags" :key="t" :to="{ path: '/', query: { c: `tag:${t}` } }">#{{ t }}</RouterLink>
               <RouterLink
                 v-for="t in autoTags"
                 :key="t"
-                :to="{ path: '/', query: { category: t } }"
+                :to="{ path: '/', query: { c: `tag:${t}` } }"
                 class="auto"
                 title="根据摘要自动提取的标签"
                 >#{{ t }}</RouterLink
@@ -141,7 +151,14 @@ function onKey(e: KeyboardEvent) {
                 <span class="comments-title">评论</span>
                 <span v-if="post.comment_count != null" class="comments-count">{{ post.comment_count }}</span>
                 <span v-if="comments" class="comments-sys">{{ comments.system }}</span>
-                <a :href="commentsLink" target="_blank" rel="noopener" class="comments-go">去原文评论 ↗</a>
+                <a
+                  :href="commentsLink"
+                  target="_blank"
+                  rel="noopener"
+                  class="comments-go"
+                  @click="openBeside($event, commentsLink!, `评论 · ${post.title}`)"
+                  >去原文评论 ↗</a
+                >
               </header>
               <CommentEmbed v-if="comments?.embed" :key="post.id" :config="comments.embed" />
             </section>
@@ -174,8 +191,17 @@ function onKey(e: KeyboardEvent) {
           </div>
 
           <footer class="actions">
+            <LibraryButton :post="post" list="likes" :size="22" label class="act" />
+            <LibraryButton :post="post" list="saves" :size="22" label class="act" />
             <span class="host">{{ hostOf(post.url) }}</span>
-            <a :href="post.url" target="_blank" rel="noopener" class="btn btn-primary read">阅读原文 ↗</a>
+            <a
+              :href="post.url"
+              target="_blank"
+              rel="noopener"
+              class="btn btn-primary read"
+              @click="openBeside($event, post.url, post.title)"
+              >阅读原文 ↗</a
+            >
           </footer>
         </section>
       </template>
@@ -192,6 +218,8 @@ function onKey(e: KeyboardEvent) {
 .overlay {
   position: fixed;
   inset: 0;
+  /* Beside the reader pane, not over it. */
+  right: var(--pane-w, 0px);
   z-index: 50;
   display: grid;
   place-items: center;
@@ -308,13 +336,22 @@ function onKey(e: KeyboardEvent) {
   color: var(--link);
   font-size: 14px;
 }
-.tags .topic {
-  padding: 0 8px;
+.category {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 12px 0 0;
+  font-size: 13px;
+}
+.category .label {
+  color: var(--text-3);
+}
+.category a {
+  padding: 0 10px;
   border-radius: 999px;
   background: var(--accent-soft);
   color: var(--accent);
-  font-size: 12px;
-  line-height: 22px;
+  line-height: 24px;
 }
 .tags .auto {
   opacity: 0.7;
@@ -416,17 +453,22 @@ function onKey(e: KeyboardEvent) {
 .actions {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 16px;
   padding: 14px 24px calc(14px + var(--safe-b));
   border-top: 1px solid var(--line);
 }
 .host {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
+  text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-3);
   font-size: 13px;
+}
+.act {
+  height: 40px;
 }
 .read {
   height: 40px;
@@ -580,7 +622,14 @@ function onKey(e: KeyboardEvent) {
   }
   .read {
     flex: 1;
-    max-width: 260px;
+    max-width: 220px;
+    margin-left: auto;
+  }
+  .host {
+    display: none;
+  }
+  .act :deep(span) {
+    display: none;
   }
 }
 </style>

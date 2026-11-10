@@ -4,7 +4,7 @@
 #   1. Settings → Pages → Source: "GitHub Actions"
 #   2. Settings → Secrets and variables → Actions → Variables:
 #        ENABLE_PAGES_CRAWL = true
-#        FEED_USER_AGENT    = FeedWaterfall/0.1 (RSS reader; +https://<how to reach you>)
+#        FEED_USER_AGENT    = blogScroll/0.1 (RSS reader; +https://<how to reach you>)
 # Do not also run the server image against the same blogs; that doubles their load.
 name: Crawl & publish (GitHub Pages)
 

@@ -3,6 +3,8 @@
 //! - API responses are kept in a small in-memory cache (bounded by entry
 //!   count, short TTL per endpoint) and get a weak ETag, so repeat requests
 //!   cost neither a database query nor, on revalidation, a body.
+//! - Personalised requests (carrying a reader's follows, likes, saves or
+//!   history) are neither kept here nor marked cacheable by others.
 //! - Static files: hashed `/assets/*` are immutable for a year, HTML is always
 //!   revalidated so a new deploy shows up immediately.
 
@@ -87,9 +89,25 @@ fn ttl(path: &str) -> Duration {
     Duration::from_secs(secs)
 }
 
+/// Query parameters that carry what one reader follows, likes, saves, read or was shown.
+const PERSONAL_PARAMS: &[&str] = &["follow", "like", "save", "read", "shown"];
+
+fn is_personal(query: Option<&str>) -> bool {
+    query.is_some_and(|q| {
+        q.split('&')
+            .any(|kv| PERSONAL_PARAMS.contains(&kv.split('=').next().unwrap_or_default()))
+    })
+}
+
 pub async fn api_cache(State(cache): State<Arc<ResponseCache>>, req: Request, next: Next) -> Response {
     if req.method() != Method::GET {
         return next.run(req).await;
+    }
+    if is_personal(req.uri().query()) {
+        let mut resp = next.run(req).await;
+        resp.headers_mut()
+            .insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
+        return resp;
     }
     let key = req.uri().to_string();
     let if_none_match = req.headers().get(IF_NONE_MATCH).cloned();
@@ -243,6 +261,21 @@ mod tests {
         tokio::time::advance(Duration::from_secs(61)).await;
         call(&app, "/api/posts?i=9", None).await;
         assert_eq!(hits.load(Ordering::SeqCst), 11, "expired entry is fetched again");
+    }
+
+    #[tokio::test]
+    async fn personalised_requests_bypass_the_cache() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let cache = Arc::new(ResponseCache::new(10));
+        let app = app(cache.clone(), hits.clone());
+        for _ in 0..2 {
+            let r = call(&app, "/api/posts?seed=1&like=3,4", None).await;
+            assert_eq!(r.headers()[CACHE_CONTROL], "private, no-store");
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert_eq!(cache.len(), 0);
+        call(&app, "/api/posts?seed=1&likes_shown=1", None).await;
+        assert_eq!(cache.len(), 1, "only the exact parameter names count");
     }
 
     #[test]

@@ -4,9 +4,10 @@ import { useRoute } from 'vue-router'
 import { COVER_DEFAULT, clampCover, relativeTime, textCoverRatio } from '../format'
 import type { PostCard } from '../types'
 import BlogAvatar from './BlogAvatar.vue'
+import LibraryButton from './LibraryButton.vue'
 import TextCover from './TextCover.vue'
 
-const props = defineProps<{ post: PostCard }>()
+const props = defineProps<{ post: PostCard; fresh?: boolean }>()
 const emit = defineEmits<{ aspect: [ratio: number] }>()
 
 const route = useRoute()
@@ -31,6 +32,7 @@ function onLoad(e: Event) {
 <template>
   <article class="card">
     <RouterLink :to="detailLink" class="body">
+      <span v-if="fresh" class="fresh" title="上次之后的新文章">新</span>
       <div v-if="showImage" class="cover" :style="{ aspectRatio: `1 / ${ratio ?? COVER_DEFAULT}` }">
         <img
           :src="post.cover!"
@@ -59,6 +61,7 @@ function onLoad(e: Event) {
       <time v-else-if="!post.undated" class="time" :datetime="new Date(post.sort_at * 1000).toISOString()">{{
         relativeTime(post.sort_at)
       }}</time>
+      <LibraryButton :post="post" list="likes" :size="15" class="like" />
     </footer>
   </article>
 </template>
@@ -70,7 +73,21 @@ function onLoad(e: Event) {
   overflow: hidden;
 }
 .body {
+  position: relative;
   display: block;
+}
+.fresh {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 1;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
 }
 .cover {
   overflow: hidden;
@@ -104,8 +121,7 @@ function onLoad(e: Event) {
 .foot {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  gap: 6px;
   padding: 2px 4px 6px;
   font-size: 12px;
   color: var(--text-2);
@@ -126,10 +142,23 @@ function onLoad(e: Event) {
 }
 .time {
   flex: none;
+  margin-left: auto;
   color: var(--text-3);
+}
+.like {
+  margin-left: 2px;
+  padding: 2px;
+}
+.count + .like,
+.time + .like {
+  margin-left: 0;
+}
+.author + .like {
+  margin-left: auto;
 }
 .count {
   flex: none;
+  margin-left: auto;
   display: inline-flex;
   align-items: center;
   gap: 3px;

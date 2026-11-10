@@ -14,7 +14,10 @@ import { fullDate } from '../format'
       <h2>数据来源</h2>
       <ul>
         <li v-for="d in meta?.directories ?? []" :key="d.id">
-          <a :href="d.homepage" target="_blank" rel="noopener">{{ d.name }}</a> 的公开成员列表
+          <template v-if="d.homepage">
+            <a :href="d.homepage" target="_blank" rel="noopener">{{ d.name }}</a> 的公开成员列表
+          </template>
+          <template v-else>站长另外订阅的 RSS（{{ d.name }}）</template>
         </li>
       </ul>
       <p v-if="meta" class="stats">
@@ -23,6 +26,15 @@ import { fullDate } from '../format'
         <template v-if="meta.stats.last_directory_sync">成员列表更新于 {{ fullDate(meta.stats.last_directory_sync) }}。</template>
         <template v-if="isStatic">本页是定时生成的静态版本，数据生成于 {{ fullDate(meta.generated_at) }}。</template>
       </p>
+
+      <h2>你的数据</h2>
+      <ul>
+        <li>
+          不需要账号。关注、喜欢、收藏、浏览历史、刷到过的文章、各频道看到的位置和频道设置只保存在你这台设备的浏览器里。
+        </li>
+        <li>「推荐」会参考这些记录：请求时只带上文章和博客的编号，服务器不会写进数据库，也不缓存这类请求；不想要个性化可以看「发现」。</li>
+        <li>换设备或清理浏览器前，可以在<RouterLink to="/me?tab=backup">「我的 → 备份与恢复」</RouterLink>下载备份文件，之后再恢复。</li>
+      </ul>
 
       <h2>我们如何抓取</h2>
       <ul>

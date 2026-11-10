@@ -29,9 +29,8 @@ pub struct ParsedFeed {
     /// RSS `<ttl>` in minutes: how long the publisher says the feed may be cached.
     pub ttl_minutes: Option<u32>,
     pub items: Vec<ParsedItem>,
-    /// What the entries carry, for telling podcasts and video channels from blogs.
+    /// Entries carrying audio, for telling podcasts from blogs.
     pub audio_items: usize,
-    pub video_items: usize,
 }
 
 impl ParsedFeed {
@@ -41,7 +40,10 @@ impl ParsedFeed {
         if self.audio_items * 2 >= n && self.audio_items > 0 {
             return Some("podcast");
         }
-        if self.video_items * 2 >= n && self.video_items > 0 {
+        // Entries that link to video pages, not ones that merely attach a clip
+        // (a family blog with videos is still a blog).
+        let videos = self.items.iter().filter(|i| is_video_page(&i.url)).count();
+        if videos * 2 >= n && videos > 0 {
             return Some("video");
         }
         let forum_items = self.items.iter().filter(|i| FORUM_URL.is_match(i.url.path())).count();
@@ -63,6 +65,32 @@ impl ParsedFeed {
         let spam = self.items.iter().filter(|i| clean::is_spam(&i.title)).count();
         spam >= 3 && spam * 2 >= self.items.len()
     }
+}
+
+/// Video sites whose channel feeds link each entry to a video page.
+const VIDEO_HOSTS: &[&str] = &[
+    "youtube.com",
+    "youtu.be",
+    "bilibili.com",
+    "b23.tv",
+    "vimeo.com",
+    "ixigua.com",
+    "douyin.com",
+    "acfun.cn",
+    "nicovideo.jp",
+    "v.qq.com",
+    "youku.com",
+];
+
+/// PeerTube's video pages, on any instance.
+static PEERTUBE_URL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^/(?:w|videos/watch)/[\w-]+/?$").unwrap());
+
+fn is_video_page(url: &Url) -> bool {
+    let host = url.host_str().unwrap_or_default();
+    VIDEO_HOSTS
+        .iter()
+        .any(|v| host == *v || host.strip_suffix(v).is_some_and(|rest| rest.ends_with('.')))
+        || PEERTUBE_URL.is_match(url.path())
 }
 
 /// Topic URLs of common forum software: Discourse, Discuz!, Flarum, NodeBB.
@@ -129,7 +157,6 @@ fn convert(
         })
     };
     let audio_items = feed.entries.iter().filter(|e| has_media(e, "audio/")).count();
-    let video_items = feed.entries.iter().filter(|e| has_media(e, "video/")).count();
     let items = feed
         .entries
         .iter()
@@ -158,7 +185,6 @@ fn convert(
         ttl_minutes: feed.ttl,
         items,
         audio_items,
-        video_items,
     }
 }
 
@@ -623,6 +649,35 @@ mod tests {
                 "https://f.example/moments/#moment-3c4d"
             ]
         );
+    }
+
+    #[test]
+    fn video_channels_link_to_video_pages() {
+        let feed = |links: &[&str]| ParsedFeed {
+            title: None,
+            link: None,
+            icon: None,
+            ttl_minutes: None,
+            items: links.iter().map(|l| item(l, None)).collect(),
+            audio_items: 0,
+        };
+        let yt = feed(&["https://www.youtube.com/watch?v=a", "https://www.youtube.com/watch?v=b"]);
+        assert_eq!(yt.detected_kind(), Some("video"));
+        let bili = feed(&[
+            "https://www.bilibili.com/video/BV1",
+            "https://b23.tv/x",
+            "https://blog.example/p/1",
+        ]);
+        assert_eq!(bili.detected_kind(), Some("video"));
+        let peertube = feed(&["https://tube.example/w/9f8e7d", "https://tube.example/w/1a2b3c"]);
+        assert_eq!(peertube.detected_kind(), Some("video"));
+        // A blog whose posts carry video clips is still a blog.
+        let blog = feed(&[
+            "https://blog.example/2026/05/trip",
+            "https://blog.example/2026/04/birthday",
+        ]);
+        assert_eq!(blog.detected_kind(), None);
+        assert!(!is_video_page(&Url::parse("https://notyoutube.com/watch").unwrap()));
     }
 
     #[test]

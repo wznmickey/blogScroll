@@ -5,8 +5,11 @@
 //! - keywords: jieba segmentation + TF-IDF, a dozen per post;
 //! - tags: the author's categories (normalised, synonyms folded) plus keywords
 //!   that are tags elsewhere (used by at least three blogs, or known words);
-//! - topics: a fixed set of content areas, matched from tags and keywords;
-//!   a blog's topics are the areas most of its posts fall into;
+//! - category: exactly one per post, from a two-level list (`tech`,
+//!   `tech/ai`, `travel`, ... or `other`). Word lists classify the clear
+//!   cases; a naive Bayes classifier trained on those places the rest, with
+//!   the blog's usual mix as the prior. A blog's categories are the
+//!   top-level ones most of its posts fall into;
 //! - term vectors: tags and keywords weighted by how rare they are across all
 //!   posts, unit length, stored in `post_terms`. A dot product is then a
 //!   cosine similarity, which gives related posts and personalised discover.
@@ -29,16 +32,88 @@ const BODY_CHARS: usize = 4000;
 /// Own tags used by this many blogs become tags that keywords can turn into.
 const SHARED_TAG_BLOGS: usize = 3;
 
+/// A top-level category. Every post has exactly one category: a top-level
+/// one, one of its sub-categories (`tech/ai`), or `other`.
+pub struct Category {
+    pub id: &'static str,
+    pub label: &'static str,
+}
+
+pub const OTHER: &str = "other";
+
+/// In channel order.
+pub const CATEGORIES: &[Category] = &[
+    Category {
+        id: "tech",
+        label: "技术",
+    },
+    Category {
+        id: "gadget",
+        label: "数码",
+    },
+    Category {
+        id: "life",
+        label: "生活",
+    },
+    Category {
+        id: "travel",
+        label: "旅行",
+    },
+    Category {
+        id: "photo",
+        label: "摄影",
+    },
+    Category {
+        id: "culture",
+        label: "文娱",
+    },
+    Category {
+        id: "study",
+        label: "学习",
+    },
+    Category {
+        id: "career",
+        label: "职场财经",
+    },
+    Category {
+        id: "design",
+        label: "设计创作",
+    },
+    Category {
+        id: OTHER,
+        label: "其他",
+    },
+];
+
+/// The finest level a post is classified at: a sub-category, or a top-level
+/// category that has none (`id == parent`).
 pub struct Topic {
     pub id: &'static str,
+    pub parent: &'static str,
     pub label: &'static str,
     /// Tag keys (lowercase, after synonym folding) that mark the topic.
     words: &'static [&'static str],
 }
 
+impl Topic {
+    /// The category id: `tech/ai`, or `travel` for a category without sub-categories.
+    pub fn path(&self) -> String {
+        if self.id == self.parent {
+            self.id.to_string()
+        } else {
+            format!("{}/{}", self.parent, self.id)
+        }
+    }
+
+    fn is_sub(&self) -> bool {
+        self.id != self.parent
+    }
+}
+
 pub const TOPICS: &[Topic] = &[
     Topic {
         id: "dev",
+        parent: "tech",
         label: "编程开发",
         words: &[
             "编程",
@@ -96,11 +171,38 @@ pub const TOPICS: &[Topic] = &[
             "编程语言",
             "刷题",
             "软件开发",
+            "golang",
+            "c语言",
+            "cpp",
+            "spring",
+            "spring boot",
+            "mybatis",
+            "django",
+            "flask",
+            "fastapi",
+            "next.js",
+            "nuxt",
+            "tailwind",
+            "vite",
+            "npm",
+            "lua",
+            "ruby",
+            "dart",
+            "unity",
+            "游戏开发",
+            "嵌入式",
+            "单片机",
+            "stm32",
+            "esp32",
+            "arduino",
+            "电路",
+            "bug",
         ],
     },
     Topic {
         id: "ai",
-        label: "人工智能",
+        parent: "tech",
+        label: "AI",
         words: &[
             "ai",
             "aigc",
@@ -127,10 +229,25 @@ pub const TOPICS: &[Topic] = &[
             "copilot",
             "提示词",
             "openclaw",
+            "大模型",
+            "ollama",
+            "kimi",
+            "qwen",
+            "通义千问",
+            "豆包",
+            "midjourney",
+            "comfyui",
+            "transformer",
+            "claude code",
+            "codex",
+            "ai编程",
+            "slam",
+            "计算机视觉",
         ],
     },
     Topic {
         id: "ops",
+        parent: "tech",
         label: "运维网络",
         words: &[
             "linux",
@@ -176,10 +293,24 @@ pub const TOPICS: &[Topic] = &[
             "树莓派",
             "shell",
             "命令行",
+            "vercel",
+            "netlify",
+            "edgeone",
+            "github actions",
+            "k3s",
+            "systemd",
+            "nextcloud",
+            "jellyfin",
+            "alist",
+            "syncthing",
+            "webdav",
+            "home assistant",
+            "监控",
         ],
     },
     Topic {
         id: "security",
+        parent: "tech",
         label: "网络安全",
         words: &[
             "安全",
@@ -201,10 +332,20 @@ pub const TOPICS: &[Topic] = &[
             "靶场",
             "pwn",
             "密码学",
+            "隐私",
+            "加密",
+            "木马",
+            "钓鱼",
+            "getshell",
+            "反序列化",
+            "提权",
+            "webshell",
+            "黑客",
         ],
     },
     Topic {
         id: "web",
+        parent: "tech",
         label: "建站博客",
         words: &[
             "博客",
@@ -235,7 +376,8 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "gadget",
-        label: "数码工具",
+        parent: "gadget",
+        label: "数码",
         words: &[
             "数码",
             "手机",
@@ -267,11 +409,27 @@ pub const TOPICS: &[Topic] = &[
             "chrome",
             "效率工具",
             "应用推荐",
+            "电池",
+            "拆机",
+            "充电器",
+            "汽车",
+            "电动车",
+            "智能家居",
+            "esim",
+            "手机卡",
+            "流量卡",
+            "运营商",
+            "平板",
+            "智能手表",
+            "kindle",
+            "特斯拉",
+            "输入法",
         ],
     },
     Topic {
         id: "study",
-        label: "学习学术",
+        parent: "study",
+        label: "学习",
         words: &[
             "学习",
             "笔记",
@@ -300,11 +458,31 @@ pub const TOPICS: &[Topic] = &[
             "研究生",
             "留学",
             "教育",
+            "题解",
+            "洛谷",
+            "luogu",
+            "codeforces",
+            "atcoder",
+            "noip",
+            "信息学",
+            "生物",
+            "科普",
+            "实验报告",
+            "高中",
+            "初中",
+            "中考",
+            "毕业设计",
+            "托福",
+            "雅思",
+            "四六级",
+            "外语",
+            "单词",
         ],
     },
     Topic {
-        id: "life",
-        label: "生活随笔",
+        id: "daily",
+        parent: "life",
+        label: "随笔",
         words: &[
             "生活",
             "日常",
@@ -323,20 +501,51 @@ pub const TOPICS: &[Topic] = &[
             "家人",
             "情感",
             "人生",
-            "散文",
             "闲聊",
             "生活记录",
+            "daily",
+            "碎语",
+            "杂记",
+            "近况",
+            "生日",
+            "过年",
+            "春节",
         ],
     },
     Topic {
         id: "travel",
+        parent: "travel",
         label: "旅行",
         words: &[
-            "旅行", "旅游", "游记", "出行", "自驾", "攻略", "风景", "徒步", "露营", "爬山", "景点", "citywalk", "出游",
+            "旅行",
+            "旅游",
+            "游记",
+            "出行",
+            "自驾",
+            "攻略",
+            "风景",
+            "徒步",
+            "露营",
+            "爬山",
+            "景点",
+            "citywalk",
+            "出游",
+            "旅途",
+            "游玩",
+            "机票",
+            "酒店",
+            "民宿",
+            "签证",
+            "自由行",
+            "旅拍",
+            "度假",
+            "古镇",
+            "户外",
         ],
     },
     Topic {
         id: "photo",
+        parent: "photo",
         label: "摄影",
         words: &[
             "摄影",
@@ -350,11 +559,24 @@ pub const TOPICS: &[Topic] = &[
             "扫街",
             "后期",
             "lightroom",
+            "相册",
+            "拍摄",
+            "随手拍",
+            "街拍",
+            "富士",
+            "索尼",
+            "尼康",
+            "佳能",
+            "徕卡",
+            "航拍",
+            "无人机",
+            "构图",
         ],
     },
     Topic {
-        id: "culture",
-        label: "阅读影视",
+        id: "reading",
+        parent: "culture",
+        label: "书影音",
         words: &[
             "读书",
             "书评",
@@ -374,10 +596,22 @@ pub const TOPICS: &[Topic] = &[
             "哲学",
             "艺术",
             "书摘",
+            "阅读",
+            "看书",
+            "读后感",
+            "观后感",
+            "散文",
+            "歌",
+            "歌曲",
+            "专辑",
+            "演唱会",
+            "话剧",
+            "动画电影",
         ],
     },
     Topic {
         id: "acg",
+        parent: "culture",
         label: "游戏动漫",
         words: &[
             "游戏",
@@ -401,26 +635,102 @@ pub const TOPICS: &[Topic] = &[
             "vtuber",
             "cosplay",
             "追番",
+            "新番",
+            "音游",
+            "舞萌",
+            "maimai",
+            "机厅",
+            "街机",
+            "ps5",
+            "xbox",
+            "任天堂",
+            "独立游戏",
+            "崩坏",
+            "鸣潮",
+            "绝区零",
         ],
     },
     Topic {
         id: "food",
+        parent: "life",
         label: "美食",
         words: &[
-            "美食", "做饭", "食谱", "烹饪", "料理", "咖啡", "茶", "烘焙", "探店", "菜谱", "早餐", "火锅", "甜品",
+            "美食",
+            "做饭",
+            "食谱",
+            "烹饪",
+            "料理",
+            "咖啡",
+            "茶",
+            "烘焙",
+            "探店",
+            "菜谱",
+            "早餐",
+            "火锅",
+            "甜品",
             "厨房",
+            "好吃",
+            "烧烤",
+            "小吃",
+            "餐厅",
+            "下厨",
+            "家常菜",
+            "奶茶",
+            "啤酒",
+            "红酒",
+            "夜宵",
+            "外卖",
+            "零食",
+            "蛋糕",
+            "饺子",
+            "美味",
+            "食堂",
+            "厨艺",
+            "面包",
         ],
     },
     Topic {
         id: "career",
+        parent: "career",
         label: "职场财经",
         words: &[
-            "工作", "职场", "求职", "面试", "实习", "理财", "投资", "创业", "副业", "经济", "基金", "股票", "简历",
-            "秋招", "春招", "校招", "跳槽", "离职", "打工",
+            "工作",
+            "职场",
+            "求职",
+            "面试",
+            "实习",
+            "理财",
+            "投资",
+            "创业",
+            "副业",
+            "经济",
+            "基金",
+            "股票",
+            "简历",
+            "秋招",
+            "春招",
+            "校招",
+            "跳槽",
+            "离职",
+            "打工",
+            "工资",
+            "薪资",
+            "加班",
+            "裁员",
+            "找工作",
+            "上班",
+            "同事",
+            "绩效",
+            "晋升",
+            "记账",
+            "保险",
+            "买房",
+            "房贷",
         ],
     },
     Topic {
         id: "design",
+        parent: "design",
         label: "设计创作",
         words: &[
             "设计",
@@ -438,10 +748,21 @@ pub const TOPICS: &[Topic] = &[
             "图标",
             "blender",
             "建模",
+            "创作",
+            "原创",
+            "手工",
+            "手作",
+            "画画",
+            "手绘",
+            "板绘",
+            "海报",
+            "logo",
+            "设定",
         ],
     },
     Topic {
         id: "sports",
+        parent: "life",
         label: "运动健康",
         words: &[
             "运动",
@@ -458,12 +779,50 @@ pub const TOPICS: &[Topic] = &[
             "睡眠",
             "养生",
             "心理健康",
+            "医院",
+            "生病",
+            "住院",
+            "手术",
+            "体检",
+            "感冒",
+            "锻炼",
+            "瑜伽",
+            "滑雪",
+            "网球",
+            "乒乓球",
+            "攀岩",
+            "训练",
+            "体重",
         ],
     },
 ];
 
-pub fn topic_label(id: &str) -> Option<&'static str> {
-    TOPICS.iter().find(|t| t.id == id).map(|t| t.label)
+pub fn top_category(id: &str) -> Option<&'static Category> {
+    CATEGORIES.iter().find(|c| c.id == id)
+}
+
+/// The top-level part of a category id (`tech/ai` → `tech`).
+pub fn top_of(category: &str) -> &str {
+    category.split('/').next().unwrap_or(category)
+}
+
+/// A category id's own label and, for a sub-category, its parent; `None`
+/// for ids that do not exist.
+pub fn category(id: &str) -> Option<(&'static str, Option<&'static Category>)> {
+    match id.split_once('/') {
+        None => top_category(id).map(|c| (c.label, None)),
+        Some((parent, sub)) => {
+            let t = TOPICS
+                .iter()
+                .find(|t| t.is_sub() && t.parent == parent && t.id == sub)?;
+            Some((t.label, top_category(parent)))
+        }
+    }
+}
+
+/// Sub-categories of a top-level category.
+pub fn sub_categories(parent: &str) -> impl Iterator<Item = &'static Topic> {
+    TOPICS.iter().filter(move |t| t.is_sub() && t.parent == parent)
 }
 
 /// Source kinds, with display names.
@@ -613,7 +972,7 @@ static CANONICAL_MAP: LazyLock<HashMap<&'static str, &'static str>> =
 
 /// How a tag is shown: the canonical spelling when one is known.
 pub fn tag_display(raw: &str) -> String {
-    let t = raw.trim();
+    let t = crate::clean::tag_prefix_free(raw.trim());
     CANONICAL_MAP
         .get(t.to_lowercase().as_str())
         .map_or_else(|| t.to_string(), |c| c.to_string())
@@ -975,7 +1334,8 @@ pub fn keywords(title: &str, tags: &[String], excerpt: &str, body_html: Option<&
     out
 }
 
-/// Corpus statistics used to derive tags and weight terms.
+/// Corpus statistics used to derive tags and weight terms, and the category
+/// classifier trained on the corpus.
 #[derive(Default)]
 pub struct Corpus {
     posts: usize,
@@ -985,6 +1345,7 @@ pub struct Corpus {
     known_tags: HashSet<String>,
     /// The spelling authors use most for each tag key ("web" → "Web").
     labels: HashMap<String, String>,
+    classifier: Classifier,
 }
 
 impl Corpus {
@@ -1017,11 +1378,12 @@ static GENERIC: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     .collect()
 });
 
-static TOPIC_WORDS: LazyLock<HashMap<&'static str, Vec<&'static str>>> = LazyLock::new(|| {
-    let mut m: HashMap<&'static str, Vec<&'static str>> = HashMap::new();
-    for t in TOPICS {
+/// Word → the topics (indexes into `TOPICS`) it marks.
+static TOPIC_WORDS: LazyLock<HashMap<&'static str, Vec<usize>>> = LazyLock::new(|| {
+    let mut m: HashMap<&'static str, Vec<usize>> = HashMap::new();
+    for (i, t) in TOPICS.iter().enumerate() {
         for w in t.words {
-            m.entry(*w).or_default().push(t.id);
+            m.entry(*w).or_default().push(i);
         }
     }
     m
@@ -1036,15 +1398,25 @@ pub fn corpus() -> Arc<Corpus> {
 #[derive(Debug, Default, PartialEq)]
 pub struct Derived {
     pub auto_tags: Vec<String>,
-    pub topics: Vec<&'static str>,
+    /// `tech/ai`, `travel` or `other`; see `CATEGORIES`.
+    pub category: String,
     /// (key, weight, is_tag); unit length.
     pub terms: Vec<(String, f32, bool)>,
     /// Display form of each tag key.
     pub labels: Vec<(String, String)>,
 }
 
-/// Tags, topics and the term vector of one post.
-pub fn derive(own_tags: &[String], keywords: &[(String, f32)], corpus: &Corpus) -> Derived {
+/// Term key → (raw weight, is a tag): own tags weigh 1, keywords their score.
+type RawTerms = HashMap<String, (f32, bool)>;
+
+struct Features {
+    /// (key, display) of the author's own tags, and of tags made from keywords.
+    own: Vec<(String, String)>,
+    auto_tags: Vec<(String, String)>,
+    raw: RawTerms,
+}
+
+fn features(own_tags: &[String], keywords: &[(String, f32)], corpus: &Corpus) -> Features {
     let own: Vec<(String, String)> = own_tags.iter().map(|t| (tag_key(t), tag_display(t))).collect();
     let mut auto_tags: Vec<(String, String)> = Vec::new();
     for (word, w) in keywords {
@@ -1059,8 +1431,7 @@ pub fn derive(own_tags: &[String], keywords: &[(String, f32)], corpus: &Corpus) 
         }
     }
 
-    // Raw weights: own tags 1, keywords (and tags made from them) their score.
-    let mut raw: HashMap<String, (f32, bool)> = HashMap::new();
+    let mut raw: RawTerms = HashMap::new();
     for (k, _) in &own {
         raw.insert(k.clone(), (1.0, true));
     }
@@ -1071,22 +1442,13 @@ pub fn derive(own_tags: &[String], keywords: &[(String, f32)], corpus: &Corpus) 
         e.0 = e.0.max(*w);
         e.1 |= is_tag;
     }
+    Features { own, auto_tags, raw }
+}
 
-    let mut scores: HashMap<&'static str, f32> = HashMap::new();
-    for (key, (w, _)) in &raw {
-        for topic in TOPIC_WORDS.get(key.as_str()).into_iter().flatten() {
-            *scores.entry(topic).or_default() += w;
-        }
-    }
-    let mut ranked: Vec<(&'static str, f32)> = scores.into_iter().filter(|(_, s)| *s >= 0.5).collect();
-    ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(b.0)));
-    let best = ranked.first().map_or(0.0, |(_, s)| *s);
-    let topics = ranked
-        .into_iter()
-        .filter(|(_, s)| *s >= best * 0.5)
-        .take(2)
-        .map(|(t, _)| t)
-        .collect();
+/// Tags, category and term vector of one post of blog `blog_id`.
+pub fn derive(blog_id: i64, own_tags: &[String], keywords: &[(String, f32)], corpus: &Corpus) -> Derived {
+    let Features { own, auto_tags, raw } = features(own_tags, keywords, corpus);
+    let category = corpus.classifier.classify(blog_id, &raw);
 
     let mut terms: Vec<(String, f32, bool)> = raw
         .into_iter()
@@ -1107,17 +1469,186 @@ pub fn derive(own_tags: &[String], keywords: &[(String, f32)], corpus: &Corpus) 
     let labels = own.iter().chain(auto_tags.iter()).cloned().collect();
     Derived {
         auto_tags: auto_tags.into_iter().map(|(_, d)| d).collect(),
-        topics,
+        category,
         terms,
         labels,
     }
 }
 
+/// Word-list evidence for each topic, indexed like `TOPICS`. Broad words
+/// ("生活", "日常") count less, so a specific one ("电影") outweighs them.
+fn word_scores(raw: &RawTerms) -> Vec<f32> {
+    let mut scores = vec![0.0; TOPICS.len()];
+    for (key, (w, _)) in raw {
+        let w = if GENERIC.contains(key.as_str()) { w * 0.3 } else { *w };
+        for &i in TOPIC_WORDS.get(key.as_str()).into_iter().flatten() {
+            scores[i] += w;
+        }
+    }
+    scores
+}
+
+/// Word-list evidence that needs no second opinion: a strong keyword or a
+/// tag, and clearly more than for any other topic.
+const SEED_SCORE: f32 = 0.6;
+const SEED_MARGIN: f32 = 1.5;
+
+/// The topic the word lists are sure about, if any.
+fn seed(scores: &[f32]) -> Option<usize> {
+    let (best, &top) = scores.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1))?;
+    let second = scores
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != best)
+        .map(|(_, s)| *s)
+        .fold(0.0, f32::max);
+    (top >= SEED_SCORE && top >= second * SEED_MARGIN).then_some(best)
+}
+
+/// Training posts a term must appear in to count as evidence.
+const CLASSIFIER_MIN_DF: u32 = 3;
+const SMOOTHING: f32 = 0.5;
+/// How many posts' worth the corpus-wide prior counts against a blog's own
+/// mix, and how much the prior counts against the post's words: flattened,
+/// so the blog only tips a post that has some evidence of its own.
+const BLOG_PRIOR_WEIGHT: f32 = 4.0;
+const PRIOR_EXPONENT: f32 = 0.5;
+/// Probability needed to name a topic; failing that, for its top-level
+/// category (unsure which sub-category); failing that the post is `other`.
+const TOPIC_CONFIDENCE: f32 = 0.6;
+const CATEGORY_CONFIDENCE: f32 = 0.6;
+
+/// Naive Bayes over tag and keyword keys, trained on the posts the word lists
+/// are sure about. It then also knows the words that come with those ("k3s",
+/// a camera model, a city) and can place the rest. Each blog's own mix of
+/// topics is the prior, so a post with little text leans towards what its
+/// blog usually writes about.
+#[derive(Default)]
+pub struct Classifier {
+    /// ln P(term | topic) per topic, for terms seen in enough training posts.
+    log_lik: HashMap<String, Vec<f32>>,
+    /// Share of each topic among all training posts (smoothed).
+    prior: Vec<f32>,
+    /// Training posts per topic, per blog.
+    blogs: HashMap<i64, Vec<f32>>,
+}
+
+impl Classifier {
+    /// From (blog id, terms, topic index) of the training posts.
+    fn train<'a>(seeds: impl IntoIterator<Item = (i64, &'a RawTerms, usize)>) -> Self {
+        let n = TOPICS.len();
+        let mut counts: HashMap<String, Vec<f32>> = HashMap::new();
+        let mut df: HashMap<String, u32> = HashMap::new();
+        let mut docs = vec![0.0f32; n];
+        let mut blogs: HashMap<i64, Vec<f32>> = HashMap::new();
+        for (blog, raw, topic) in seeds {
+            docs[topic] += 1.0;
+            blogs.entry(blog).or_insert_with(|| vec![0.0; n])[topic] += 1.0;
+            for (k, (w, _)) in raw {
+                counts.entry(k.clone()).or_insert_with(|| vec![0.0; n])[topic] += w;
+                *df.entry(k.clone()).or_default() += 1;
+            }
+        }
+        let total_docs: f32 = docs.iter().sum();
+        if total_docs == 0.0 {
+            return Self::default();
+        }
+        counts.retain(|k, _| df[k] >= CLASSIFIER_MIN_DF);
+        let mut totals = vec![0.0f32; n];
+        for c in counts.values() {
+            for (t, x) in totals.iter_mut().zip(c) {
+                *t += x;
+            }
+        }
+        let vocab = counts.len() as f32;
+        let log_lik = counts
+            .into_iter()
+            .map(|(k, c)| {
+                let ll = c
+                    .iter()
+                    .zip(&totals)
+                    .map(|(x, t)| ((x + SMOOTHING) / (t + SMOOTHING * vocab)).ln())
+                    .collect();
+                (k, ll)
+            })
+            .collect();
+        let prior = docs.iter().map(|d| (d + 1.0) / (total_docs + n as f32)).collect();
+        Self { log_lik, prior, blogs }
+    }
+
+    /// P(topic | post) for each topic.
+    fn posterior(&self, blog_id: i64, raw: &RawTerms) -> Vec<f32> {
+        let own = self.blogs.get(&blog_id);
+        let seen: f32 = own.map_or(0.0, |c| c.iter().sum());
+        let mut logp: Vec<f32> = self
+            .prior
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let c = own.map_or(0.0, |c| c[i]);
+                PRIOR_EXPONENT * ((c + BLOG_PRIOR_WEIGHT * p) / (seen + BLOG_PRIOR_WEIGHT)).ln()
+            })
+            .collect();
+        for (k, (w, _)) in raw {
+            if let Some(ll) = self.log_lik.get(k) {
+                for (lp, l) in logp.iter_mut().zip(ll) {
+                    *lp += w * l;
+                }
+            }
+        }
+        let max = logp.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let exp: Vec<f32> = logp.iter().map(|l| (l - max).exp()).collect();
+        let sum: f32 = exp.iter().sum();
+        exp.into_iter().map(|e| e / sum).collect()
+    }
+
+    /// The category id for a post with these terms.
+    pub fn classify(&self, blog_id: i64, raw: &RawTerms) -> String {
+        let scores = word_scores(raw);
+        if let Some(i) = seed(&scores) {
+            return TOPICS[i].path();
+        }
+        if self.prior.is_empty() {
+            // Not trained yet (a new database): the word lists' best guess.
+            let best = scores.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1));
+            return match best {
+                Some((i, s)) if *s >= 0.5 => TOPICS[i].path(),
+                _ => OTHER.to_string(),
+            };
+        }
+        decide(&self.posterior(blog_id, raw))
+    }
+}
+
+/// The most specific category the probabilities support.
+fn decide(p: &[f32]) -> String {
+    let Some((best, &pb)) = p.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)) else {
+        return OTHER.to_string();
+    };
+    if pb >= TOPIC_CONFIDENCE {
+        return TOPICS[best].path();
+    }
+    CATEGORIES
+        .iter()
+        .map(|c| {
+            let share: f32 = TOPICS
+                .iter()
+                .zip(p)
+                .filter(|(t, _)| t.parent == c.id)
+                .map(|(_, x)| x)
+                .sum();
+            (c.id, share)
+        })
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .filter(|(_, share)| *share >= CATEGORY_CONFIDENCE)
+        .map_or_else(|| OTHER.to_string(), |(id, _)| id.to_string())
+}
+
 /// Writes a post's derived data, replacing its old terms.
 pub async fn save_derived(conn: &mut sqlx::SqliteConnection, post_id: i64, d: &Derived) -> sqlx::Result<()> {
-    sqlx::query("UPDATE posts SET auto_tags = ?, topics = ? WHERE id = ?")
+    sqlx::query("UPDATE posts SET auto_tags = ?, category = ? WHERE id = ?")
         .bind(serde_json::to_string(&d.auto_tags).unwrap_or_else(|_| "[]".into()))
-        .bind(serde_json::to_string(&d.topics).unwrap_or_else(|_| "[]".into()))
+        .bind(&d.category)
         .bind(post_id)
         .execute(&mut *conn)
         .await?;
@@ -1144,22 +1675,25 @@ pub async fn save_derived(conn: &mut sqlx::SqliteConnection, post_id: i64, d: &D
     Ok(())
 }
 
+/// A blog's main top-level category and its share of the blog's classified posts.
 #[derive(Debug, Serialize, serde::Deserialize, Clone, PartialEq)]
-pub struct BlogTopic {
-    pub topic: String,
+pub struct BlogCategory {
+    pub id: String,
     pub share: f32,
 }
 
-/// A blog's areas: those at least a quarter of its classified posts fall into.
-pub async fn update_blog_topics(pool: &SqlitePool, blog_ids: &[i64]) -> sqlx::Result<()> {
+/// A blog's categories: the top-level ones at least a quarter of its
+/// classified posts fall into.
+pub async fn update_blog_categories(pool: &SqlitePool, blog_ids: &[i64]) -> sqlx::Result<()> {
     for &id in blog_ids {
-        let rows: Vec<String> = sqlx::query_scalar("SELECT topics FROM posts WHERE blog_id = ? AND topics <> '[]'")
+        let rows: Vec<String> = sqlx::query_scalar("SELECT category FROM posts WHERE blog_id = ? AND category <> ?")
             .bind(id)
+            .bind(OTHER)
             .fetch_all(pool)
             .await?;
-        let topics = blog_topics(&rows);
-        sqlx::query("UPDATE blogs SET topics = ? WHERE id = ?")
-            .bind(serde_json::to_string(&topics).unwrap_or_else(|_| "[]".into()))
+        let categories = blog_categories(&rows);
+        sqlx::query("UPDATE blogs SET categories = ? WHERE id = ?")
+            .bind(serde_json::to_string(&categories).unwrap_or_else(|_| "[]".into()))
             .bind(id)
             .execute(pool)
             .await?;
@@ -1167,24 +1701,21 @@ pub async fn update_blog_topics(pool: &SqlitePool, blog_ids: &[i64]) -> sqlx::Re
     Ok(())
 }
 
-fn blog_topics(post_topics: &[String]) -> Vec<BlogTopic> {
-    let mut counts: HashMap<String, usize> = HashMap::new();
-    for json in post_topics {
-        let list: Vec<String> = serde_json::from_str(json).unwrap_or_default();
-        for t in list {
-            *counts.entry(t).or_default() += 1;
-        }
+fn blog_categories(post_categories: &[String]) -> Vec<BlogCategory> {
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for c in post_categories {
+        *counts.entry(top_of(c)).or_default() += 1;
     }
-    let n = post_topics.len();
-    let mut out: Vec<BlogTopic> = counts
+    let n = post_categories.len();
+    let mut out: Vec<BlogCategory> = counts
         .into_iter()
         .filter(|(_, c)| *c * 4 >= n && (*c >= 2 || n < 3))
-        .map(|(topic, c)| BlogTopic {
-            topic,
+        .map(|(id, c)| BlogCategory {
+            id: id.to_string(),
             share: ((c as f32 / n.max(1) as f32) * 100.0).round() / 100.0,
         })
         .collect();
-    out.sort_by(|a, b| b.share.total_cmp(&a.share).then_with(|| a.topic.cmp(&b.topic)));
+    out.sort_by(|a, b| b.share.total_cmp(&a.share).then_with(|| a.id.cmp(&b.id)));
     out.truncate(3);
     out
 }
@@ -1194,6 +1725,10 @@ pub struct RetagStats {
     pub posts: usize,
     pub keyworded: usize,
     pub tagged: usize,
+    /// Posts the word lists alone classified (the classifier's training set).
+    pub seeds: usize,
+    /// Posts with a category other than `other`.
+    pub categorized: usize,
     pub blogs: usize,
 }
 
@@ -1207,21 +1742,37 @@ struct PostText {
     keywords: String,
 }
 
-/// Recomputes corpus statistics, every post's tags, topics and term vector,
-/// and every blog's topics. Posts that have no keywords yet (stored before
-/// analysis existed) get them from their title, categories and excerpt.
+/// Recomputes corpus statistics, retrains the category classifier, and
+/// redoes every post's tags, category and term vector, and every blog's
+/// categories. Posts that have no keywords yet (stored before analysis
+/// existed) get them from their title, categories and excerpt.
 pub async fn retag_all(pool: &SqlitePool) -> anyhow::Result<RetagStats> {
     let rows: Vec<PostText> = sqlx::query_as("SELECT id, blog_id, title, excerpt, tags, keywords FROM posts")
         .fetch_all(pool)
         .await?;
-    let (posts, stats) = tokio::task::spawn_blocking(move || prepare(rows)).await?;
+    let (posts, stats, corpus) = tokio::task::spawn_blocking(move || {
+        let (posts, mut stats) = prepare(rows);
+        let mut corpus = build_corpus(&posts);
+        let raws: Vec<RawTerms> = posts
+            .iter()
+            .map(|p| features(&p.tags, &p.keywords, &corpus).raw)
+            .collect();
+        let seeds: Vec<(i64, &RawTerms, usize)> = posts
+            .iter()
+            .zip(&raws)
+            .filter_map(|(p, raw)| seed(&word_scores(raw)).map(|t| (p.blog_id, raw, t)))
+            .collect();
+        stats.seeds = seeds.len();
+        corpus.classifier = Classifier::train(seeds);
+        (posts, stats, Arc::new(corpus))
+    })
+    .await?;
 
-    let corpus = Arc::new(build_corpus(&posts));
     let mut stats = stats;
     for chunk in posts.chunks(500) {
         let mut tx = pool.begin().await?;
         for p in chunk {
-            let d = derive(&p.tags, &p.keywords, &corpus);
+            let d = derive(p.blog_id, &p.tags, &p.keywords, &corpus);
             if p.keywords_changed {
                 sqlx::query("UPDATE posts SET keywords = ? WHERE id = ?")
                     .bind(serde_json::to_string(&p.keywords)?)
@@ -1230,6 +1781,7 @@ pub async fn retag_all(pool: &SqlitePool) -> anyhow::Result<RetagStats> {
                     .await?;
             }
             stats.tagged += usize::from(!d.auto_tags.is_empty() || !p.tags.is_empty());
+            stats.categorized += usize::from(d.category != OTHER);
             save_derived(&mut tx, p.id, &d).await?;
         }
         tx.commit().await?;
@@ -1248,7 +1800,7 @@ pub async fn retag_all(pool: &SqlitePool) -> anyhow::Result<RetagStats> {
     tx.commit().await?;
 
     let blogs: Vec<i64> = sqlx::query_scalar("SELECT id FROM blogs").fetch_all(pool).await?;
-    update_blog_topics(pool, &blogs).await?;
+    update_blog_categories(pool, &blogs).await?;
     stats.blogs = blogs.len();
     *CORPUS.write().unwrap() = corpus;
     Ok(stats)
@@ -1314,6 +1866,7 @@ fn build_corpus(posts: &[Prepared]) -> Corpus {
             .map(|(k, _)| k)
             .collect(),
         labels: preferred_labels(posts).into_iter().collect(),
+        classifier: Classifier::default(),
     }
 }
 
@@ -1340,6 +1893,9 @@ mod tests {
     #[test]
     fn tags_fold_synonyms_and_casing() {
         assert_eq!(tag_display("docker"), "Docker");
+        assert_eq!(tag_display("tag:Docker"), "Docker");
+        assert_eq!(tag_key("category:教程"), "教程");
+        assert_eq!(tag_display("tag:"), "tag:");
         assert_eq!(tag_display("人工智能"), "AI");
         assert_eq!(tag_key("大模型"), "llm");
         assert_eq!(tag_display("旅行"), "旅行");
@@ -1366,7 +1922,7 @@ mod tests {
     }
 
     #[test]
-    fn derive_tags_topics_and_unit_vectors() {
+    fn derive_tags_category_and_unit_vectors() {
         let corpus = Corpus {
             posts: 100,
             df: [
@@ -1377,15 +1933,16 @@ mod tests {
             .into_iter()
             .collect(),
             known_tags: ["随笔".to_string()].into_iter().collect(),
-            labels: HashMap::new(),
+            ..Default::default()
         };
         let d = derive(
+            1,
             &["随笔".into()],
             &[("Docker".into(), 1.0), ("容器".into(), 0.6), ("Nginx".into(), 0.1)],
             &corpus,
         );
         assert_eq!(d.auto_tags, ["Docker"], "known words become tags; weak ones do not");
-        assert_eq!(d.topics, ["ops", "life"]);
+        assert_eq!(d.category, "tech/ops", "one category, the strongest");
         let norm: f32 = d.terms.iter().map(|(_, w, _)| w * w).sum();
         assert!((norm - 1.0).abs() < 1e-3);
         assert_eq!(d.terms[0].0, "docker", "rarer terms weigh more");
@@ -1393,21 +1950,94 @@ mod tests {
         assert!(d.terms.iter().any(|(k, _, tag)| k == "容器" && !*tag));
     }
 
+    fn raw(terms: &[(&str, f32)]) -> RawTerms {
+        terms.iter().map(|(k, w)| (k.to_string(), (*w, false))).collect()
+    }
+
     #[test]
-    fn blog_topics_need_a_share() {
-        let posts: Vec<String> = [
-            "[\"dev\"]",
-            "[\"dev\",\"ai\"]",
-            "[\"dev\"]",
-            "[\"life\"]",
-            "[\"travel\"]",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-        let t = blog_topics(&posts);
-        let ids: Vec<&str> = t.iter().map(|t| t.topic.as_str()).collect();
-        assert_eq!(ids, ["dev"]);
+    fn classifier_learns_words_from_clear_cases_and_uses_the_blog() {
+        // Five clear posts per topic (ten for `ops`, all on blog 2): a word
+        // from the topic's list plus two words of its own.
+        let mut posts: Vec<(i64, RawTerms)> = Vec::new();
+        for (i, t) in TOPICS.iter().enumerate() {
+            let (a, b) = (format!("{}-a", t.id), format!("{}-b", t.id));
+            let word = t.words.iter().find(|w| !GENERIC.contains(*w)).unwrap();
+            let terms = raw(&[(word, 1.0), (&a, 1.0), (&b, 1.0)]);
+            let (blog, n) = if t.id == "ops" { (2, 10) } else { (100 + i as i64, 5) };
+            posts.extend((0..n).map(|_| (blog, terms.clone())));
+        }
+        let seeds: Vec<(i64, &RawTerms, usize)> = posts
+            .iter()
+            .filter_map(|(blog, terms)| seed(&word_scores(terms)).map(|t| (*blog, terms, t)))
+            .collect();
+        assert_eq!(seeds.len(), posts.len());
+        let c = Classifier::train(seeds);
+        assert_eq!(
+            c.classify(3, &posts[0].1),
+            TOPICS[0].path(),
+            "clear cases keep their topic"
+        );
+        assert_eq!(
+            c.classify(3, &raw(&[("travel-a", 1.0), ("travel-b", 1.0)])),
+            "travel",
+            "words learnt from the clear cases"
+        );
+        assert_eq!(c.classify(3, &raw(&[("ops-a", 1.0), ("ops-b", 0.8)])), "tech/ops");
+        let weak = raw(&[("ops-a", 0.5)]);
+        assert_eq!(
+            c.classify(2, &weak),
+            "tech/ops",
+            "weak evidence, tipped by the blog's usual topic"
+        );
+        assert_eq!(
+            c.classify(3, &weak),
+            OTHER,
+            "too weak on a blog that writes about anything"
+        );
+        assert_eq!(
+            c.classify(2, &raw(&[("unknown", 1.0)])),
+            OTHER,
+            "the blog alone is not enough"
+        );
+    }
+
+    #[test]
+    fn unsure_sub_category_falls_back_to_its_parent() {
+        let mut p = vec![0.0; TOPICS.len()];
+        let at = |id: &str| TOPICS.iter().position(|t| t.id == id).unwrap();
+        p[at("dev")] = 0.4;
+        p[at("ops")] = 0.35;
+        p[at("travel")] = 0.25;
+        assert_eq!(decide(&p), "tech");
+        p[at("dev")] = 0.7;
+        p[at("ops")] = 0.05;
+        assert_eq!(decide(&p), "tech/dev");
+        let flat = vec![1.0 / TOPICS.len() as f32; TOPICS.len()];
+        assert_eq!(decide(&flat), OTHER);
+    }
+
+    #[test]
+    fn category_ids_and_labels() {
+        assert_eq!(
+            category("tech/ai").map(|(l, p)| (l, p.map(|p| p.label))),
+            Some(("AI", Some("技术")))
+        );
+        assert_eq!(category("travel").map(|(l, p)| (l, p.is_none())), Some(("旅行", true)));
+        assert!(category("tech/travel").is_none());
+        assert!(category("nope").is_none());
+        assert_eq!(top_of("life/food"), "life");
+        assert!(TOPICS.iter().all(|t| top_category(t.parent).is_some()));
+    }
+
+    #[test]
+    fn blog_categories_need_a_share() {
+        let posts: Vec<String> = ["tech/dev", "tech/ai", "tech", "life/daily", "travel"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let t = blog_categories(&posts);
+        let ids: Vec<&str> = t.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["tech"], "sub-categories count towards their parent");
         assert_eq!(t[0].share, 0.6);
     }
 }

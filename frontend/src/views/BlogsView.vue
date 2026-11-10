@@ -16,9 +16,9 @@ const FOLLOWING = '@following'
 
 // Kept alive while a blog page is open (so going back keeps the list and
 // scroll position); only follow the URL while this is the current route.
-const tag = ref('')
-/** A content area id, or FOLLOWING. */
-const topic = ref('')
+const dirtag = ref('')
+/** A top-level category id, or FOLLOWING. */
+const category = ref('')
 const kind = ref('')
 const sort = ref<BlogSort>('recent')
 const q = ref('')
@@ -27,15 +27,15 @@ watch(
   () => {
     if (route.name !== 'blogs') return
     const str = (v: unknown) => (typeof v === 'string' ? v : '')
-    tag.value = str(route.query.tag)
-    topic.value = route.query.following === '1' ? FOLLOWING : str(route.query.topic)
+    dirtag.value = str(route.query.dirtag)
+    category.value = route.query.following === '1' ? FOLLOWING : str(route.query.category)
     kind.value = str(route.query.kind)
     sort.value = route.query.sort === 'posts' || route.query.sort === 'name' ? route.query.sort : 'recent'
     q.value = str(route.query.q)
   },
   { immediate: true, deep: true },
 )
-const followingOnly = computed(() => topic.value === FOLLOWING)
+const followingOnly = computed(() => category.value === FOLLOWING)
 // The list of followed blogs is read when the filter is applied, so
 // unfollowing one in the list does not make it vanish under the cursor.
 const followIds = ref<number[]>([])
@@ -51,7 +51,9 @@ let generation = 0
 const chips = computed<Chip[]>(() => [
   { value: '', label: '全部', count: meta.value?.stats.blogs },
   { value: FOLLOWING, label: '我的关注', count: follows.value.length },
-  ...(tagsInfo.value?.topics ?? []).filter((t) => t.blogs > 0).map((t) => ({ value: t.id, label: t.label, count: t.blogs })),
+  ...(tagsInfo.value?.categories ?? [])
+    .filter((c) => (c.blogs ?? 0) > 0)
+    .map((c) => ({ value: c.id, label: c.label, count: c.blogs })),
 ])
 const kinds = computed(() => tagsInfo.value?.kinds ?? [])
 const sorts: { id: BlogSort; label: string }[] = [
@@ -62,18 +64,18 @@ const sorts: { id: BlogSort; label: string }[] = [
 
 function setQuery(patch: Record<string, string>) {
   const query: Record<string, string> = {
-    tag: tag.value,
-    topic: followingOnly.value ? '' : topic.value,
+    dirtag: dirtag.value,
+    category: followingOnly.value ? '' : category.value,
     following: followingOnly.value ? '1' : '',
     kind: kind.value,
     sort: sort.value,
     q: q.value,
     ...patch,
   }
-  if (query.topic === FOLLOWING) {
-    query.topic = ''
+  if (query.category === FOLLOWING) {
+    query.category = ''
     query.following = '1'
-  } else if ('topic' in patch) {
+  } else if ('category' in patch) {
     query.following = ''
   }
   if (query.sort === 'recent') delete query.sort
@@ -99,8 +101,8 @@ async function loadMore() {
     }
     const page = await api.blogs({
       offset: offset.value,
-      tag: tag.value || undefined,
-      topic: followingOnly.value ? undefined : topic.value || undefined,
+      dirtag: dirtag.value || undefined,
+      category: followingOnly.value ? undefined : category.value || undefined,
       kind: kind.value || undefined,
       ids: followingOnly.value ? followIds.value : undefined,
       sort: sort.value,
@@ -117,7 +119,7 @@ async function loadMore() {
 }
 
 watch(
-  () => [tag.value, topic.value, kind.value, sort.value, q.value],
+  () => [dirtag.value, category.value, kind.value, sort.value, q.value],
   () => {
     followIds.value = [...follows.value]
     generation++
@@ -152,10 +154,10 @@ onBeforeUnmount(() => {
         <select
           v-if="kinds.length > 1"
           :value="kind"
-          aria-label="来源类型"
+          aria-label="类型"
           @change="setQuery({ kind: ($event.target as HTMLSelectElement).value })"
         >
-          <option value="">全部来源</option>
+          <option value="">全部类型</option>
           <option v-for="k in kinds" :key="k.id" :value="k.id">{{ k.label }} {{ k.blogs }}</option>
         </select>
         <select :value="sort" aria-label="排序" @change="setQuery({ sort: ($event.target as HTMLSelectElement).value })">
@@ -163,10 +165,10 @@ onBeforeUnmount(() => {
         </select>
       </div>
     </header>
-    <ChipBar :chips="chips" :active="topic" label="按领域筛选" class="filters" @select="(t) => setQuery({ topic: t })" />
-    <p v-if="tag" class="tag-note">
-      开往标签：{{ tagLabel(tag) }}
-      <button type="button" @click="setQuery({ tag: '' })">清除</button>
+    <ChipBar :chips="chips" :active="category" label="按分类筛选" class="filters" @select="(c) => setQuery({ category: c })" />
+    <p v-if="dirtag" class="tag-note">
+      开往标签：{{ tagLabel(dirtag) }}
+      <button type="button" @click="setQuery({ dirtag: '' })">清除</button>
     </p>
 
     <ul class="grid">
@@ -182,7 +184,7 @@ onBeforeUnmount(() => {
             <p v-if="b.description" class="desc">{{ b.description }}</p>
             <p class="tags">
               <span v-if="b.kind && b.kind.id !== 'blog'" class="kind">{{ b.kind.label }}</span>
-              <span v-for="t in b.topics ?? []" :key="t.id" class="topic">{{ t.label }}</span>
+              <span v-for="c in b.categories ?? []" :key="c.id" class="topic">{{ c.label }}</span>
               <span v-for="t in b.tags" :key="t.directory + t.tag">{{ t.label }}</span>
             </p>
             <p class="stats">

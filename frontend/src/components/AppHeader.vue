@@ -1,49 +1,73 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { api, meta, tagsInfo } from '../api'
+import { allCategories, api, categoryName, meta, tagsInfo } from '../api'
 import { hostOf } from '../format'
-import type { BlogSummary } from '../types'
+import { LIST_LABELS, searchList, type ListName } from '../library'
+import type { BlogSummary, CategoryNode, PostCard, TagStat } from '../types'
 import BlogAvatar from './BlogAvatar.vue'
+import PostRow from './PostRow.vue'
 
 const route = useRoute()
 const router = useRouter()
 const text = ref('')
 const focused = ref(false)
-const siteName = computed(() => meta.value?.site_name ?? '博客漫游')
+const siteName = computed(() => meta.value?.site_name ?? '博客瀑布')
 const logo = `${import.meta.env.BASE_URL}favicon.svg`
-const hot = computed(() => tagsInfo.value?.categories.slice(0, 24) ?? [])
-const showHot = computed(() => focused.value && !text.value.trim() && hot.value.length > 0)
+const hot = computed(() => tagsInfo.value?.popular_tags.slice(0, 24) ?? [])
+const needle = computed(() => text.value.trim())
+const showHot = computed(() => focused.value && !needle.value && hot.value.length > 0)
 
-// Bloggers matching what is typed, as suggestions under the box.
-const suggestions = ref<BlogSummary[]>([])
-const showSuggest = computed(() => focused.value && !!text.value.trim() && suggestions.value.length > 0)
+// As you type: matching categories and tags, bloggers, and posts from your
+// own saves, likes and history.
+const blogHits = ref<BlogSummary[]>([])
+const tagHits = ref<TagStat[]>([])
+const categoryHits = computed<CategoryNode[]>(() => {
+  const n = needle.value.toLowerCase()
+  if (!n) return []
+  return allCategories(tagsInfo.value)
+    .filter((c) => c.id !== 'other' && (c.label.toLowerCase().includes(n) || n.includes(c.label.toLowerCase())))
+    .slice(0, 4)
+})
+const mineHits = computed<{ list: ListName; post: PostCard }[]>(() => {
+  if (!needle.value) return []
+  const seen = new Set<number>()
+  const out: { list: ListName; post: PostCard }[] = []
+  for (const list of ['saves', 'likes', 'history', 'seen'] as const) {
+    for (const e of searchList(list, needle.value)) {
+      if (seen.has(e.post.id)) continue
+      seen.add(e.post.id)
+      out.push({ list, post: e.post })
+    }
+  }
+  return out.slice(0, 3)
+})
+const showSuggest = computed(
+  () =>
+    focused.value &&
+    !!needle.value &&
+    (blogHits.value.length + tagHits.value.length + categoryHits.value.length + mineHits.value.length > 0),
+)
+
 let suggestTimer: ReturnType<typeof setTimeout> | undefined
-watch(text, (v) => {
+watch(needle, (q) => {
   clearTimeout(suggestTimer)
-  const q = v.trim()
   if (!q) {
-    suggestions.value = []
+    blogHits.value = []
+    tagHits.value = []
     return
   }
   suggestTimer = setTimeout(async () => {
-    try {
-      const page = await api.blogs({ q, limit: 5 })
-      if (text.value.trim() === q) suggestions.value = page.items
-    } catch {
-      suggestions.value = []
-    }
+    const [blogs, tags] = await Promise.allSettled([api.blogs({ q, limit: 4 }), api.searchTags(q, 6)])
+    if (needle.value !== q) return
+    blogHits.value = blogs.status === 'fulfilled' ? blogs.value.items : []
+    tagHits.value = tags.status === 'fulfilled' ? tags.value : []
   }, 200)
 })
 
-function openBlog(id: number) {
-  router.push(`/blog/${id}`)
-  blur()
-}
-
 watch(
-  () => route.query.q,
-  (q) => (text.value = typeof q === 'string' ? q : ''),
+  () => [route.name, route.query.q],
+  () => (text.value = route.name === 'search' && typeof route.query.q === 'string' ? route.query.q : ''),
   { immediate: true },
 )
 
@@ -51,15 +75,14 @@ function blur() {
   ;(document.activeElement as HTMLElement | null)?.blur()
 }
 
-function submit() {
-  const q = text.value.trim()
-  router.push(q ? { path: '/', query: { q } } : { path: '/' })
+function go(to: Parameters<typeof router.push>[0]) {
+  router.push(to)
   blur()
 }
 
-function pick(category: string) {
-  router.push({ path: '/', query: { category } })
-  blur()
+function submit() {
+  const q = needle.value
+  go(q ? { path: '/search', query: { q } } : { path: '/search' })
 }
 </script>
 
@@ -76,7 +99,7 @@ function pick(category: string) {
           id="search-input"
           v-model="text"
           type="search"
-          placeholder="搜索文章或博主"
+          placeholder="搜索文章、博主、标签、收藏"
           enterkeyhint="search"
           autocomplete="off"
           @focus="focused = true"
@@ -91,26 +114,59 @@ function pick(category: string) {
         </button>
         <!-- mousedown.prevent keeps focus in the input until the click lands. -->
         <div v-if="showSuggest" class="hot suggest" @mousedown.prevent>
-          <p>博主</p>
-          <button v-for="b in suggestions" :key="b.id" type="button" class="sug" @click="openBlog(b.id)">
-            <BlogAvatar :name="b.name" :icon="b.icon" :size="28" />
-            <span class="sug-text">
-              <span class="sug-name">{{ b.name }}</span>
-              <span class="sug-sub">{{ b.description || hostOf(b.homepage) }}</span>
-            </span>
-          </button>
-          <button type="button" class="sug all" @click="submit">搜索“{{ text.trim() }}”的文章和博主 ↵</button>
+          <template v-if="categoryHits.length || tagHits.length">
+            <p>分类与标签</p>
+            <div class="hot-list">
+              <button
+                v-for="c in categoryHits"
+                :key="c.id"
+                type="button"
+                class="cat"
+                @click="go({ path: '/', query: { c: `cat:${c.id}` } })"
+              >
+                {{ categoryName(c.id) }}
+              </button>
+              <button
+                v-for="t in tagHits"
+                :key="t.name"
+                type="button"
+                @click="go({ path: '/', query: { c: `tag:${t.name}` } })"
+              >
+                #{{ t.name }}
+              </button>
+            </div>
+          </template>
+          <template v-if="blogHits.length">
+            <p>博主</p>
+            <button v-for="b in blogHits" :key="b.id" type="button" class="sug" @click="go(`/blog/${b.id}`)">
+              <BlogAvatar :name="b.name" :icon="b.icon" :size="28" />
+              <span class="sug-text">
+                <span class="sug-name">{{ b.name }}</span>
+                <span class="sug-sub">{{ b.description || hostOf(b.homepage) }}</span>
+              </span>
+            </button>
+          </template>
+          <template v-if="mineHits.length">
+            <p>我的收藏、喜欢、历史和刷到过</p>
+            <div v-for="m in mineHits" :key="m.post.id" class="mine" @click="blur">
+              <PostRow :post="m.post" :size="36" :note="LIST_LABELS[m.list]" />
+            </div>
+          </template>
+          <button type="button" class="sug all" @click="submit">搜索“{{ needle }}”的全部结果 ↵</button>
         </div>
         <div v-if="showHot" class="hot" @mousedown.prevent>
           <p>热门标签</p>
           <div class="hot-list">
-            <button v-for="c in hot" :key="c.name" type="button" @click="pick(c.name)">#{{ c.name }}</button>
+            <button v-for="c in hot" :key="c.name" type="button" @click="go({ path: '/', query: { c: `tag:${c.name}` } })">
+              #{{ c.name }}
+            </button>
           </div>
         </div>
       </form>
       <nav class="nav">
-        <RouterLink to="/" class="desktop-only" exact-active-class="active">发现</RouterLink>
+        <RouterLink to="/" class="desktop-only" exact-active-class="active">首页</RouterLink>
         <RouterLink to="/blogs" active-class="active">博客</RouterLink>
+        <RouterLink to="/me" active-class="active">我的</RouterLink>
         <RouterLink to="/about" active-class="active">关于</RouterLink>
       </nav>
     </div>
@@ -223,6 +279,28 @@ function pick(category: string) {
 }
 .hot-list button:hover {
   color: var(--link);
+}
+.hot-list .cat {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.hot {
+  max-height: min(70vh, 560px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.suggest .hot-list {
+  padding: 0 6px;
+}
+.suggest p:not(:first-child) {
+  margin-top: 10px;
+}
+.mine {
+  padding: 4px 6px;
+  border-radius: 10px;
+}
+.mine:hover {
+  background: var(--surface);
 }
 .suggest {
   padding: 10px 8px 8px;

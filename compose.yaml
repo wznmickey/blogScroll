@@ -12,7 +12,7 @@ services:
       - "127.0.0.1:8080:8080"
     # environment:
     #   # Tell site owners how to reach you.
-    #   FEED_USER_AGENT: "FeedWaterfall/0.1 (RSS reader; +https://your.site/about)"
+    #   FEED_USER_AGENT: "blogScroll/0.1 (RSS reader; +https://your.site/about)"
     volumes:
       - feed-data:/data
       # Optional: your own config (create the file first).

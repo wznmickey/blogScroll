@@ -59,6 +59,8 @@ pub struct BlogRow {
     pub comment_system: Option<String>,
     pub comments_next_at: i64,
     pub from_feed_meta: bool,
+    /// Whether the site may be shown in a frame here; `None` = not known yet.
+    pub framable: Option<bool>,
 }
 
 impl BlogRow {
@@ -71,7 +73,7 @@ macro_rules! blog_columns {
     () => {
         "id, name, homepage_url, feed_url, feed_url_origin, content_policy, \
          etag, last_modified, refresh_secs, discovery_at, failures, content_hash, \
-         profile_at, comment_system, comments_next_at, from_feed_meta"
+         profile_at, comment_system, comments_next_at, from_feed_meta, framable"
     };
 }
 
@@ -567,13 +569,16 @@ pub struct Profile<'a> {
     pub generator: Option<&'a str>,
     /// `None` keeps a previously detected system (pages can change themes).
     pub comment_system_json: Option<&'a str>,
+    /// Whether the homepage may be shown in a frame here; `None` keeps what is known.
+    pub framable: Option<bool>,
 }
 
 pub async fn save_profile(pool: &SqlitePool, blog_id: i64, now: i64, p: &Profile<'_>) -> sqlx::Result<()> {
     sqlx::query(
         "UPDATE blogs SET description = ?1, avatar_url = ?2, about_url = ?3, about_text = ?4,
                 social_links = ?5, generator = ?6,
-                comment_system = COALESCE(?7, comment_system), profile_at = ?8
+                comment_system = COALESCE(?7, comment_system), profile_at = ?8,
+                framable = COALESCE(?10, framable)
          WHERE id = ?9",
     )
     .bind(p.description)
@@ -585,8 +590,18 @@ pub async fn save_profile(pool: &SqlitePool, blog_id: i64, now: i64, p: &Profile
     .bind(p.comment_system_json)
     .bind(now)
     .bind(blog_id)
+    .bind(p.framable)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+pub async fn set_framable(pool: &SqlitePool, blog_id: i64, framable: bool) -> sqlx::Result<()> {
+    sqlx::query("UPDATE blogs SET framable = ? WHERE id = ?")
+        .bind(framable)
+        .bind(blog_id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

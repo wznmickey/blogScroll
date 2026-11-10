@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import { ref } from 'vue'
+import { useDragScroll } from '../composables/dragScroll'
+
 export interface Chip {
   /** `''` stands for "all". */
   value: string
@@ -8,10 +11,13 @@ export interface Chip {
 
 defineProps<{ chips: Chip[]; active: string; label: string }>()
 const emit = defineEmits<{ select: [value: string] }>()
+
+const bar = ref<HTMLElement>()
+useDragScroll(bar)
 </script>
 
 <template>
-  <div class="chip-bar" role="toolbar" :aria-label="label">
+  <div ref="bar" class="chip-bar" role="toolbar" :aria-label="label">
     <button
       v-for="c in chips"
       :key="c.value"
@@ -37,6 +43,9 @@ const emit = defineEmits<{ select: [value: string] }>()
 }
 .chip-bar::-webkit-scrollbar {
   display: none;
+}
+.chip-bar {
+  user-select: none;
 }
 .chip {
   flex: none;

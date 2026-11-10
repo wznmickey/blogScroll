@@ -6,6 +6,8 @@ import BlogAvatar from '../components/BlogAvatar.vue'
 import FollowButton from '../components/FollowButton.vue'
 import Waterfall from '../components/Waterfall.vue'
 import { hostOf, relativeTime } from '../format'
+import { recordShown } from '../library'
+import { openInReader } from '../reader'
 import { socialLabel } from '../social'
 import type { BlogDetail } from '../types'
 
@@ -31,6 +33,10 @@ watch(
 
 const load = (cursor: string | null) => api.posts({ mode: 'latest', blog: id.value, cursor })
 
+function openBeside(e: MouseEvent, url: string, title: string) {
+  if (blog.value && openInReader({ url, title, blog: blog.value }, e)) e.preventDefault()
+}
+
 /** "Hexo 7.3.0" → "Hexo" */
 const engine = computed(() => blog.value?.generator?.split(/\s+/)[0] ?? null)
 </script>
@@ -44,23 +50,30 @@ const engine = computed(() => blog.value?.generator?.split(/\s+/)[0] ?? null)
           <h1>{{ blog.name }}</h1>
           <FollowButton :blog-id="blog.id" />
         </div>
-        <a :href="blog.homepage" target="_blank" rel="noopener" class="home">{{ hostOf(blog.homepage) }} ↗</a>
+        <a
+          :href="blog.homepage"
+          target="_blank"
+          rel="noopener"
+          class="home"
+          @click="openBeside($event, blog.homepage, blog.name)"
+          >{{ hostOf(blog.homepage) }} ↗</a
+        >
         <p v-if="blog.description" class="desc">{{ blog.description }}</p>
         <p class="chips">
           <span v-if="blog.kind && blog.kind.id !== 'blog'" class="chip source">{{ blog.kind.label }}</span>
           <span v-for="d in blog.directories" :key="d.directory" class="chip source">收录于{{ d.name }}</span>
           <RouterLink
-            v-for="t in blog.topics ?? []"
-            :key="t.id"
-            :to="{ path: '/', query: { topic: t.id } }"
+            v-for="c in blog.categories ?? []"
+            :key="c.id"
+            :to="{ path: '/', query: { c: `cat:${c.id}` } }"
             class="chip link topic"
-            :title="t.share ? `约 ${Math.round(t.share * 100)}% 的文章` : undefined"
-            >{{ t.label }}</RouterLink
+            :title="c.share ? `约 ${Math.round(c.share * 100)}% 的文章` : undefined"
+            >{{ c.label }}</RouterLink
           >
           <RouterLink
             v-for="t in blog.tags"
             :key="t.directory + t.tag"
-            :to="{ path: '/', query: { tag: t.tag } }"
+            :to="{ path: '/', query: { dirtag: t.tag } }"
             class="chip link"
             >{{ t.label }}</RouterLink
           >
@@ -69,7 +82,7 @@ const engine = computed(() => blog.value?.generator?.split(/\s+/)[0] ?? null)
           <span v-if="blog.comment_system" class="chip">评论 · {{ blog.comment_system }}</span>
         </p>
         <p v-if="blog.top_tags?.length" class="top-tags">
-          <RouterLink v-for="t in blog.top_tags" :key="t" :to="{ path: '/', query: { category: t } }">#{{ t }}</RouterLink>
+          <RouterLink v-for="t in blog.top_tags" :key="t" :to="{ path: '/', query: { c: `tag:${t}` } }">#{{ t }}</RouterLink>
         </p>
         <p v-if="blog.social.length" class="social">
           <a v-for="s in blog.social" :key="s.url" :href="s.url" target="_blank" rel="noopener me">{{
@@ -86,11 +99,23 @@ const engine = computed(() => blog.value?.generator?.split(/\s+/)[0] ?? null)
     <section v-if="blog?.about_text" class="about">
       <h2>关于</h2>
       <p>{{ blog.about_text }}</p>
-      <a v-if="blog.about_url" :href="blog.about_url" target="_blank" rel="noopener">阅读完整介绍 ↗</a>
+      <a
+        v-if="blog.about_url"
+        :href="blog.about_url"
+        target="_blank"
+        rel="noopener"
+        @click="openBeside($event, blog.about_url, `关于 · ${blog.name}`)"
+        >阅读完整介绍 ↗</a
+      >
     </section>
     <p v-else-if="missing" class="missing">找不到这个博客</p>
 
-    <Waterfall v-if="!missing" :load="load" :reset-key="String(id)">
+    <Waterfall
+      v-if="!missing"
+      :load="load"
+      :reset-key="String(id)"
+      @impression="(p) => recordShown(p, blog?.name ?? '博客页')"
+    >
       <template #empty><p class="missing">暂时还没有抓取到这个博客的文章</p></template>
     </Waterfall>
   </div>

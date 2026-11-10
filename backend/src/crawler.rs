@@ -101,7 +101,7 @@ impl Crawler {
         loop {
             if last_retag.is_none_or(|t| t.elapsed() >= RETAG_EVERY) {
                 match analyze::retag_all(&self.pool).await {
-                    Ok(s) => tracing::info!(?s, "tags and topics recomputed"),
+                    Ok(s) => tracing::info!(?s, "tags and categories recomputed"),
                     Err(e) => tracing::warn!(error = %e, "retag failed"),
                 }
                 last_retag = Some(std::time::Instant::now());
@@ -334,6 +334,7 @@ impl Crawler {
                 social_json: &social,
                 generator: info.generator.as_deref(),
                 comment_system_json: system_json.as_deref(),
+                framable: home.frame_blocked.map(|blocked| !blocked),
             },
         )
         .await?;
@@ -390,6 +391,7 @@ impl Crawler {
                             validators: found.validators,
                             body: found.body,
                             fresh_for: found.fresh_for,
+                            frame_blocked: found.frame_blocked,
                         };
                         (found.feed_url, Some(fetched))
                     }
@@ -409,12 +411,13 @@ impl Crawler {
                     etag: blog.etag.clone(),
                     last_modified: blog.last_modified.clone(),
                 };
-                // After a parser upgrade, fetch each feed in full once so stored
-                // posts pick up what the new parser extracts (e.g. comment counts).
+                // After a parser upgrade, or a change to which entries are kept,
+                // fetch each feed in full once so stored posts pick up what the
+                // new parser extracts and entries skipped before come in.
                 let current = blog
                     .content_hash
                     .as_deref()
-                    .is_some_and(|h| h.starts_with(&hash_prefix()));
+                    .is_some_and(|h| h.starts_with(&self.hash_prefix()));
                 let validators = current.then_some(&validators);
                 match self.http.get(&feed_url, ACCEPT_FEED, validators).await {
                     Ok(f) => f,
@@ -434,8 +437,16 @@ impl Crawler {
                 body,
                 validators,
                 fresh_for,
+                frame_blocked,
                 ..
-            } => self.ingest(blog, &feed_url, &body, &validators, fresh_for).await,
+            } => {
+                // Headers set for the whole site show on the feed too: an
+                // early "no" until the homepage gives the real answer.
+                if frame_blocked && blog.framable.is_none() {
+                    db::set_framable(&self.pool, blog.id, false).await?;
+                }
+                self.ingest(blog, &feed_url, &body, &validators, fresh_for).await
+            }
         }
     }
 
@@ -476,7 +487,7 @@ impl Crawler {
         validators: &Validators,
         fresh_for: Option<Duration>,
     ) -> anyhow::Result<Outcome> {
-        let hash = content_hash(body);
+        let hash = content_hash(&self.hash_prefix(), body);
         if blog.content_hash.as_deref() == Some(hash.as_str()) {
             // The server ignores conditional requests but nothing changed.
             return self.unchanged(blog, Some(validators), fresh_for).await;
@@ -513,7 +524,7 @@ impl Crawler {
         items.truncate(self.c().max_items_per_feed);
 
         let new = self.store_items(blog, &items, t).await?;
-        if new > 0 {
+        if new > 0 && self.c().max_posts_per_blog > 0 {
             db::prune_posts(&self.pool, blog.id, self.c().max_posts_per_blog as i64).await?;
         }
         if blog.full_text_allowed() {
@@ -544,7 +555,7 @@ impl Crawler {
         Ok(Outcome::Updated { new })
     }
 
-    /// Saves a feed's entries with their keywords, tags and topics. Keyword
+    /// Saves a feed's entries with their keywords, tags and category. Keyword
     /// extraction is CPU work and runs off the async threads.
     async fn store_items(&self, blog: &BlogRow, items: &[feed::ParsedItem], t: i64) -> anyhow::Result<usize> {
         if items.is_empty() {
@@ -579,11 +590,11 @@ impl Crawler {
             };
             let up = db::upsert_post(&mut tx, blog.id, item, t, &entry).await?;
             new += usize::from(up.is_new);
-            let derived = analyze::derive(&item.tags, kw, &corpus);
+            let derived = analyze::derive(blog.id, &item.tags, kw, &corpus);
             analyze::save_derived(&mut tx, up.id, &derived).await?;
         }
         tx.commit().await?;
-        analyze::update_blog_topics(&self.pool, &[blog.id]).await?;
+        analyze::update_blog_categories(&self.pool, &[blog.id]).await?;
         Ok(new)
     }
 
@@ -646,19 +657,26 @@ impl Crawler {
     fn slower(&self, current: i64) -> i64 {
         (current * 3 / 2).clamp(self.c().min_refresh_secs as i64, self.c().max_refresh_secs as i64)
     }
+
+    /// The parser version and the settings that decide which entries are
+    /// kept; when any of them changes, every feed is read in full once more.
+    fn hash_prefix(&self) -> String {
+        format!(
+            "v{}-{}d{}i-",
+            feed::PARSER_VERSION,
+            self.c().max_post_age_days,
+            self.c().max_items_per_feed
+        )
+    }
 }
 
-fn hash_prefix() -> String {
-    format!("v{}-", feed::PARSER_VERSION)
-}
-
-/// Change detector for feed bodies, tagged with the parser version.
+/// Change detector for feed bodies, tagged with `Crawler::hash_prefix`.
 /// `DefaultHasher` is stable within a build; after a toolchain upgrade each
 /// feed is simply parsed once more.
-fn content_hash(body: &[u8]) -> String {
+fn content_hash(prefix: &str, body: &[u8]) -> String {
     let mut h = DefaultHasher::new();
     body.hash(&mut h);
-    format!("{}{:016x}", hash_prefix(), h.finish())
+    format!("{prefix}{:016x}", h.finish())
 }
 
 fn feed_full_text(item: &feed::ParsedItem) -> Option<String> {

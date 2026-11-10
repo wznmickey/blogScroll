@@ -5,10 +5,11 @@
 //! index.json        { generated_at, feed_posts, feed_shards, shard_size }
 //! meta.json         = GET /api/meta
 //! tags.json         = GET /api/tags
+//! tag-index.json    every tag used more than once (= GET /api/tags/search), for search
 //! feed-N.json       newest posts, newest first, `shard_size` per file (= latest mode)
 //! related.json      { post id: [related post ids] }, limited to posts in the feed files
 //! blogs.json        every blog (= GET /api/blogs, all pages)
-//! blogs/{id}.json   { blog: GET /api/blogs/{id}, posts: [...] }
+//! blogs/{id}.json   { blog: GET /api/blogs/{id}, posts: [every stored post, newest first] }
 //! ```
 //!
 //! Requests go through the API router in-process, so the files have exactly the
@@ -24,6 +25,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 const RELATED_PER_POST: usize = 8;
+const TAG_INDEX_SIZE: usize = 5000;
 
 pub struct ExportOptions {
     /// How many of the newest posts go into the feed shards.
@@ -52,6 +54,10 @@ pub async fn export(app: Router, out: &Path, opts: &ExportOptions) -> anyhow::Re
 
     write(&tmp.join("meta.json"), &get(&app, "/api/meta").await?)?;
     write(&tmp.join("tags.json"), &get(&app, "/api/tags").await?)?;
+    write(
+        &tmp.join("tag-index.json"),
+        &get(&app, &format!("/api/tags/search?limit={TAG_INDEX_SIZE}")).await?,
+    )?;
 
     let posts = paged(&app, opts.feed_posts, |c| {
         format!(
@@ -93,10 +99,16 @@ pub async fn export(app: Router, out: &Path, opts: &ExportOptions) -> anyhow::Re
     for b in &blogs {
         let id = b["id"].as_i64().context("blog without id")?;
         let blog = get(&app, &format!("/api/blogs/{id}")).await?;
-        let page = get(&app, &format!("/api/posts?mode=latest&blog={id}&limit=100")).await?;
+        let posts = paged(&app, usize::MAX, |c| {
+            format!(
+                "/api/posts?mode=latest&blog={id}&limit=100{}",
+                c.map(|c| format!("&cursor={c}")).unwrap_or_default()
+            )
+        })
+        .await?;
         write(
             &tmp.join(format!("blogs/{id}.json")),
-            &json!({ "blog": blog, "posts": page["items"] }),
+            &json!({ "blog": blog, "posts": posts }),
         )?;
     }
 
@@ -174,6 +186,7 @@ mod tests {
         assert_eq!(read("blogs/1.json")["posts"].as_array().unwrap().len(), 5);
         assert_eq!(read("blogs/1.json")["blog"]["name"], "Blog 1");
         assert!(read("tags.json")["directories"].is_array());
+        assert!(!read("tag-index.json").as_array().unwrap().is_empty());
         let related = read("related.json");
         let first = related
             .as_object()

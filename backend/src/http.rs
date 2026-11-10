@@ -38,7 +38,38 @@ pub enum Fetched {
         body: Bytes,
         /// How long the server says the response stays fresh; we do not ask again sooner.
         fresh_for: Option<Duration>,
+        /// The response may not be shown in a frame on another site.
+        frame_blocked: bool,
     },
+}
+
+/// Whether a response forbids other sites from showing it in a frame:
+/// CSP `frame-ancestors` without a wildcard, or else `X-Frame-Options`
+/// (browsers ignore the latter when the former is present).
+pub fn frame_blocked(headers: &HeaderMap) -> bool {
+    let ancestors: Vec<String> = headers
+        .get_all(header::CONTENT_SECURITY_POLICY)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .map(|d| d.trim().to_ascii_lowercase())
+        .filter(|d| d.split_whitespace().next() == Some("frame-ancestors"))
+        .collect();
+    if !ancestors.is_empty() {
+        return ancestors.iter().any(|d| {
+            !d.split_whitespace()
+                .skip(1)
+                .any(|s| matches!(s, "*" | "https:" | "http:" | "https://*" | "http://*"))
+        });
+    }
+    headers
+        .get_all(header::X_FRAME_OPTIONS)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .any(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "deny" || v == "sameorigin" || v.starts_with("allow-from")
+        })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -92,6 +123,13 @@ impl FetchError {
     pub fn status(&self) -> Option<StatusCode> {
         match self {
             FetchError::Status { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            FetchError::Status { retry_after, .. } => *retry_after,
             _ => None,
         }
     }
@@ -180,12 +218,14 @@ impl PoliteClient {
         };
         let final_url = resp.url().clone();
         let fresh_for = freshness(resp.headers());
+        let frame_blocked = frame_blocked(resp.headers());
         let body = self.read_body(&mut resp).await?;
         Ok(Fetched::Ok {
             final_url,
             validators,
             body,
             fresh_for,
+            frame_blocked,
         })
     }
 
@@ -296,6 +336,39 @@ mod tests {
         let fresh = h(&[(header::EXPIRES, &later)]).unwrap();
         assert!(fresh > Duration::from_secs(7000) && fresh <= Duration::from_secs(7200));
         assert_eq!(h(&[]), None);
+    }
+
+    #[test]
+    fn frame_policy_from_headers() {
+        let h = |pairs: &[(&str, &str)]| {
+            let mut m = HeaderMap::new();
+            for (k, v) in pairs {
+                m.append(
+                    header::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                    HeaderValue::from_str(v).unwrap(),
+                );
+            }
+            frame_blocked(&m)
+        };
+        assert!(!h(&[]));
+        assert!(h(&[("x-frame-options", "DENY")]));
+        assert!(h(&[("x-frame-options", "SAMEORIGIN")]));
+        assert!(h(&[(
+            "content-security-policy",
+            "default-src 'self'; frame-ancestors 'self'"
+        )]));
+        assert!(
+            !h(&[("content-security-policy", "default-src 'self'")]),
+            "no frame-ancestors: no limit"
+        );
+        assert!(
+            !h(&[
+                ("x-frame-options", "SAMEORIGIN"),
+                ("content-security-policy", "frame-ancestors *")
+            ]),
+            "frame-ancestors wins over X-Frame-Options"
+        );
+        assert!(!h(&[("content-security-policy", "frame-ancestors 'self' https:")]));
     }
 
     #[tokio::test(start_paused = true)]

@@ -9,13 +9,19 @@ export interface BlogRef {
   tags?: string[]
   /** Source kind id: blog, news, newsletter, podcast, video, forum, other. */
   kind?: string
+  /** Whether its pages may be shown in a frame here (the reader pane); null = not known yet. */
+  framable?: boolean | null
 }
 
-/** A content area (编程开发, 旅行, ...) computed from posts. */
-export interface TopicRef {
+/**
+ * A category: top-level (`travel`), a sub-category (`tech/ai`, with its
+ * parent), or `other`. Every post has exactly one.
+ */
+export interface CategoryRef {
   id: string
   label: string
-  /** Blogs only: share of the blog's classified posts in this area. */
+  parent?: { id: string; label: string }
+  /** Blogs only: share of the blog's classified posts. */
   share?: number
 }
 
@@ -31,11 +37,11 @@ export interface PostCard {
   excerpt: string
   cover: string | null
   author: string | null
-  /** The author's own categories. */
+  /** The author's own tags and categories. */
   tags: string[]
   /** Tags derived from the post's keywords. */
   auto_tags?: string[]
-  topics?: TopicRef[]
+  category: CategoryRef
   /** Unix seconds. */
   published_at: number | null
   sort_at: number
@@ -114,7 +120,9 @@ export interface BlogSummary {
   description: string | null
   tags: TagRef[]
   kind: KindRef
-  topics: TopicRef[]
+  /** Main top-level categories. */
+  categories: CategoryRef[]
+  framable?: boolean | null
 }
 
 export interface SocialLink {
@@ -141,23 +149,33 @@ export interface TagCount {
   posts: number
 }
 
-export interface TopicCount {
+/** A node of the category tree; `children` are sub-categories. */
+export interface CategoryNode {
   id: string
   label: string
+  /** Top-level only: blogs whose main categories include it. */
+  blogs?: number
+  posts: number
+  children?: CategoryNode[]
+}
+
+export interface TagStat {
+  name: string
   blogs: number
   posts: number
 }
 
 export interface TagsInfo {
   directories: { id: string; name: string; tags: TagCount[] }[]
-  /** Content areas, busiest first. */
-  topics: TopicCount[]
+  /** The category tree, in channel order. */
+  categories: CategoryNode[]
   /** Source kinds present. */
   kinds: { id: string; label: string; blogs: number }[]
-  /** Popular categories from the posts' own feeds, recent months. */
-  categories: { name: string; blogs: number; posts: number }[]
+  /** Popular tags, recent months. */
+  popular_tags: TagStat[]
 }
 
 export type BlogSort = 'recent' | 'posts' | 'name'
 
-export type FeedMode = 'discover' | 'latest' | 'following'
+/** `explore` leans away from the reader's interests, `discover` (with signals) towards them. */
+export type FeedMode = 'discover' | 'explore' | 'latest'

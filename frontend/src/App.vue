@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { loadMeta, loadTags } from './api'
 import AppHeader from './components/AppHeader.vue'
 import PostDetail from './components/PostDetail.vue'
+import ReaderPane from './components/ReaderPane.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -37,4 +38,5 @@ function closePost() {
     </RouterView>
   </main>
   <PostDetail v-if="openPost" :id="openPost" :key="openPost" @close="closePost" />
+  <ReaderPane />
 </template>
