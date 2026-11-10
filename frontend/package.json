@@ -10,6 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "simple-icons": "16.36.0",
     "vue": "^3.5.45",
     "vue-router": "^5.4.0"
   },

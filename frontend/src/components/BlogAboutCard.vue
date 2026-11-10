@@ -6,14 +6,13 @@
 import { computed, ref, watch } from 'vue'
 import { blogDetail } from '../api'
 import { relativeTime } from '../format'
-import { socialLabels } from '../social'
 import type { BlogDetail, BlogRef } from '../types'
 import BlogAvatar from './BlogAvatar.vue'
+import SocialLinks from './SocialLinks.vue'
 
 const props = defineProps<{ blog: BlogRef }>()
 
 const detail = ref<BlogDetail | null>(null)
-const socialNames = computed(() => socialLabels(detail.value?.social ?? []))
 const expanded = ref(false)
 watch(
   () => props.blog.id,
@@ -81,11 +80,7 @@ const longAbout = computed(() => (about.value?.length ?? 0) > 110)
       >
     </p>
 
-    <p v-if="detail?.social.length" class="social">
-      <a v-for="(s, i) in detail.social" :key="s.url" :href="s.url" target="_blank" rel="noopener me">{{
-        socialNames[i]
-      }}</a>
-    </p>
+    <SocialLinks v-if="detail?.social.length" :links="detail.social" />
 
     <footer v-if="$slots.default" class="extra"><slot /></footer>
   </section>
@@ -187,16 +182,6 @@ const longAbout = computed(() => (about.value?.length ?? 0) > 110)
 .tag {
   color: var(--link);
   font-size: 12px;
-}
-.social {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 12px;
-  margin: 10px 0 0;
-  font-size: 12px;
-}
-.social a {
-  color: var(--link);
 }
 .extra {
   display: flex;

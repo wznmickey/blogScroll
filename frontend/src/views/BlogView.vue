@@ -5,16 +5,15 @@ import { api } from '../api'
 import BlogAvatar from '../components/BlogAvatar.vue'
 import FollowButton from '../components/FollowButton.vue'
 import Waterfall from '../components/Waterfall.vue'
+import SocialLinks from '../components/SocialLinks.vue'
 import { hostOf, relativeTime } from '../format'
 import { recordShown } from '../library'
 import { openInReader } from '../reader'
-import { socialLabels } from '../social'
 import type { BlogDetail } from '../types'
 
 const route = useRoute()
 const id = computed(() => Number(route.params.id))
 const blog = ref<BlogDetail | null>(null)
-const socialNames = computed(() => socialLabels(blog.value?.social ?? []))
 const missing = ref(false)
 
 watch(
@@ -88,11 +87,7 @@ const engine = computed(() => blog.value?.generator?.split(/\s+/)[0] ?? null)
         <p v-if="blog.top_tags?.length" class="top-tags">
           <RouterLink v-for="t in blog.top_tags" :key="t" :to="{ path: '/', query: { c: `tag:${t}` } }">#{{ t }}</RouterLink>
         </p>
-        <p v-if="blog.social.length" class="social">
-          <a v-for="(s, i) in blog.social" :key="s.url" :href="s.url" target="_blank" rel="noopener me">{{
-            socialNames[i]
-          }}</a>
-        </p>
+        <SocialLinks v-if="blog?.social.length" :links="blog.social" />
         <p class="stats">
           <span><b>{{ blog.post_count }}</b> 篇文章</span>
           <span v-if="blog.last_post_at">最近更新 {{ relativeTime(blog.last_post_at) }}</span>
@@ -186,16 +181,6 @@ h1 {
   margin: 6px 0 0;
   color: var(--text-2);
   font-size: 14px;
-}
-.social {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 14px;
-  margin: 10px 0 0;
-  font-size: 13px;
-}
-.social a {
-  color: var(--link);
 }
 .about {
   max-width: 880px;
