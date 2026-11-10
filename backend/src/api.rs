@@ -1507,6 +1507,7 @@ struct BlogSummaryRow {
     kind: String,
     categories: String,
     framable: Option<bool>,
+    directory_ids: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1526,6 +1527,8 @@ pub struct BlogSummary {
     categories: Vec<CategoryRef>,
     /// Whether its pages may be shown in a frame on this site (`null` = not known yet).
     framable: Option<bool>,
+    /// Ids of the directories that list it (for readers' choice of sources).
+    directory_ids: Vec<String>,
 }
 
 impl BlogSummary {
@@ -1535,6 +1538,7 @@ impl BlogSummary {
             kind: KindRef::new(&r.kind),
             categories: blog_categories(&r.categories),
             framable: r.framable,
+            directory_ids: serde_json::from_str(&r.directory_ids).unwrap_or_default(),
             id: r.id,
             name: r.name,
             homepage: r.homepage,
@@ -1557,7 +1561,9 @@ macro_rules! blog_summary_sql {
             (SELECT json_group_array(json_object('directory', bt.directory, 'tag', bt.tag))
              FROM blog_tags bt WHERE bt.blog_id = b.id) AS tags,
             COALESCE(b.kind, b.detected_kind, 'blog') AS kind,
-            b.categories, b.framable
+            b.categories, b.framable,
+            (SELECT json_group_array(DISTINCT de.directory) FROM directory_entries de
+             WHERE de.blog_id = b.id AND de.active = 1) AS directory_ids
          FROM blogs b"
     };
 }
