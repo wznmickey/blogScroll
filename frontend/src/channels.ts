@@ -62,9 +62,11 @@ interface Prefs {
   /** Shown channels in order; null = the default list (follows new categories). */
   order: ChannelId[] | null
   pinned: ChannelId[]
-  /** Only posts with a cover image. */
-  cover: boolean
+  /** Posts with a cover image only, text-only posts only, or all. */
+  media: Media
 }
+
+export type Media = 'all' | 'cover' | 'text'
 
 const KEY = 'channels'
 const DEFAULT_PINNED = ['foryou']
@@ -84,7 +86,9 @@ export function cleanPrefs(v: unknown): Prefs {
   return {
     order: ids(o.order),
     pinned: (ids(o.pinned) ?? DEFAULT_PINNED).slice(0, MAX_PINNED),
-    cover: o.cover === true,
+    // Older settings had only "only with images" (`cover: true`).
+    media:
+      o.media === 'cover' || o.media === 'text' ? o.media : (o as { cover?: unknown }).cover === true ? 'cover' : 'all',
   }
 }
 
@@ -185,7 +189,7 @@ export function togglePin(id: ChannelId, info: TagsInfo | null): boolean {
 }
 
 export function resetChannels() {
-  prefs.value = { order: null, pinned: [...DEFAULT_PINNED], cover: prefs.value.cover }
+  prefs.value = { order: null, pinned: [...DEFAULT_PINNED], media: prefs.value.media }
 }
 
 /** Old home page links (?tab=, ?topic=, ?category=, ?tag=) as today's channel and filters. */

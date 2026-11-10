@@ -1,8 +1,9 @@
 <script setup lang="ts">
 // The home page's channel bar. Pinned channels stay at the left; the rest
 // scroll sideways (swipe, mouse wheel, drag, or the arrows on a desktop).
-// The ▾ button opens the manager: reorder, pin, hide, add channels
-// (categories, sources, tags) and the "only with images" switch.
+// 有图 / 无图 narrow any channel to posts with or without a picture. The ▾
+// button opens the manager: reorder, pin, hide, add channels (categories,
+// types, tags).
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { tagsInfo } from '../api'
 import {
@@ -29,10 +30,10 @@ const shownIds = computed(() => new Set([...shown.value.pinned, ...shown.value.r
 /** The open channel when it is not in the bar (a tag or category from a link). */
 const extra = computed(() => (shownIds.value.has(props.active) ? null : channel(props.active, info.value)))
 
-const cover = computed({
-  get: () => prefs.value.cover,
-  set: (v: boolean) => (prefs.value.cover = v),
-})
+/** 有图 / 无图: pressing the pressed one again shows all posts. */
+function toggleMedia(m: 'cover' | 'text') {
+  prefs.value.media = prefs.value.media === m ? 'all' : m
+}
 
 const open = ref(false)
 const note = ref('')
@@ -125,6 +126,26 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
           </svg>
         </button>
       </div>
+      <div class="media" role="group" aria-label="按图片筛选">
+        <button
+          class="media-btn"
+          :class="{ on: prefs.media === 'cover' }"
+          :aria-pressed="prefs.media === 'cover'"
+          title="只看有图的文章"
+          @click="toggleMedia('cover')"
+        >
+          有图
+        </button>
+        <button
+          class="media-btn"
+          :class="{ on: prefs.media === 'text' }"
+          :aria-pressed="prefs.media === 'text'"
+          title="只看纯文字的文章"
+          @click="toggleMedia('text')"
+        >
+          无图
+        </button>
+      </div>
       <button class="more" :class="{ open }" :aria-expanded="open" aria-label="管理频道" @click="open = !open">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
           <path d="m6 9 6 6 6-6" />
@@ -176,12 +197,6 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
         <input v-model="tagText" placeholder="输入标签，例如 Rust" aria-label="标签" />
         <button class="btn btn-ghost" type="submit">添加</button>
       </form>
-
-      <h3>显示</h3>
-      <label class="switch">
-        <input v-model="cover" type="checkbox" />
-        只看有图的文章
-      </label>
     </section>
   </div>
 </template>
@@ -288,6 +303,29 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
 }
 .chip.extra {
   outline: 1px dashed var(--line);
+}
+.media {
+  display: flex;
+  flex: none;
+  padding: 2px;
+  border-radius: 999px;
+  background: var(--surface);
+}
+.media-btn {
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  color: var(--text-2);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.media-btn:hover {
+  color: var(--text);
+}
+.media-btn.on {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
 }
 .more {
   display: grid;
@@ -433,17 +471,6 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
   font: inherit;
   font-size: 14px;
   outline: none;
-}
-.switch {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 14px;
-}
-.switch input {
-  width: 16px;
-  height: 16px;
-  accent-color: var(--accent);
 }
 @media (max-width: 639px) {
   .chip {

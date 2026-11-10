@@ -246,7 +246,7 @@ h1 {
 }
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
   gap: 12px;
   margin: 0;
   padding: 0;
@@ -366,17 +366,24 @@ h2 {
     padding: 12px 6px 8px;
   }
   .controls {
+    flex-wrap: wrap;
     width: 100%;
   }
+  /* The search box gets its own line; the two selects share the next. */
   .controls input {
-    flex: 1;
+    flex: 1 1 100%;
     width: auto;
+    min-width: 0;
+  }
+  .controls select {
+    flex: 1 1 0;
+    min-width: 0;
   }
   .filters {
     padding: 0 6px 12px;
   }
   .grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     gap: 6px;
   }
   .card {

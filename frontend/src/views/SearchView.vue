@@ -255,7 +255,7 @@ h1 {
 }
 .blog-hits {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr));
   gap: 10px;
   margin: 0;
   padding: 0;
@@ -299,7 +299,7 @@ h1 {
 }
 .rows {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr));
   gap: 10px 16px;
   margin: 0 4px;
   padding: 0;
@@ -322,7 +322,7 @@ h1 {
     margin-right: 6px;
   }
   .blog-hits {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 </style>

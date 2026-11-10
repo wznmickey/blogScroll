@@ -507,7 +507,7 @@ pub struct PostQuery {
     /// a little further down, so the same ones do not keep coming back.
     #[serde(default)]
     shown: Option<String>,
-    /// `1`: only posts with a cover image.
+    /// `1`: only posts with a cover image; `none`: only posts without one.
     #[serde(default)]
     cover: Option<String>,
 }
@@ -627,14 +627,14 @@ macro_rules! post_columns {
 }
 
 /// Filters shared by both feed modes, on parameters ?10–?16: directory tag,
-/// directory, cover-only, tag key, category (a top-level one includes its
+/// directory, with or without a cover, tag key, category (a top-level one includes its
 /// sub-categories), kind, blog ids (JSON).
 macro_rules! post_filters {
     () => {
         " AND (?10 IS NULL OR EXISTS (SELECT 1 FROM blog_tags bt WHERE bt.blog_id = b.id AND bt.tag = ?10))
           AND (?11 IS NULL OR EXISTS (SELECT 1 FROM directory_entries de
                  WHERE de.blog_id = b.id AND de.active = 1 AND de.directory = ?11))
-          AND (?12 = 0 OR p.cover_url IS NOT NULL)
+          AND (?12 IS NULL OR (p.cover_url IS NOT NULL) = ?12)
           AND (?13 IS NULL OR EXISTS (SELECT 1 FROM post_terms pt WHERE pt.post_id = p.id AND pt.is_tag = 1 AND pt.term = ?13))
           AND (?14 IS NULL OR p.category = ?14 OR substr(p.category, 1, length(?14) + 1) = ?14 || '/')
           AND (?15 IS NULL OR COALESCE(b.kind, b.detected_kind, 'blog') = ?15)
@@ -645,7 +645,8 @@ macro_rules! post_filters {
 struct Filters<'a> {
     dirtag: Option<&'a str>,
     directory: Option<&'a str>,
-    cover: bool,
+    /// Some(true): only with a cover image, Some(false): only without.
+    cover: Option<bool>,
     tag: Option<String>,
     category: Option<&'a str>,
     kind: Option<&'a str>,
@@ -702,7 +703,11 @@ async fn list_posts(State(st): State<AppState>, Query(q): Query<PostQuery>) -> A
     let f = Filters {
         dirtag: non_empty(&q.dirtag),
         directory: non_empty(&q.directory),
-        cover: truthy(&q.cover),
+        cover: match non_empty(&q.cover) {
+            Some("none" | "no" | "without") => Some(false),
+            _ if truthy(&q.cover) => Some(true),
+            _ => None,
+        },
         tag: non_empty(&q.tag).map(analyze::tag_key),
         category: non_empty(&q.category),
         kind: non_empty(&q.kind),
@@ -1586,6 +1591,10 @@ pub(crate) mod tests {
         let items = v["items"].as_array().unwrap();
         assert_eq!(items.len(), 6);
         assert!(items.iter().all(|it| it["cover"].is_string()));
+        let (_, v) = get_json(&st, "/api/posts?cover=none&limit=100").await;
+        let items = v["items"].as_array().unwrap();
+        assert_eq!(items.len(), 4);
+        assert!(items.iter().all(|it| it["cover"].is_null()), "text-only posts");
 
         let (_, v) = get_json(&st, "/api/posts?tag=%E6%97%A5%E8%AE%B0&limit=100").await;
         let items = v["items"].as_array().unwrap();

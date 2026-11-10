@@ -292,7 +292,7 @@ h1 {
 }
 .blog-list {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr));
   gap: 10px;
   margin: 8px 0 32px;
   padding: 0;
@@ -329,7 +329,7 @@ h1 {
 }
 .backup {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
   gap: 16px;
   max-width: 880px;
   margin: 8px 0 48px;
@@ -396,7 +396,7 @@ h1 {
     padding: 12px 6px 4px;
   }
   .blog-list {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
   .bar {
     flex-wrap: wrap;

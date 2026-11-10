@@ -55,8 +55,8 @@ export interface PostQuery {
   shown?: number[]
   /** Newest-first feeds: start at this post (inclusive) instead of the top. */
   startAt?: { sort_at: number; id: number }
-  /** Only posts with a cover image. */
-  cover?: boolean
+  /** Only posts with a cover image, or only those without one. */
+  media?: 'cover' | 'text'
 }
 
 export interface BlogQuery {
@@ -93,12 +93,12 @@ const liveApi = {
   tags: () => get<TagsInfo>('/api/tags'),
   /** Tags whose name contains `q`, most used first. */
   searchTags: (q: string, limit = 20) => get<TagStat[]>('/api/tags/search', { q, limit }),
-  posts: async ({ cover, blogs, follow, like, save, read, shown, startAt, cursor, ...q }: PostQuery) => {
+  posts: async ({ media, blogs, follow, like, save, read, shown, startAt, cursor, ...q }: PostQuery) => {
     const page = await get<Page<PostCard>>('/api/posts', {
       ...q,
       // The cursor is exclusive: one past the post itself.
       cursor: cursor ?? (startAt ? `${startAt.sort_at}.${startAt.id + 1}` : undefined),
-      cover: cover ? 1 : undefined,
+      cover: media === 'cover' ? 1 : media === 'text' ? 'none' : undefined,
       blogs: list(blogs),
       follow: list(follow),
       like: list(like),

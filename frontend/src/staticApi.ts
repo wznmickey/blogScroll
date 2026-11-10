@@ -90,7 +90,7 @@ function postFilter(q: PostQuery) {
   const cat = q.category
   return (p: PostCard) =>
     (!q.dirtag || (p.blog.tags ?? []).includes(q.dirtag)) &&
-    (!q.cover || !!p.cover) &&
+    (!q.media || (q.media === 'cover') === !!p.cover) &&
     (!cat || p.category.id === cat || p.category.id.startsWith(`${cat}/`)) &&
     (!q.kind || (p.blog.kind ?? 'blog') === q.kind) &&
     (!blogs || blogs.has(p.blog.id)) &&
