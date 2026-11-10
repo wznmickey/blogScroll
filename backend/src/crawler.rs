@@ -244,6 +244,24 @@ impl Crawler {
     /// Profiles and comment counts that are due, on their own schedule (not
     /// only when a feed happens to be due), so a fresh install fills in within
     /// minutes. Only blogs whose last contact succeeded. Returns how many ran.
+    /// Re-reads the profile of up to `limit` blogs last read before
+    /// `before`, due or not; returns how many. A failed read counts as read,
+    /// so repeating this until it returns 0 ends.
+    pub async fn refresh_profiles_before(&self, before: i64, limit: i64) -> anyhow::Result<usize> {
+        let blogs = db::profiles_read_before(&self.pool, before, limit).await?;
+        let n = blogs.len();
+        let tasks = self.c().max_concurrency.max(1) * 16;
+        futures::stream::iter(blogs)
+            .for_each_concurrent(tasks, |b| async move {
+                if let Err(e) = self.refresh_profile(&b, None).await {
+                    tracing::debug!(blog = %b.homepage_url, error = %e, "profile refresh failed");
+                    let _ = db::touch_profile(&self.pool, b.id, now()).await;
+                }
+            })
+            .await;
+        Ok(n)
+    }
+
     /// Reads one blog's profile now, due or not.
     pub async fn refresh_profile_now(&self, blog: &BlogRow) -> anyhow::Result<()> {
         self.refresh_profile(blog, None).await.map(|_| ())

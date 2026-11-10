@@ -397,6 +397,24 @@ pub async fn due_for_enrich(
     .await
 }
 
+/// Blogs whose profile was last read before `before` (or never), whether
+/// due or not: for re-reading every profile at once.
+pub async fn profiles_read_before(pool: &SqlitePool, before: i64, limit: i64) -> sqlx::Result<Vec<BlogRow>> {
+    sqlx::query_as(concat!(
+        "SELECT ",
+        blog_columns!(),
+        " FROM blogs
+         WHERE active = 1 AND excluded = 0 AND flagged IS NULL AND failures = 0 AND last_checked_at IS NOT NULL
+           AND (profile_at IS NULL OR profile_at < ?1)
+         ORDER BY id
+         LIMIT ?2"
+    ))
+    .bind(before)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
 pub async fn due_blogs(pool: &SqlitePool, now: i64, limit: i64) -> sqlx::Result<Vec<BlogRow>> {
     sqlx::query_as(concat!(
         "SELECT ",

@@ -86,6 +86,10 @@ enum Command {
         /// changed their site, or the way profiles are read changed).
         #[arg(long)]
         blog: Option<i64>,
+        /// Re-read every blog's profile now, due or not (after the way
+        /// profiles are read changed). Stopped halfway, run it again.
+        #[arg(long)]
+        force: bool,
     },
     /// Recompute keywords, tags, categories and related-post vectors for every post
     /// (normally done by `serve` every few hours, and before `export`).
@@ -214,6 +218,19 @@ async fn main() -> anyhow::Result<()> {
             let blog = db::blog_by_id(&pool, id).await?.context("no such blog")?;
             crawler.refresh_profile_now(&blog).await?;
             println!("refreshed the profile of {} ({})", blog.name, blog.homepage_url);
+        }
+        Command::Enrich { force: true, limit, .. } => {
+            let start = crate::util::now();
+            let mut total = 0;
+            loop {
+                let n = crawler.refresh_profiles_before(start, limit).await?;
+                if n == 0 {
+                    break;
+                }
+                total += n;
+                tracing::info!(done = total, "profiles re-read");
+            }
+            println!("re-read {total} profiles");
         }
         Command::Enrich { limit, all, .. } => {
             let mut total = 0;
