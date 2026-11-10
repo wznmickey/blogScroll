@@ -320,7 +320,12 @@ impl Crawler {
             .or_else(|| comments::native(info.generator.as_deref()));
 
         let about_text = about.as_ref().and_then(|p| profile::about_text(&p.html));
-        let social = serde_json::to_string(&info.social)?;
+        // Many authors list their accounts only on the about page.
+        let mut social = info.social.clone();
+        if let Some(p) = &about {
+            profile::merge_social(&mut social, profile::social_from_page(&p.html, &p.url));
+        }
+        let social = serde_json::to_string(&social)?;
         let system_json = system.as_ref().map(serde_json::to_string).transpose()?;
         db::save_profile(
             &self.pool,

@@ -14,6 +14,7 @@ use crate::util::truncate_chars;
 
 pub const DESCRIPTION_CHARS: usize = 200;
 pub const ABOUT_CHARS: usize = 300;
+const MAX_SOCIAL: usize = 12;
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct HomeInfo {
@@ -118,31 +119,99 @@ const ABOUT_WORDS: &[&str] = &[
 
 fn about_link(doc: &Html, base: &Url) -> Option<Url> {
     let host = base.host_str()?;
-    doc.select(&sel("a[href]")).find_map(|a| {
-        let url = html::resolve(a.value().attr("href")?, Some(base))?;
-        if url.host_str() != Some(host) {
-            return None;
-        }
-        let text: String = a.text().collect::<String>().trim().to_lowercase();
-        let last = url
-            .path_segments()?
-            .rev()
-            .find(|s| !s.is_empty() && *s != "index.html")
-            .unwrap_or_default()
-            .trim_end_matches(".html")
-            .to_lowercase();
-        let by_path = matches!(last.as_str(), "about" | "about-me" | "aboutme" | "%e5%85%b3%e4%ba%8e");
-        (by_path || ABOUT_WORDS.contains(&text.as_str())).then_some(url)
-    })
+    let candidates: Vec<(Url, bool)> = doc
+        .select(&sel("a[href]"))
+        .filter_map(|a| {
+            let url = html::resolve(a.value().attr("href")?, Some(base))?;
+            if url.host_str() != Some(host) {
+                return None;
+            }
+            // "#about" opens a menu on this page; it is not a page.
+            let mut page = url.clone();
+            page.set_fragment(None);
+            if page.path() == base.path() && page.query() == base.query() {
+                return None;
+            }
+            let text: String = a.text().collect::<String>().trim().to_lowercase();
+            let title = a.value().attr("title").unwrap_or_default().trim().to_lowercase();
+            let last = url
+                .path_segments()?
+                .rev()
+                .find(|s| !s.is_empty() && *s != "index.html")
+                .unwrap_or_default()
+                .trim_end_matches(".html")
+                .to_lowercase();
+            let by_path = matches!(
+                last.as_str(),
+                "about" | "about-me" | "about_me" | "aboutme" | "%e5%85%b3%e4%ba%8e" | "%e5%85%b3%e4%ba%8e%e6%88%91"
+            );
+            let exact = ABOUT_WORDS.contains(&text.as_str()) || ABOUT_WORDS.contains(&title.as_str());
+            // "📝 关于", "关于我 | About me": nothing but about-words once
+            // emoji, spaces and punctuation are gone ("最近关于大模型的探索"
+            // is a post title, not the about page).
+            let letters: String = text.chars().filter(|c| c.is_alphanumeric()).collect();
+            let rest = [
+                "关于我们",
+                "关于本站",
+                "关于博主",
+                "关于博客",
+                "关于我",
+                "关于",
+                "aboutme",
+                "about",
+                "me",
+            ]
+            .iter()
+            .fold(letters.clone(), |s, w| s.replace(w, ""));
+            let loose = !letters.is_empty() && rest.is_empty() && letters != "me";
+            (by_path || exact || loose).then_some((url, by_path || exact))
+        })
+        .collect();
+    // A sure match first, then a loose one.
+    candidates
+        .iter()
+        .find(|(_, sure)| *sure)
+        .or(candidates.first())
+        .map(|(u, _)| u.clone())
 }
 
-/// Profile links: rel="me" anywhere, plus account-shaped URLs on well-known sites.
+/// Social links on any page (the homepage or the about page), to be merged.
+pub fn social_from_page(page: &str, base: &Url) -> Vec<SocialLink> {
+    social_links(&Html::parse_document(page), base)
+}
+
+/// Adds links of kinds not yet present.
+pub fn merge_social(into: &mut Vec<SocialLink>, more: Vec<SocialLink>) {
+    for s in more {
+        if into.len() >= MAX_SOCIAL {
+            break;
+        }
+        if !into.iter().any(|x| x.kind == s.kind) {
+            into.push(s);
+        }
+    }
+}
+
+/// Profile links: rel="me" anywhere (also `<link>` in the head), and
+/// account-shaped URLs on well-known sites, also behind a theme's "you are
+/// leaving this site" redirect, in elements a script turns into links
+/// (NexT's `<span class="exturl" data-url="<base64>">`), or in a theme's
+/// social settings embedded in a script (`"github": "https://github.com/…"`).
 fn social_links(doc: &Html, base: &Url) -> Vec<SocialLink> {
     let mut out: Vec<SocialLink> = Vec::new();
-    for a in doc.select(&sel("a[href]")) {
+    let mut add = |kind: String, url: &Url| {
+        if out.len() < MAX_SOCIAL && !out.iter().any(|s| s.kind == kind) {
+            out.push(SocialLink {
+                kind,
+                url: url.to_string(),
+            });
+        }
+    };
+    for a in doc.select(&sel("a[href], link[rel][href]")) {
         let Some(url) = html::resolve(a.value().attr("href").unwrap_or_default(), Some(base)) else {
             continue;
         };
+        let url = unwrap_redirect(&url, base).unwrap_or(url);
         // Webrings and blog directories are not the author's accounts.
         if url.host_str().is_some_and(|h| WEBRINGS.iter().any(|w| h.ends_with(w))) {
             continue;
@@ -152,21 +221,103 @@ fn social_links(doc: &Html, base: &Url) -> Vec<SocialLink> {
             .attr("rel")
             .unwrap_or_default()
             .split_whitespace()
-            .any(|r| r == "me");
-        let kind = social_kind(&url).or_else(|| (rel_me && url.host_str() != base.host_str()).then(|| "link".into()));
-        if let Some(kind) = kind
-            && !out.iter().any(|s| s.kind == kind)
-        {
-            out.push(SocialLink {
-                kind,
-                url: url.to_string(),
-            });
+            .any(|r| r.eq_ignore_ascii_case("me"));
+        // From the head only rel="me" counts (not stylesheets, feeds, ...).
+        if a.value().name() == "link" && !rel_me {
+            continue;
         }
-        if out.len() >= 6 {
-            break;
+        let kind = social_kind(&url).or_else(|| (rel_me && url.host_str() != base.host_str()).then(|| "link".into()));
+        if let Some(kind) = kind {
+            add(kind, &url);
+        }
+    }
+    for el in doc.select(&sel("[data-url], [data-href]")) {
+        let v = el.value();
+        let raw = v.attr("data-url").or(v.attr("data-href")).unwrap_or_default().trim();
+        let text = if raw.starts_with("http") {
+            raw.to_string()
+        } else {
+            match base64_decode(raw).and_then(|b| String::from_utf8(b).ok()) {
+                Some(t) => t,
+                None => continue,
+            }
+        };
+        if let Ok(url) = Url::parse(&text)
+            && let Some(kind) = social_kind(&url)
+        {
+            add(kind, &url);
+        }
+    }
+    for script in doc.select(&sel("script")) {
+        let text: String = script.text().collect();
+        for c in SCRIPT_SOCIAL.captures_iter(&text) {
+            let raw = c[1].replace("\\/", "/");
+            if let Ok(url) = Url::parse(&raw)
+                && let Some(kind) = social_kind(&url)
+            {
+                add(kind, &url);
+            }
         }
     }
     out
+}
+
+/// Themes' social settings in scripts: a platform name as the key and a URL
+/// as the value. Friend lists use "link"/"url" keys, so they do not match.
+static SCRIPT_SOCIAL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?i)["'](?:github|gitee|gitlab|bilibili|weibo|zhihu|twitter|x|telegram|instagram|youtube|douban|xiaohongshu|steam|pixiv|bangumi|juejin|csdn|v2ex|mastodon|bluesky|linkedin|facebook|netease|neteasemusic|music|coolapk|douyin)["']\s*:\s*["'](https?:(?:\\?/){2}[^"'\s]+)["']"#,
+    )
+    .unwrap()
+});
+
+/// Themes send outbound links through a "you are leaving" page on their own
+/// site: `/go.html?u=<base64>`, `/link?url=<url>`, ...
+fn unwrap_redirect(url: &Url, base: &Url) -> Option<Url> {
+    if url.host_str() != base.host_str() {
+        return None;
+    }
+    url.query_pairs().find_map(|(k, v)| {
+        if !matches!(
+            k.as_ref(),
+            "u" | "url" | "target" | "link" | "to" | "goto" | "redirect" | "href"
+        ) {
+            return None;
+        }
+        let v = v.trim();
+        let text = if v.starts_with("http") {
+            v.to_string()
+        } else {
+            String::from_utf8(base64_decode(v)?).ok()?
+        };
+        Url::parse(&text)
+            .ok()
+            .filter(|u| matches!(u.scheme(), "http" | "https"))
+    })
+}
+
+/// Standard or URL-safe base64, padding optional.
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    let mut bits: u32 = 0;
+    let mut n = 0;
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    for c in s.bytes().take_while(|c| *c != b'=') {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => return None,
+        };
+        bits = (bits << 6) | u32::from(v);
+        n += 6;
+        if n >= 8 {
+            n -= 8;
+            out.push((bits >> n) as u8);
+        }
+    }
+    Some(out)
 }
 
 const WEBRINGS: &[&str] = &["travellings.cn", "travellings.link", "foreverblog.cn", "boyouquan.com"];
@@ -174,22 +325,70 @@ const WEBRINGS: &[&str] = &["travellings.cn", "travellings.link", "foreverblog.c
 fn social_kind(url: &Url) -> Option<String> {
     let host = url.host_str()?.trim_start_matches("www.");
     let segs: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
+    // A file (an avatar, a badge) is not an account.
+    if segs.last().is_some_and(|s| s.contains('.')) {
+        return None;
+    }
     let kind = match (host, segs.as_slice()) {
         ("github.com", [_]) => "github",
-        ("gitee.com", [user]) if !user.is_empty() => "gitee",
+        ("gitee.com", [_]) => "gitee",
+        ("gitlab.com" | "codeberg.org", [_]) => "gitlab",
         ("space.bilibili.com", [_id, ..]) => "bilibili",
-        ("weibo.com", [_, ..]) => "weibo",
+        ("m.bilibili.com", ["space", _, ..]) => "bilibili",
+        ("weibo.com", [_, ..]) | ("m.weibo.cn" | "weibo.cn", ["u" | "profile", _, ..]) => "weibo",
         ("zhihu.com", ["people", _, ..]) => "zhihu",
         ("twitter.com" | "x.com", [_]) => "x",
-        ("t.me", [_]) => "telegram",
+        ("t.me" | "telegram.me", [_]) => "telegram",
         ("instagram.com", [_]) => "instagram",
-        ("youtube.com", [ch, ..]) if ch.starts_with('@') || *ch == "channel" => "youtube",
+        ("youtube.com", [ch, ..]) if ch.starts_with('@') || matches!(*ch, "channel" | "c" | "user") => "youtube",
         ("douban.com", ["people", _, ..]) => "douban",
         ("xiaohongshu.com", ["user", "profile", _]) => "xiaohongshu",
+        ("douyin.com", ["user", _]) => "douyin",
+        ("steamcommunity.com", ["id" | "profiles", _, ..]) => "steam",
+        ("pixiv.net", ["users", _] | [_, "users", _]) => "pixiv",
+        ("bgm.tv" | "bangumi.tv" | "chii.in", ["user", _, ..]) => "bangumi",
+        ("juejin.cn", ["user", _, ..]) => "juejin",
+        ("blog.csdn.net", [_]) => "csdn",
+        ("v2ex.com", ["member", _]) => "v2ex",
+        ("coolapk.com", ["u", _]) => "coolapk",
+        ("bsky.app", ["profile", _]) => "bluesky",
+        ("linkedin.com", ["in", _, ..]) => "linkedin",
+        ("facebook.com", [_]) => "facebook",
+        ("threads.net", [u]) if u.starts_with('@') => "threads",
+        ("twitch.tv", [_]) => "twitch",
+        ("music.163.com", _)
+            if url
+                .fragment()
+                .is_some_and(|f| f.trim_start_matches('/').starts_with("user/home")) =>
+        {
+            "netease_music"
+        }
+        // Mastodon, Misskey and the like: https://<instance>/@<name>.
+        (_, [u]) if u.starts_with('@') && u.len() > 1 && host != "medium.com" => "fediverse",
         _ => return None,
     };
-    // github.com/<user> only; skip github.com/features etc.
-    if kind == "github" && ["features", "about", "pricing", "login", "topics", "explore"].contains(&segs[0]) {
+    // Account pages only: not github.com/features, x.com/intent and the like.
+    const NOT_ACCOUNTS: &[&str] = &[
+        "features",
+        "about",
+        "pricing",
+        "login",
+        "topics",
+        "explore",
+        "intent",
+        "share",
+        "home",
+        "search",
+        "settings",
+        "sponsors",
+        "marketplace",
+        "orgs",
+        "apps",
+        "watch",
+        "hashtag",
+        "i",
+    ];
+    if segs.len() == 1 && NOT_ACCOUNTS.contains(&segs[0]) {
         return None;
     }
     Some(kind.to_string())
@@ -321,7 +520,11 @@ mod tests {
         assert_eq!(h.about.unwrap().as_str(), "https://blog.example/about/index.html");
         assert_eq!(h.generator.as_deref(), Some("Hexo 7.3.0"));
         let kinds: Vec<&str> = h.social.iter().map(|s| s.kind.as_str()).collect();
-        assert_eq!(kinds, ["github", "bilibili", "link"]);
+        assert_eq!(
+            kinds,
+            ["github", "bilibili", "fediverse"],
+            "an /@name page is a fediverse account"
+        );
     }
 
     #[test]
@@ -360,6 +563,91 @@ mod tests {
         let t = about_text(&page).unwrap();
         assert!(!t.contains('@'), "{t}");
         assert!(t.contains("[邮箱见原页]"));
+    }
+
+    #[test]
+    fn more_platforms_redirects_scripts_and_link_rel_me() {
+        let base = Url::parse("https://b.example/").unwrap();
+        // /go.html?u=base64("https://bgm.tv/user/someone")
+        let go = format!("/go.html?u={}", "aHR0cHM6Ly9iZ20udHYvdXNlci9zb21lb25l");
+        let page = format!(
+            r#"<head><link rel="me" href="https://mastodon.social/@someone"><link rel="stylesheet" href="https://github.com/x"></head>
+            <a href="{go}">Bangumi</a>
+            <a href="https://music.163.com/#/user/home?id=445441609">网易云</a>
+            <a href="https://www.pixiv.net/users/61761697">pixiv</a>
+            <a href="https://github.com/someone.png">avatar, not an account</a>
+            <a href="https://x.com/intent/tweet?text=hi">share, not an account</a>
+            <script>window.KEEP = {{"links":{{"github":"https:\/\/github.com\/kawashiro-ryofu","x":"https://x.com/bkryofu","qq":null}},
+              "friends":[{{"name":"a friend","link":"https://github.com/afriend"}}]}}</script>"#
+        );
+        let kinds: Vec<(String, String)> = social_from_page(&page, &base)
+            .into_iter()
+            .map(|s| (s.kind, s.url))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("fediverse".into(), "https://mastodon.social/@someone".into()),
+                ("bangumi".into(), "https://bgm.tv/user/someone".into()),
+                (
+                    "netease_music".into(),
+                    "https://music.163.com/#/user/home?id=445441609".into()
+                ),
+                ("pixiv".into(), "https://www.pixiv.net/users/61761697".into()),
+                ("github".into(), "https://github.com/kawashiro-ryofu".into()),
+                ("x".into(), "https://x.com/bkryofu".into()),
+            ] as [(String, String); 6]
+        );
+    }
+
+    #[test]
+    fn next_theme_exturl_spans() {
+        let base = Url::parse("https://b.example/").unwrap();
+        // NexT with `exturl: true`: base64("https://github.com/wznmickey") etc.
+        let page = r#"<span class="links-of-author-item">
+            <span class="exturl" data-url="aHR0cHM6Ly9naXRodWIuY29tL3d6bm1pY2tleQ==" title="GitHub"><i class="fab fa-github"></i></span>
+            <span class="exturl" data-url="aHR0cHM6Ly93d3cubGlua2VkaW4uY29tL2luL3d6bm1pY2tleS8="><i class="fab fa-linkedin"></i></span>
+            <span data-url="not base64 at all!"></span></span>"#;
+        let got: Vec<(String, String)> = social_from_page(page, &base)
+            .into_iter()
+            .map(|s| (s.kind, s.url))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("github".into(), "https://github.com/wznmickey".into()),
+                ("linkedin".into(), "https://www.linkedin.com/in/wznmickey/".into()),
+            ] as [(String, String); 2]
+        );
+    }
+
+    #[test]
+    fn about_page_links_are_added_to_the_homes() {
+        let mut social = vec![SocialLink {
+            kind: "github".into(),
+            url: "https://github.com/a".into(),
+        }];
+        let base = Url::parse("https://b.example/about/").unwrap();
+        let about = r#"<a href="https://github.com/b">GitHub</a><a href="https://space.bilibili.com/1">B站</a>"#;
+        merge_social(&mut social, social_from_page(about, &base));
+        let urls: Vec<&str> = social.iter().map(|s| s.url.as_str()).collect();
+        assert_eq!(urls, ["https://github.com/a", "https://space.bilibili.com/1"]);
+    }
+
+    #[test]
+    fn loose_about_labels() {
+        let base = Url::parse("https://b.example/").unwrap();
+        let h = from_home(
+            r##"<a href="#about">关于</a><a href="/archives/138">最近关于大模型的探索历程</a><a href="/me/">📝 关于我 | About me</a>"##,
+            &base,
+        );
+        assert_eq!(h.about.unwrap().as_str(), "https://b.example/me/");
+        let h = from_home(r#"<a href="/x/">关于 About</a><a href="/about/">个人介绍</a>"#, &base);
+        assert_eq!(
+            h.about.unwrap().as_str(),
+            "https://b.example/about/",
+            "a sure match wins"
+        );
     }
 
     #[test]
