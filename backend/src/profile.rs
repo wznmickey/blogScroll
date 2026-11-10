@@ -14,7 +14,10 @@ use crate::util::truncate_chars;
 
 pub const DESCRIPTION_CHARS: usize = 200;
 pub const ABOUT_CHARS: usize = 300;
-const MAX_SOCIAL: usize = 12;
+const MAX_SOCIAL: usize = 16;
+/// Authors often have more than one account on a platform (a main and an
+/// English X account, a personal and a project GitHub).
+const MAX_PER_KIND: usize = 3;
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct HomeInfo {
@@ -175,21 +178,121 @@ fn about_link(doc: &Html, base: &Url) -> Option<Url> {
         .map(|(u, _)| u.clone())
 }
 
-/// Social links on any page (the homepage or the about page), to be merged.
-pub fn social_from_page(page: &str, base: &Url) -> Vec<SocialLink> {
-    social_links(&Html::parse_document(page), base)
+/// Social links on any page (the homepage or the about page), to be merged:
+/// each with whether it may be a platform's second account.
+pub fn social_from_page(page: &str, base: &Url) -> Vec<(SocialLink, bool)> {
+    social_candidates(&Html::parse_document(page), base)
 }
 
-/// Adds links of kinds not yet present.
-pub fn merge_social(into: &mut Vec<SocialLink>, more: Vec<SocialLink>) {
-    for s in more {
-        if into.len() >= MAX_SOCIAL {
-            break;
-        }
-        if !into.iter().any(|x| x.kind == s.kind) {
+/// Adds accounts not yet present: a platform's first from anywhere, more (up
+/// to [`MAX_PER_KIND`]) only from the author's own lists of links.
+pub fn merge_social(into: &mut Vec<SocialLink>, more: Vec<(SocialLink, bool)>) {
+    for (s, extra_ok) in more {
+        let key = account_key(&s.url);
+        let same_kind = into.iter().filter(|x| x.kind == s.kind).count();
+        if into.len() < MAX_SOCIAL
+            && !into.iter().any(|x| account_key(&x.url) == key)
+            && (same_kind == 0 || (extra_ok && same_kind < MAX_PER_KIND))
+        {
             into.push(s);
         }
     }
+}
+
+/// One account however it is written: twitter.com or x.com, with or without
+/// "www.", a trailing slash, a query, or different letter case.
+fn account_key(url: &str) -> String {
+    let Ok(u) = Url::parse(url) else {
+        return url.to_ascii_lowercase();
+    };
+    let host = u.host_str().unwrap_or_default().trim_start_matches("www.");
+    let host = match host {
+        "twitter.com" => "x.com",
+        "telegram.me" => "t.me",
+        "bangumi.tv" | "chii.in" => "bgm.tv",
+        h => h,
+    };
+    let mut key = format!("{host}{}", u.path().trim_end_matches('/'));
+    // NetEase Music keeps the account in the fragment: #/user/home?id=…
+    if host == "music.163.com" {
+        key.push_str(u.fragment().unwrap_or_default());
+    }
+    key.to_ascii_lowercase()
+}
+
+/// Where a link may be someone else's account: in a footer (theme credits),
+/// comments or a friend list, or mentioned in a sentence ("a student of
+/// @SomeUniversity").
+fn others_context(el: &ElementRef) -> bool {
+    in_others_section(el) || in_prose(el)
+}
+
+fn in_others_section(el: &ElementRef) -> bool {
+    el.ancestors().filter_map(ElementRef::wrap).any(|a| {
+        let v = a.value();
+        if v.name() == "footer" {
+            return true;
+        }
+        let marks = format!(
+            "{} {}",
+            v.attr("class").unwrap_or_default(),
+            v.attr("id").unwrap_or_default()
+        )
+        .to_ascii_lowercase();
+        [
+            "footer",
+            "copyright",
+            "powered",
+            "comment",
+            "friend",
+            "flink",
+            "blogroll",
+        ]
+        .iter()
+        .any(|m| marks.contains(m))
+    })
+}
+
+/// The link's block (paragraph, list item, ...) has text of its own besides
+/// links: a list of profile links has next to none.
+fn in_prose(el: &ElementRef) -> bool {
+    const BLOCKS: &[&str] = &[
+        "p",
+        "li",
+        "dd",
+        "td",
+        "blockquote",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "div",
+        "section",
+        "article",
+    ];
+    let Some(block) = el
+        .ancestors()
+        .filter_map(ElementRef::wrap)
+        .find(|a| BLOCKS.contains(&a.value().name()))
+    else {
+        return false;
+    };
+    let is_link =
+        |e: &scraper::node::Element| e.name() == "a" || e.attr("data-url").is_some() || e.attr("data-href").is_some();
+    let own_text: usize = block
+        .descendants()
+        .filter_map(|n| n.value().as_text().map(|t| (n, t)))
+        .filter(|(n, _)| {
+            !n.ancestors()
+                .take_while(|a| a.id() != block.id())
+                .filter_map(ElementRef::wrap)
+                .any(|a| is_link(a.value()))
+        })
+        .map(|(_, t)| t.chars().filter(|c| !c.is_whitespace()).count())
+        .sum();
+    own_text > 30
 }
 
 /// Profile links: rel="me" anywhere (also `<link>` in the head), and
@@ -198,13 +301,26 @@ pub fn merge_social(into: &mut Vec<SocialLink>, more: Vec<SocialLink>) {
 /// (NexT's `<span class="exturl" data-url="<base64>">`), or in a theme's
 /// social settings embedded in a script (`"github": "https://github.com/…"`).
 fn social_links(doc: &Html, base: &Url) -> Vec<SocialLink> {
-    let mut out: Vec<SocialLink> = Vec::new();
-    let mut add = |kind: String, url: &Url| {
-        if out.len() < MAX_SOCIAL && !out.iter().any(|s| s.kind == kind) {
-            out.push(SocialLink {
-                kind,
-                url: url.to_string(),
-            });
+    let mut out = Vec::new();
+    merge_social(&mut out, social_candidates(doc, base));
+    out
+}
+
+/// Every distinct account on the page, and whether it may be a platform's
+/// second one.
+fn social_candidates(doc: &Html, base: &Url) -> Vec<(SocialLink, bool)> {
+    let mut found: Vec<(SocialLink, bool)> = Vec::new();
+    let mut add = |kind: String, url: &Url, extra_ok: bool| {
+        let key = account_key(url.as_str());
+        match found.iter_mut().find(|(s, _)| account_key(&s.url) == key) {
+            Some((_, ok)) => *ok |= extra_ok,
+            None => found.push((
+                SocialLink {
+                    kind,
+                    url: url.to_string(),
+                },
+                extra_ok,
+            )),
         }
     };
     for a in doc.select(&sel("a[href], link[rel][href]")) {
@@ -228,7 +344,7 @@ fn social_links(doc: &Html, base: &Url) -> Vec<SocialLink> {
         }
         let kind = social_kind(&url).or_else(|| (rel_me && url.host_str() != base.host_str()).then(|| "link".into()));
         if let Some(kind) = kind {
-            add(kind, &url);
+            add(kind, &url, rel_me || !others_context(&a));
         }
     }
     for el in doc.select(&sel("[data-url], [data-href]")) {
@@ -245,21 +361,32 @@ fn social_links(doc: &Html, base: &Url) -> Vec<SocialLink> {
         if let Ok(url) = Url::parse(&text)
             && let Some(kind) = social_kind(&url)
         {
-            add(kind, &url);
+            add(kind, &url, !others_context(&el));
         }
     }
     for script in doc.select(&sel("script")) {
         let text: String = script.text().collect();
         for c in SCRIPT_SOCIAL.captures_iter(&text) {
             let raw = c[1].replace("\\/", "/");
+            // A theme's social settings are the author's own.
             if let Ok(url) = Url::parse(&raw)
                 && let Some(kind) = social_kind(&url)
             {
-                add(kind, &url);
+                add(kind, &url, true);
             }
         }
     }
-    out
+    // A page linking many accounts on one platform is listing other people:
+    // only the first of those counts, as for links in footers and comments.
+    let crowded: Vec<bool> = found
+        .iter()
+        .map(|(s, _)| found.iter().filter(|(x, ok)| *ok && x.kind == s.kind).count() > MAX_PER_KIND)
+        .collect();
+    found
+        .into_iter()
+        .zip(crowded)
+        .map(|((s, ok), crowded)| (s, ok && !crowded))
+        .collect()
 }
 
 /// Themes' social settings in scripts: a platform name as the key and a URL
@@ -582,7 +709,7 @@ mod tests {
         );
         let kinds: Vec<(String, String)> = social_from_page(&page, &base)
             .into_iter()
-            .map(|s| (s.kind, s.url))
+            .map(|(s, _)| (s.kind, s.url))
             .collect();
         assert_eq!(
             kinds,
@@ -610,7 +737,7 @@ mod tests {
             <span data-url="not base64 at all!"></span></span>"#;
         let got: Vec<(String, String)> = social_from_page(page, &base)
             .into_iter()
-            .map(|s| (s.kind, s.url))
+            .map(|(s, _)| (s.kind, s.url))
             .collect();
         assert_eq!(
             got,
@@ -628,10 +755,20 @@ mod tests {
             url: "https://github.com/a".into(),
         }];
         let base = Url::parse("https://b.example/about/").unwrap();
-        let about = r#"<a href="https://github.com/b">GitHub</a><a href="https://space.bilibili.com/1">B站</a>"#;
+        let about = r#"<p>My lab is <a href="https://github.com/lab">the lab</a>, where we build robots and other things.</p>
+            <a href="https://github.com/b">GitHub</a><a href="https://space.bilibili.com/1">B站</a>"#;
         merge_social(&mut social, social_from_page(about, &base));
         let urls: Vec<&str> = social.iter().map(|s| s.url.as_str()).collect();
-        assert_eq!(urls, ["https://github.com/a", "https://space.bilibili.com/1"]);
+        // The lab is mentioned in a sentence; on its own page it would be the
+        // first GitHub link, but next to the homepage's it is not another account.
+        assert_eq!(
+            urls,
+            [
+                "https://github.com/a",
+                "https://github.com/b",
+                "https://space.bilibili.com/1"
+            ]
+        );
     }
 
     #[test]
@@ -658,6 +795,57 @@ mod tests {
             &base,
         );
         assert!(h.social.is_empty());
+    }
+
+    #[test]
+    fn several_accounts_on_one_platform() {
+        let base = Url::parse("https://b.example/").unwrap();
+        let h = from_home(
+            r#"<div class="links-of-author">
+                 <a href="https://twitter.com/me">Twitter</a>
+                 <a href="https://twitter.com/meEn">Twitter in English</a>
+                 <a href="https://x.com/Me/">X again</a>
+               </div>
+               <p>A student of <a href="https://github.com/uni">@uni</a>. I'm currently learning Japanese.</p>
+               <a href="https://github.com/me">GitHub</a>
+               <p>I write about <a href="https://github.com/project">my project</a> here, and much more besides that.</p>
+               <footer>Theme by <a href="https://github.com/themeauthor">someone</a></footer>"#,
+            &base,
+        );
+        let urls: Vec<&str> = h.social.iter().map(|s| s.url.as_str()).collect();
+        // The same account written another way is not a second one; a
+        // mention in a sentence or a theme credit is someone else's, though
+        // the first GitHub link (in a sentence) is still taken, as before.
+        assert_eq!(
+            urls,
+            [
+                "https://twitter.com/me",
+                "https://twitter.com/meEn",
+                "https://github.com/uni",
+                "https://github.com/me"
+            ]
+        );
+
+        let many: String = (0..6)
+            .map(|i| format!(r#"<li><a href="https://github.com/friend{i}">friend{i}</a></li>"#))
+            .collect();
+        let h = from_home(&format!("<ul>{many}</ul>"), &base);
+        assert_eq!(h.social.len(), 1, "a long list is other people: {:?}", h.social);
+
+        let mut merged = h.social.clone();
+        let github = |u: &str| SocialLink {
+            kind: "github".into(),
+            url: u.into(),
+        };
+        merge_social(
+            &mut merged,
+            vec![
+                (github("https://github.com/Friend0"), true),
+                (github("https://github.com/second"), true),
+                (github("https://github.com/mentioned"), false),
+            ],
+        );
+        assert_eq!(merged.len(), 2);
     }
 
     #[test]

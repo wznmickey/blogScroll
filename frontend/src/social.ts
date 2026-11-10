@@ -30,3 +30,40 @@ const SOCIAL: Record<string, string> = {
 }
 
 export const socialLabel = (kind: string) => SOCIAL[kind] ?? kind
+
+// Path segments before the account's name: zhihu.com/people/<name>, ...
+const PREFIXES = new Set(['people', 'user', 'users', 'u', 'profile', 'profiles', 'in', 'id', 'member', 'space', 'channel', 'c'])
+
+/** The account's name in its URL: "wznmickeyEn" in https://x.com/wznmickeyEn
+ *  (a personal site: its host). */
+function handleOf(kind: string, url: string): string {
+  try {
+    const u = new URL(url)
+    const host = u.hostname.replace(/^www\./, '')
+    if (kind === 'link') return host
+    // NetEase Music: #/user/home?id=<id>
+    if (u.hostname === 'music.163.com') return new URLSearchParams(u.hash.split('?')[1] ?? '').get('id') ?? ''
+    const seg = u.pathname
+      .split('/')
+      .filter(Boolean)
+      .find((s) => !PREFIXES.has(s))
+    return seg ? decodeURIComponent(seg) : host
+  } catch {
+    return ''
+  }
+}
+
+/** Names for a list of links: "X", and for more accounts on the same
+ *  platform "X (wznmickeyEn)". */
+export function socialLabels(links: { kind: string; url: string }[]): string[] {
+  const seen = new Set<string>()
+  return links.map(({ kind, url }) => {
+    const label = socialLabel(kind)
+    if (!seen.has(kind)) {
+      seen.add(kind)
+      return label
+    }
+    const handle = handleOf(kind, url)
+    return handle ? `${label} (${handle})` : label
+  })
+}

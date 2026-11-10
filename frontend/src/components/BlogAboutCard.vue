@@ -6,13 +6,14 @@
 import { computed, ref, watch } from 'vue'
 import { blogDetail } from '../api'
 import { relativeTime } from '../format'
-import { socialLabel } from '../social'
+import { socialLabels } from '../social'
 import type { BlogDetail, BlogRef } from '../types'
 import BlogAvatar from './BlogAvatar.vue'
 
 const props = defineProps<{ blog: BlogRef }>()
 
 const detail = ref<BlogDetail | null>(null)
+const socialNames = computed(() => socialLabels(detail.value?.social ?? []))
 const expanded = ref(false)
 watch(
   () => props.blog.id,
@@ -81,8 +82,8 @@ const longAbout = computed(() => (about.value?.length ?? 0) > 110)
     </p>
 
     <p v-if="detail?.social.length" class="social">
-      <a v-for="s in detail.social" :key="s.url" :href="s.url" target="_blank" rel="noopener me">{{
-        socialLabel(s.kind)
+      <a v-for="(s, i) in detail.social" :key="s.url" :href="s.url" target="_blank" rel="noopener me">{{
+        socialNames[i]
       }}</a>
     </p>
 

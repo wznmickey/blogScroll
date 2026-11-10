@@ -8,12 +8,13 @@ import Waterfall from '../components/Waterfall.vue'
 import { hostOf, relativeTime } from '../format'
 import { recordShown } from '../library'
 import { openInReader } from '../reader'
-import { socialLabel } from '../social'
+import { socialLabels } from '../social'
 import type { BlogDetail } from '../types'
 
 const route = useRoute()
 const id = computed(() => Number(route.params.id))
 const blog = ref<BlogDetail | null>(null)
+const socialNames = computed(() => socialLabels(blog.value?.social ?? []))
 const missing = ref(false)
 
 watch(
@@ -88,8 +89,8 @@ const engine = computed(() => blog.value?.generator?.split(/\s+/)[0] ?? null)
           <RouterLink v-for="t in blog.top_tags" :key="t" :to="{ path: '/', query: { c: `tag:${t}` } }">#{{ t }}</RouterLink>
         </p>
         <p v-if="blog.social.length" class="social">
-          <a v-for="s in blog.social" :key="s.url" :href="s.url" target="_blank" rel="noopener me">{{
-            socialLabel(s.kind)
+          <a v-for="(s, i) in blog.social" :key="s.url" :href="s.url" target="_blank" rel="noopener me">{{
+            socialNames[i]
           }}</a>
         </p>
         <p class="stats">
