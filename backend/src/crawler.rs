@@ -244,6 +244,11 @@ impl Crawler {
     /// Profiles and comment counts that are due, on their own schedule (not
     /// only when a feed happens to be due), so a fresh install fills in within
     /// minutes. Only blogs whose last contact succeeded. Returns how many ran.
+    /// Reads one blog's profile now, due or not.
+    pub async fn refresh_profile_now(&self, blog: &BlogRow) -> anyhow::Result<()> {
+        self.refresh_profile(blog, None).await.map(|_| ())
+    }
+
     pub async fn enrich_due(&self, limit: i64) -> anyhow::Result<usize> {
         let blogs = db::due_for_enrich(
             &self.pool,

@@ -82,6 +82,10 @@ enum Command {
         /// Keep going until nothing is due.
         #[arg(long)]
         all: bool,
+        /// Re-read just this blog's profile now, due or not (after its author
+        /// changed their site, or the way profiles are read changed).
+        #[arg(long)]
+        blog: Option<i64>,
     },
     /// Recompute keywords, tags, categories and related-post vectors for every post
     /// (normally done by `serve` every few hours, and before `export`).
@@ -206,7 +210,12 @@ async fn main() -> anyhow::Result<()> {
             };
             println!("{stats:#?}");
         }
-        Command::Enrich { limit, all } => {
+        Command::Enrich { blog: Some(id), .. } => {
+            let blog = db::blog_by_id(&pool, id).await?.context("no such blog")?;
+            crawler.refresh_profile_now(&blog).await?;
+            println!("refreshed the profile of {} ({})", blog.name, blog.homepage_url);
+        }
+        Command::Enrich { limit, all, .. } => {
             let mut total = 0;
             loop {
                 let n = crawler.enrich_due(limit).await?;
