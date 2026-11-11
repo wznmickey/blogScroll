@@ -180,14 +180,44 @@ pub async fn save_directory(
         .bind(now)
         .execute(&mut *tx)
         .await?;
-    sqlx::query(
-        "UPDATE blogs SET active = EXISTS (
-            SELECT 1 FROM directory_entries d WHERE d.blog_id = blogs.id AND d.active = 1)",
-    )
-    .execute(&mut *tx)
-    .await?;
+    refresh_listing(&mut tx).await?;
     tx.commit().await?;
     Ok(saved)
+}
+
+/// The directory of feeds readers added themselves (sources/readers.rs).
+pub const READERS: &str = "readers";
+
+/// Which blogs are listed, from their directory entries: `active` when some
+/// directory lists them, `private` when only readers' own feeds do.
+pub async fn refresh_listing(conn: &mut sqlx::SqliteConnection) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE blogs SET
+            active = EXISTS (SELECT 1 FROM directory_entries d WHERE d.blog_id = blogs.id AND d.active = 1),
+            private = NOT EXISTS (SELECT 1 FROM directory_entries d
+                WHERE d.blog_id = blogs.id AND d.active = 1 AND d.directory <> ?)",
+    )
+    .bind(READERS)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// Directories no longer in the config list nothing: their blogs leave the
+/// site unless another lists them (entries and posts are kept).
+pub async fn retire_directories(pool: &SqlitePool, configured: &[&str]) -> sqlx::Result<u64> {
+    let mut tx = pool.begin().await?;
+    let n = sqlx::query(
+        "UPDATE directory_entries SET active = 0
+         WHERE active = 1 AND directory NOT IN (SELECT value FROM json_each(?))",
+    )
+    .bind(serde_json::to_string(configured).unwrap_or_default())
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    refresh_listing(&mut tx).await?;
+    tx.commit().await?;
+    Ok(n)
 }
 
 /// Applies `[policy]` from the config: opt-outs, full-text grants and feed overrides.
@@ -438,6 +468,31 @@ pub async fn blog_by_id(pool: &SqlitePool, id: i64) -> sqlx::Result<Option<BlogR
     .bind(id)
     .fetch_optional(pool)
     .await
+}
+
+/// A blog by its address (`example.com/blog`) or by its feed's (`https://...`,
+/// also as a reader registered it).
+pub async fn blog_by_site_or_feed(pool: &SqlitePool, site: &str) -> sqlx::Result<Option<BlogRow>> {
+    let id: Option<i64> = if site.contains("://") {
+        sqlx::query_scalar(
+            "SELECT id FROM blogs WHERE feed_url = ?1
+             UNION ALL SELECT blog_id FROM directory_entries WHERE directory = ?2 AND external_id = ?1
+             LIMIT 1",
+        )
+        .bind(site)
+        .bind(READERS)
+        .fetch_optional(pool)
+        .await?
+    } else {
+        sqlx::query_scalar("SELECT id FROM blogs WHERE site_key = ?")
+            .bind(site.trim_end_matches('/'))
+            .fetch_optional(pool)
+            .await?
+    };
+    match id {
+        Some(id) => blog_by_id(pool, id).await,
+        None => Ok(None),
+    }
 }
 
 pub async fn set_discovered_feed(pool: &SqlitePool, id: i64, feed_url: &str, now: i64) -> sqlx::Result<()> {

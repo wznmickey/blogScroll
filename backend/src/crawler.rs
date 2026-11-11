@@ -225,6 +225,14 @@ impl Crawler {
             }
         }
         db::apply_policy(&self.pool, &self.cfg).await?;
+        let configured: Vec<&str> = self.directories.iter().map(|d| d.id()).collect();
+        let retired = db::retire_directories(&self.pool, &configured).await?;
+        if retired > 0 {
+            tracing::info!(
+                entries = retired,
+                "directories no longer configured: their blogs leave the site"
+            );
+        }
         if any_ok && !local_only {
             db::kv_set(&self.pool, LAST_SYNC_KEY, &now().to_string()).await?;
         }

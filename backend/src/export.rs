@@ -13,6 +13,12 @@
 //! posts/{id}.json   = GET /api/posts/{id}, only for blogs whose authors allowed full text
 //!                   or their comment widget (otherwise a card says all there is)
 //! details.json      [ids of the posts above]
+//! own/{hash}.json   { feed, blog, posts: the newest OWN_RECENT } for each feed
+//!                   readers added themselves (sources/readers.rs), named after
+//!                   the SHA-256 of the feed's address as they registered it:
+//!                   only their browsers know which to read
+//! own/blogs/{id}.json  as blogs/{id}.json, for those of them no directory of
+//!                   the site lists (they are in no other file)
 //! ```
 //!
 //! With a site URL, the pages around it are filled in for search engines
@@ -32,6 +38,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::Request;
 use serde_json::{Value, json};
+use sqlx::SqlitePool;
 use tower::ServiceExt;
 
 use crate::seo;
@@ -56,7 +63,7 @@ pub struct ExportStats {
     pub blogs: usize,
 }
 
-pub async fn export(app: Router, out: &Path, opts: &ExportOptions) -> anyhow::Result<ExportStats> {
+pub async fn export(app: Router, pool: &SqlitePool, out: &Path, opts: &ExportOptions) -> anyhow::Result<ExportStats> {
     // Build next to the target and swap at the end, so a failed export never
     // leaves a half-written site behind.
     let tmp = out.with_file_name(format!(
@@ -68,6 +75,7 @@ pub async fn export(app: Router, out: &Path, opts: &ExportOptions) -> anyhow::Re
     }
     std::fs::create_dir_all(tmp.join("blogs"))?;
     std::fs::create_dir_all(tmp.join("posts"))?;
+    std::fs::create_dir_all(tmp.join("own/blogs"))?;
 
     write(&tmp.join("meta.json"), &get(&app, "/api/meta").await?)?;
     write(&tmp.join("tags.json"), &get(&app, "/api/tags").await?)?;
@@ -142,6 +150,43 @@ pub async fn export(app: Router, out: &Path, opts: &ExportOptions) -> anyhow::Re
     }
 
     write(&tmp.join("details.json"), &json!(details))?;
+
+    // Readers' own feeds, each in a file only they look for.
+    let own: Vec<(i64, String, bool)> = sqlx::query_as(
+        "SELECT b.id, d.external_id, b.private FROM directory_entries d JOIN blogs b ON b.id = d.blog_id
+         WHERE d.directory = ? AND d.active = 1 AND b.excluded = 0 AND b.flagged IS NULL
+         ORDER BY b.id",
+    )
+    .bind(crate::db::READERS)
+    .fetch_all(pool)
+    .await?;
+    let mut own_posts: std::collections::HashMap<i64, (Value, Vec<Value>)> = std::collections::HashMap::new();
+    for (id, feed, private) in &own {
+        if !own_posts.contains_key(id) {
+            let blog = get(&app, &format!("/api/blogs/{id}")).await?;
+            let posts = paged(&app, usize::MAX, |c| {
+                format!(
+                    "/api/posts?mode=latest&nsfw=1&blog={id}&limit=100{}",
+                    c.map(|c| format!("&cursor={c}")).unwrap_or_default()
+                )
+            })
+            .await?;
+            // Its page, when the site has none for it.
+            if *private {
+                write(
+                    &tmp.join(format!("own/blogs/{id}.json")),
+                    &json!({ "blog": blog, "posts": posts }),
+                )?;
+            }
+            own_posts.insert(*id, (blog, posts));
+        }
+        let (blog, posts) = &own_posts[id];
+        let recent = &posts[..posts.len().min(OWN_RECENT)];
+        write(
+            &tmp.join(format!("own/{}.json", own_file(feed))),
+            &json!({ "feed": feed, "blog": blog, "posts": recent }),
+        )?;
+    }
 
     let stats = ExportStats {
         feed_posts: posts.len(),
@@ -258,6 +303,17 @@ fn write_pages(
     Ok(())
 }
 
+/// The file a reader's own feed is in: the SHA-256 of its address as their
+/// browser registered it, in hex (frontend/src/sources.ts computes the same).
+pub fn own_file(feed: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(feed.as_bytes()))
+}
+
+/// Posts of each reader's own feed in its file: the feeds and 推荐 need no
+/// more, and a reader may have hundreds of feeds. Its page has them all.
+const OWN_RECENT: usize = 30;
+
 /// Cloudflare reads at most 2000 static rules from _redirects.
 const MAX_REDIRECTS: usize = 1900;
 
@@ -315,7 +371,20 @@ mod tests {
             site_url: Some("https://you.github.io/blogScroll/".into()),
             site_name: "博客瀑布".into(),
         };
-        let stats = export(crate::api::router(state), &out, &opts).await.unwrap();
+        let pool = state.pool.clone();
+        // A reader added blog 1's feed themselves.
+        sqlx::query("UPDATE blogs SET feed_url = 'https://b1.example/feed.xml' WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO directory_entries (directory, external_id, blog_id, status, tags, active, last_seen_at)
+             VALUES ('readers', 'https://b1.example/feed.xml', 1, 'READER', '[]', 1, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let stats = export(crate::api::router(state), &pool, &out, &opts).await.unwrap();
         assert_eq!((stats.feed_posts, stats.feed_shards, stats.blogs), (7, 3, 2));
 
         let read = |p: &str| -> Value { serde_json::from_slice(&std::fs::read(out.join(p)).unwrap()).unwrap() };
@@ -340,6 +409,16 @@ mod tests {
         assert!(!first.is_empty() && first.len() <= RELATED_PER_POST);
         assert!(!out.join("blogs/3.json").exists(), "inactive blogs are not exported");
         assert_eq!(read("details.json"), json!([5, 4, 3, 2, 1]));
+        // Their file, named after the feed's address as they registered it.
+        let own = read(&format!("own/{}.json", own_file("https://b1.example/feed.xml")));
+        assert_eq!(own["feed"], "https://b1.example/feed.xml");
+        assert_eq!(own["blog"]["id"], 1);
+        assert_eq!(own["posts"].as_array().unwrap().len(), 5);
+        // The same as the browser's (crypto.subtle SHA-256, hex).
+        assert_eq!(
+            own_file("https://b1.example/feed.xml"),
+            "0573a602add7b0b295ffee4e8d3b7495f5314f4a505b4cafa2b0aadf4117d388"
+        );
         assert_eq!(read("posts/1.json")["id"], 1);
         assert!(!out.join("posts/6.json").exists(), "only authorised blogs");
         assert!(!out.join("stale").exists(), "old output is replaced");
@@ -361,9 +440,14 @@ mod tests {
         assert!(page("_redirects").contains("/blogScroll/blog/1 /blogScroll/blog/b1.example/ 301\n"));
         assert!(page("_headers").starts_with("/blogScroll/assets/*\n"));
         // A second export uses the untouched app, not the filled-in index.html.
-        export(crate::api::router(crate::api::tests::seeded().await), &out, &opts)
-            .await
-            .unwrap();
+        export(
+            crate::api::router(crate::api::tests::seeded().await),
+            &pool,
+            &out,
+            &opts,
+        )
+        .await
+        .unwrap();
         assert_eq!(page("index.html").matches(seo::MARKER).count(), 1);
         std::fs::remove_dir_all(&dir).unwrap();
     }

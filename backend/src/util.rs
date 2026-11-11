@@ -51,6 +51,12 @@ pub fn truncate_chars(s: &str, max: usize) -> String {
 }
 
 /// Spreads `secs` by ±`percent`% so that feeds added together do not stay in lockstep.
+/// A random number in `lo..=hi`.
+pub fn random_between(lo: u64, hi: u64) -> u64 {
+    let r = RandomState::new().hash_one(now());
+    lo + r % (hi.saturating_sub(lo) + 1)
+}
+
 pub fn jitter(secs: i64, percent: i64, salt: i64) -> i64 {
     let span = secs * percent / 100;
     if span <= 0 {

@@ -80,6 +80,11 @@ enum Command {
         /// Crawl just this blog id, due or not.
         #[arg(long)]
         blog: Option<i64>,
+        /// Crawl just these blogs, due or not: addresses (`example.com/blog`)
+        /// or feed addresses, separated by commas (a refresh asked for on
+        /// the site, or readers' new feeds).
+        #[arg(long)]
+        sites: Option<String>,
         /// Sync the directories first if a day has passed (for scheduled runs).
         #[arg(long)]
         sync: bool,
@@ -191,9 +196,11 @@ async fn main() -> anyhow::Result<()> {
     }
     db::apply_policy(&pool, &cfg).await?;
 
-    let directories = sources::enabled(&cfg);
+    let directories = sources::enabled(&cfg, &pool);
     let dir_info: Vec<DirectoryInfo> = directories
         .iter()
+        // Readers' own feeds are not a source the site shows.
+        .filter(|d| d.id() != db::READERS)
         .map(|d| DirectoryInfo {
             id: d.id(),
             name: d.name(),
@@ -235,6 +242,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Crawl {
             limit,
             blog,
+            sites,
             sync,
             all,
             max_minutes,
@@ -248,16 +256,27 @@ async fn main() -> anyhow::Result<()> {
                 let n = crawler.retry_failed().await?;
                 println!("retrying {n} blogs that failed");
             }
-            let stats = match blog {
-                Some(id) => {
+            let stats = match (blog, sites) {
+                (Some(id), _) => {
                     let blog = db::blog_by_id(&pool, id).await?.context("no such blog")?;
                     crawler.crawl_blogs(vec![blog]).await
                 }
-                None if all => {
+                (None, Some(sites)) => {
+                    let mut blogs = Vec::new();
+                    for site in sites.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                        match db::blog_by_site_or_feed(&pool, site).await? {
+                            Some(b) if !blogs.iter().any(|x: &db::BlogRow| x.id == b.id) => blogs.push(b),
+                            Some(_) => {}
+                            None => tracing::warn!(site, "no such blog"),
+                        }
+                    }
+                    crawler.crawl_blogs(blogs).await
+                }
+                (None, None) if all => {
                     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(max_minutes * 60);
                     crawler.crawl_until_done(limit, deadline).await?
                 }
-                None => crawler.crawl_due(limit).await?,
+                (None, None) => crawler.crawl_due(limit).await?,
             };
             println!("{stats:#?}");
         }
@@ -330,7 +349,7 @@ async fn main() -> anyhow::Result<()> {
                 site_url,
                 site_name: cfg.server.site_name.clone(),
             };
-            let s = export::export(api::router(state), &out, &opts).await?;
+            let s = export::export(api::router(state), &pool, &out, &opts).await?;
             println!(
                 "exported {} posts in {} shards and {} blogs to {}",
                 s.feed_posts,
@@ -373,6 +392,7 @@ async fn main() -> anyhow::Result<()> {
                 .merge(readers::router(
                     pool.clone(),
                     readers::FeedProxy::new(&cfg.crawler.user_agent)?,
+                    (!no_crawl).then(|| crawler.clone()),
                 ));
             if let Some(dir) = cfg.server.static_dir.as_ref().filter(|d| d.join("index.html").exists()) {
                 let spa = ServeDir::new(dir).fallback(ServeFile::new(dir.join("index.html")));

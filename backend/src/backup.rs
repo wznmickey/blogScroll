@@ -25,8 +25,10 @@
 //!   (`policy.exclude`), and a stored full text only when that permission
 //!   was withdrawn;
 //! - history: what was pushed from elsewhere is taken in first, and the push
-//!   is never a forced one. When another crawler pushed in between, the
-//!   backup is made again on top of theirs.
+//!   is never a forced one. When another crawler pushed in between, it waits
+//!   a random 5–10 minutes (`conflict_wait_minutes`, so two crawlers do not
+//!   keep colliding), then takes the newer snapshot in, commits on top of it
+//!   and pushes again.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -593,6 +595,9 @@ pub async fn restore(pool: &SqlitePool, dir: &Path, opts: &MergeOptions) -> anyh
             }
         }
     }
+    // Which blogs are listed (and which only for readers) follows the
+    // directory entries just taken in.
+    crate::db::refresh_listing(&mut tx).await?;
     tx.commit().await?;
     if stats.blogs_added + stats.posts_added > 0 {
         crate::analyze::retag_all(pool).await?;
@@ -930,7 +935,10 @@ pub async fn backup(pool: &SqlitePool, cfg: &BackupConfig, opts: &MergeOptions) 
         // the config says.
         if push && let Err(e) = git(dir, &["push", "--quiet", "--set-upstream", "origin", "HEAD"], b).await {
             if attempt < PUSH_ATTEMPTS {
-                tracing::info!(error = %e, "backup push refused, merging the newer commits and trying again");
+                let [lo, hi] = cfg.conflict_wait_minutes;
+                let wait = crate::util::random_between(lo * 60, hi * 60);
+                tracing::info!(error = %e, wait_secs = wait, "backup push refused; waiting, then taking the newer snapshot in");
+                tokio::time::sleep(Duration::from_secs(wait)).await;
                 continue;
             }
             return Err(e);
@@ -1258,6 +1266,7 @@ mod tests {
             every_hours: 0,
             push: true,
             allow_shrink: false,
+            conflict_wait_minutes: [0, 0],
         };
         let home = crate::api::tests::seeded().await.pool;
         let actions = crate::db::connect_memory().await;

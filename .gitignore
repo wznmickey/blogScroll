@@ -3,3 +3,4 @@
 /backend/config.toml
 /frontend/node_modules/
 /frontend/dist/
+/deploy/readers.txt

@@ -12,7 +12,14 @@
 //!   Atom, JSON Feed) and OPML lists, as a download; for a web page, the feeds
 //!   it links to. Never an address on this machine or its network. Answers
 //!   are kept a while, so readers subscribed to the same feed share a fetch.
-//! - `/api/capabilities`: that both are here (not on plain static hosting).
+//! - `/api/readers/feeds`: the feeds a reader added, registered (without who
+//!   they are) so the crawler takes them in like any other blog
+//!   (sources/readers.rs), shown only to readers who have them; answers which
+//!   blog each one is, for their lists (`own=`).
+//! - `/api/refresh`: a visitor asks for one blog to be read again now (the
+//!   button on its page); at most every REFRESH_SECS, never over a site's own
+//!   request to wait.
+//! - `/api/capabilities`: which of these are here (none on plain static hosting).
 //!
 //! The Cloudflare Worker (worker/src/index.js) answers the same for the
 //! static site.
@@ -26,7 +33,7 @@ use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::redirect;
@@ -37,6 +44,7 @@ use sqlx::SqlitePool;
 use tokio::time::Instant;
 use url::{Host, Url};
 
+use crate::crawler::Crawler;
 use crate::http::{ACCEPT_FEED, FetchError};
 
 /// Largest sync blob (the Worker's database keeps at most 2 MB in a row).
@@ -49,21 +57,32 @@ const FEED_TTL: Duration = Duration::from_secs(15 * 60);
 const FAILURE_TTL: Duration = Duration::from_secs(10 * 60);
 const CACHED_FEEDS: usize = 256;
 
+/// Feeds one registration may carry, and that all readers may have.
+const MAX_OWN_FEEDS: usize = 500;
+const MAX_READER_FEEDS: i64 = 5000;
+/// A blog is read again on request at most this often.
+pub const REFRESH_SECS: i64 = 15 * 60;
+
 #[derive(Clone)]
 struct ReaderState {
     pool: SqlitePool,
     proxy: Arc<FeedProxy>,
+    /// None when this server does not crawl (`serve --no-crawl`).
+    crawler: Option<Arc<Crawler>>,
 }
 
-pub fn router(pool: SqlitePool, proxy: FeedProxy) -> Router {
+pub fn router(pool: SqlitePool, proxy: FeedProxy, crawler: Option<Arc<Crawler>>) -> Router {
     Router::new()
         .route("/api/capabilities", get(capabilities))
         .route("/api/sync", get(pull).put(push).delete(forget))
         .route("/api/fetch", get(fetch))
+        .route("/api/readers/feeds", post(register))
+        .route("/api/refresh", post(refresh))
         .layer(DefaultBodyLimit::max(MAX_SYNC_BYTES))
         .with_state(ReaderState {
             pool,
             proxy: Arc::new(proxy),
+            crawler,
         })
 }
 
@@ -82,8 +101,9 @@ fn db_error(e: sqlx::Error) -> Response {
     error(StatusCode::INTERNAL_SERVER_ERROR, "database error")
 }
 
-async fn capabilities() -> Response {
-    no_store(Json(json!({ "sync": true, "fetch": true })).into_response())
+async fn capabilities(State(s): State<ReaderState>) -> Response {
+    let crawls = s.crawler.is_some();
+    no_store(Json(json!({ "sync": true, "fetch": true, "readers": crawls, "refresh": crawls })).into_response())
 }
 
 // ---- Sync ----
@@ -607,6 +627,129 @@ async fn fetch(State(s): State<ReaderState>, Query(q): Query<FetchQuery>) -> Res
     s.proxy.get(&url).await.into_response()
 }
 
+// ---- Readers' own feeds, and reading a blog again on request ----
+
+#[derive(Deserialize)]
+struct Registration {
+    feeds: Vec<String>,
+}
+
+/// All the feeds a reader has, each time they change (and now and then, to
+/// say they still want them): those new to the server are crawled from now
+/// on. Answers which blog each one is, once crawled.
+async fn register(State(s): State<ReaderState>, Json(r): Json<Registration>) -> Response {
+    let now = crate::util::now();
+    let mut count: i64 = match sqlx::query_scalar("SELECT COUNT(*) FROM reader_feeds")
+        .fetch_one(&s.pool)
+        .await
+    {
+        Ok(n) => n,
+        Err(e) => return db_error(e),
+    };
+    let mut blogs = serde_json::Map::new();
+    let mut fresh = Vec::new();
+    for raw in r.feeds.iter().map(|f| f.trim()).take(MAX_OWN_FEEDS) {
+        // Kept as sent: the reader's browser finds its file by this text.
+        if raw.len() > 2000 || !crate::util::parse_http_url(raw).is_some_and(|u| allowed(&u, s.proxy.allow_private)) {
+            continue;
+        }
+        let seen = sqlx::query("UPDATE reader_feeds SET last_at = ? WHERE url = ?")
+            .bind(now)
+            .bind(raw)
+            .execute(&s.pool)
+            .await;
+        match seen {
+            Ok(r) if r.rows_affected() > 0 => {}
+            Ok(_) if count >= MAX_READER_FEEDS => continue,
+            Ok(_) => {
+                if let Err(e) =
+                    sqlx::query("INSERT OR IGNORE INTO reader_feeds (url, first_at, last_at) VALUES (?, ?, ?)")
+                        .bind(raw)
+                        .bind(now)
+                        .bind(now)
+                        .execute(&s.pool)
+                        .await
+                {
+                    return db_error(e);
+                }
+                count += 1;
+                fresh.push(raw.to_string());
+            }
+            Err(e) => return db_error(e),
+        }
+        let blog = match crate::db::blog_by_site_or_feed(&s.pool, raw).await {
+            Ok(b) => b.map(|b| b.id),
+            Err(e) => return db_error(e),
+        };
+        blogs.insert(raw.to_string(), blog.into());
+    }
+    // New to this server: listed and read now, not at the next sync.
+    if let Some(crawler) = s.crawler.clone().filter(|_| !fresh.is_empty()) {
+        let pool = s.pool.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crawler.sync_local_directories().await {
+                tracing::warn!(error = %e, "listing readers' new feeds failed");
+                return;
+            }
+            let mut new = Vec::new();
+            for url in &fresh {
+                if let Ok(Some(b)) = crate::db::blog_by_site_or_feed(&pool, url).await {
+                    new.push(b);
+                }
+            }
+            let stats = crawler.crawl_blogs(new).await;
+            tracing::info!(?stats, "readers' new feeds read");
+        });
+    }
+    no_store(Json(json!({ "blogs": blogs })).into_response())
+}
+
+#[derive(Deserialize)]
+struct RefreshRequest {
+    /// The blog's address (`example.com/blog`), or a reader's feed address.
+    site: String,
+}
+
+/// Reads one blog again now (the button on its page).
+async fn refresh(State(s): State<ReaderState>, Json(q): Json<RefreshRequest>) -> Response {
+    let Some(crawler) = s.crawler.clone() else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "这里的服务器不抓取");
+    };
+    let blog = match crate::db::blog_by_site_or_feed(&s.pool, q.site.trim()).await {
+        Ok(Some(b)) => b,
+        Ok(None) => return error(StatusCode::NOT_FOUND, "找不到这个博客"),
+        Err(e) => return db_error(e),
+    };
+    let (last, next): (Option<i64>, i64) =
+        match sqlx::query_as("SELECT last_checked_at, next_check_at FROM blogs WHERE id = ?")
+            .bind(blog.id)
+            .fetch_one(&s.pool)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => return db_error(e),
+        };
+    let now = crate::util::now();
+    let later = |at: i64, message: &str| {
+        no_store(
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({ "status": "later", "error": message, "retry_at": at })),
+            )
+                .into_response(),
+        )
+    };
+    // After errors (and a site's 429 / 503) the crawler waits as told.
+    if blog.failures > 0 && next > now {
+        return later(next, "这个网站上次没读成，或请我们晚点再来，到时会自动再读");
+    }
+    if let Some(last) = last.filter(|l| now - l < REFRESH_SECS) {
+        return later(last + REFRESH_SECS, "刚刚读过");
+    }
+    let stats = crawler.crawl_blogs(vec![blog]).await;
+    no_store(Json(json!({ "status": "done", "new_posts": stats.new_posts })).into_response())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -640,7 +783,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_never_lets_one_device_overwrite_another() {
-        let app = router(crate::db::connect_memory().await, FeedProxy::new("test").unwrap());
+        let app = router(crate::db::connect_memory().await, FeedProxy::new("test").unwrap(), None);
         let auth = format!("Bearer {TOKEN}");
         let auth = auth.as_str();
 
@@ -761,6 +904,54 @@ mod tests {
         assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
+    #[tokio::test]
+    async fn readers_register_their_feeds_and_nothing_else() {
+        let pool = crate::db::connect_memory().await;
+        let app = router(pool.clone(), FeedProxy::new("test").unwrap(), None);
+        let body = br#"{"feeds": ["https://a.example/feed.xml", "http://127.0.0.1/x", "file:///etc/passwd"]}"#;
+        let r = call(
+            &app,
+            "POST",
+            "/api/readers/feeds",
+            &[("content-type", "application/json")],
+            body,
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_slice(&bytes(r).await).unwrap();
+        // Not crawled yet: no blog to show for it.
+        assert_eq!(v["blogs"], json!({ "https://a.example/feed.xml": null }));
+        let urls: Vec<String> = sqlx::query_scalar("SELECT url FROM reader_feeds")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(urls, ["https://a.example/feed.xml"]);
+        // Asking again only says it is still wanted.
+        call(
+            &app,
+            "POST",
+            "/api/readers/feeds",
+            &[("content-type", "application/json")],
+            body,
+        )
+        .await;
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM reader_feeds")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        // Without a crawler, nothing to refresh with.
+        let r = call(
+            &app,
+            "POST",
+            "/api/refresh",
+            &[("content-type", "application/json")],
+            br#"{"site":"a.example"}"#,
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
     #[test]
     fn only_public_addresses() {
         let ok = |u: &str| allowed(&Url::parse(u).unwrap(), false);
@@ -841,6 +1032,7 @@ mod tests {
         let open = router(
             crate::db::connect_memory().await,
             FeedProxy::build("test", true).unwrap(),
+            None,
         );
         let get = |app: Router, path: String| async move {
             let uri = format!("/api/fetch?url={}", urlencode(&format!("http://{addr}{path}")));
@@ -876,7 +1068,7 @@ mod tests {
         assert_eq!(r.headers()[header::RETRY_AFTER], "120");
 
         // The real thing will not reach this machine.
-        let strict = router(crate::db::connect_memory().await, FeedProxy::new("test").unwrap());
+        let strict = router(crate::db::connect_memory().await, FeedProxy::new("test").unwrap(), None);
         assert_eq!(
             get(strict.clone(), "/feed.xml".into()).await.status(),
             StatusCode::FORBIDDEN
@@ -884,7 +1076,10 @@ mod tests {
         let r = call(&strict, "GET", "/api/fetch?url=not%20a%20url", &[], b"").await;
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
         let r = call(&strict, "GET", "/api/capabilities", &[], b"").await;
-        assert_eq!(bytes(r).await, br#"{"fetch":true,"sync":true}"#);
+        assert_eq!(
+            bytes(r).await,
+            br#"{"fetch":true,"readers":false,"refresh":false,"sync":true}"#
+        );
     }
 
     fn urlencode(s: &str) -> String {

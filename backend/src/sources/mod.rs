@@ -6,12 +6,14 @@
 //! say which blogs exist; feed discovery, crawling and storage are shared.
 
 use futures::future::BoxFuture;
+use sqlx::SqlitePool;
 use url::Url;
 
 use crate::config::Config;
 use crate::http::{PoliteClient, Validators};
 
 pub mod manual;
+pub mod readers;
 pub mod travellings;
 
 #[derive(Debug, Clone)]
@@ -65,7 +67,7 @@ pub trait Directory: Send + Sync {
     ) -> BoxFuture<'a, anyhow::Result<DirectoryFetch>>;
 }
 
-pub fn enabled(cfg: &Config) -> Vec<Box<dyn Directory>> {
+pub fn enabled(cfg: &Config, pool: &SqlitePool) -> Vec<Box<dyn Directory>> {
     let mut out: Vec<Box<dyn Directory>> = Vec::new();
     if cfg.sources.travellings.enabled {
         out.push(Box::new(travellings::Travellings::new(cfg.sources.travellings.clone())));
@@ -74,6 +76,12 @@ pub fn enabled(cfg: &Config) -> Vec<Box<dyn Directory>> {
         out.push(Box::new(manual::Manual::new(
             cfg.sources.feeds.clone(),
             cfg.sources.opml.clone(),
+        )));
+    }
+    if cfg.sources.readers.enabled {
+        out.push(Box::new(readers::Readers::new(
+            pool.clone(),
+            cfg.sources.readers.file.clone(),
         )));
     }
     out

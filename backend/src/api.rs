@@ -130,6 +130,14 @@ macro_rules! visible {
     };
 }
 
+/// Shown to everyone: visible, and not only a reader's own feed (`private`,
+/// db.rs). Post lists show those to the readers who ask (`own`, post_filters).
+macro_rules! public {
+    () => {
+        concat!(visible!(), " AND b.private = 0")
+    };
+}
+
 /// Parses `1,2,3` into a JSON array for `json_each`, at most `max` ids.
 fn ids(s: &Option<String>, max: usize) -> Vec<i64> {
     non_empty(s)
@@ -284,13 +292,13 @@ async fn meta(State(st): State<AppState>) -> ApiResult<Meta> {
     let stats: Stats = sqlx::query_as(concat!(
         "SELECT
             (SELECT COUNT(*) FROM blogs b WHERE ",
-        visible!(),
+        public!(),
         ") AS blogs,
             (SELECT COUNT(*) FROM blogs b WHERE ",
-        visible!(),
+        public!(),
         " AND b.last_success_at IS NOT NULL) AS blogs_with_feed,
             (SELECT COUNT(*) FROM posts p JOIN blogs b ON b.id = p.blog_id WHERE ",
-        visible!(),
+        public!(),
         ") AS posts,
             (SELECT CAST(value AS INTEGER) FROM kv WHERE key = 'last_directory_sync') AS last_directory_sync"
     ))
@@ -303,7 +311,7 @@ async fn meta(State(st): State<AppState>) -> ApiResult<Meta> {
                 Some(k) => {
                     sqlx::query_as(concat!(
                         "SELECT b.id, b.name FROM blogs b WHERE b.site_key = ? AND ",
-                        visible!()
+                        public!()
                     ))
                     .bind(k)
                     .fetch_optional(&st.pool)
@@ -397,7 +405,7 @@ async fn tags(State(st): State<AppState>) -> ApiResult<TagsResponse> {
          JOIN blogs b ON b.id = bt.blog_id
          LEFT JOIN posts p ON p.blog_id = b.id
          WHERE ",
-        visible!(),
+        public!(),
         "
          GROUP BY bt.directory, bt.tag
          ORDER BY blogs DESC, bt.tag"
@@ -426,7 +434,7 @@ async fn tags(State(st): State<AppState>) -> ApiResult<TagsResponse> {
     let category_posts: Vec<(String, i64)> = sqlx::query_as(concat!(
         "SELECT p.category, COUNT(*) FROM posts p JOIN blogs b ON b.id = p.blog_id
          WHERE ",
-        visible!(),
+        public!(),
         " GROUP BY p.category"
     ))
     .fetch_all(&st.pool)
@@ -434,7 +442,7 @@ async fn tags(State(st): State<AppState>) -> ApiResult<TagsResponse> {
     let category_blogs: Vec<(String, i64)> = sqlx::query_as(concat!(
         "SELECT json_extract(j.value, '$.id'), COUNT(*) FROM blogs b, json_each(b.categories) j
          WHERE ",
-        visible!(),
+        public!(),
         " GROUP BY 1"
     ))
     .fetch_all(&st.pool)
@@ -467,7 +475,7 @@ async fn tags(State(st): State<AppState>) -> ApiResult<TagsResponse> {
 
     let kind_rows: Vec<(String, i64)> = sqlx::query_as(concat!(
         "SELECT COALESCE(b.kind, b.detected_kind, 'blog') AS k, COUNT(*) FROM blogs b WHERE ",
-        visible!(),
+        public!(),
         " GROUP BY k ORDER BY 2 DESC"
     ))
     .fetch_all(&st.pool)
@@ -489,7 +497,7 @@ async fn tags(State(st): State<AppState>) -> ApiResult<TagsResponse> {
          JOIN blogs b ON b.id = p.blog_id
          LEFT JOIN tag_labels l ON l.term = pt.term
          WHERE pt.is_tag = 1 AND p.sort_at >= ? AND ",
-        visible!(),
+        public!(),
         "
          GROUP BY pt.term
          HAVING blogs >= 2
@@ -527,7 +535,7 @@ async fn search_tags(State(st): State<AppState>, Query(q): Query<TagSearchQuery>
          JOIN blogs b ON b.id = p.blog_id
          LEFT JOIN tag_labels l ON l.term = pt.term
          WHERE pt.is_tag = 1 AND ",
-        visible!(),
+        public!(),
         "
            AND (?1 IS NULL OR pt.term LIKE ?1 ESCAPE '\\' OR l.label LIKE ?1 ESCAPE '\\')
          GROUP BY pt.term
@@ -622,6 +630,10 @@ pub struct PostQuery {
     /// Only blogs listed in one of these directories (`travellings,feeds`).
     #[serde(default)]
     directories: Option<String>,
+    /// The reader's own feeds (`1,2,3`, blog ids from POST /api/readers/feeds):
+    /// listed for them although no directory of the site lists them.
+    #[serde(default)]
+    own: Option<String>,
     /// The reader's own weights for 推荐 (反推荐 turns them round), in
     /// `Weights` order: `interest,category,blog,seen,shown,noise,same_blog,per_blog`.
     #[serde(default)]
@@ -801,7 +813,9 @@ macro_rules! post_filters {
           AND NOT EXISTS (SELECT 1 FROM post_terms pt JOIN json_each(?16, '$.block_tags') t ON t.value = pt.term
                  WHERE pt.post_id = p.id AND pt.is_tag = 1)
           AND (json_extract(?16, '$.nsfw') OR p.nsfw = 0)
-          AND (json_extract(?16, '$.directories') IS NULL OR EXISTS (SELECT 1 FROM directory_entries de
+          AND (b.private = 0 OR b.id IN (SELECT value FROM json_each(?16, '$.own')))
+          AND (json_extract(?16, '$.directories') IS NULL OR b.id IN (SELECT value FROM json_each(?16, '$.own'))
+               OR EXISTS (SELECT 1 FROM directory_entries de
                  WHERE de.blog_id = b.id AND de.active = 1
                    AND de.directory IN (SELECT value FROM json_each(?16, '$.directories'))))"
     };
@@ -893,6 +907,8 @@ async fn list_posts(State(st): State<AppState>, Query(q): Query<PostQuery>) -> A
             "block_words": words,
             "nsfw": truthy(&q.nsfw),
             "directories": non_empty(&q.directories).map(|_| list(&q.directories, 20, str::to_string)),
+            // A blog's own page shows its posts (the reader came to it).
+            "own": ids(&q.own, 1000).into_iter().chain(q.blog).collect::<Vec<_>>(),
         })
         .to_string(),
         ..f
@@ -1405,7 +1421,7 @@ pub(crate) async fn related_ids(pool: &SqlitePool, id: i64, limit: usize) -> sql
          JOIN posts p ON p.id = pt.post_id
          JOIN blogs b ON b.id = p.blog_id
          WHERE me.post_id = ? AND ",
-        visible!(),
+        public!(),
         "
          GROUP BY p.id
          ORDER BY score DESC, p.sort_at DESC
@@ -1600,7 +1616,7 @@ async fn list_blogs(State(st): State<AppState>, Query(q): Query<BlogQuery>) -> A
         blog_summary_sql!(),
         "
          WHERE ",
-        visible!(),
+        public!(),
         "
            AND (?1 IS NULL OR b.name LIKE ?1 ESCAPE '\\' OR b.homepage_url LIKE ?1 ESCAPE '\\'
                 OR COALESCE(b.description_custom, b.description) LIKE ?1 ESCAPE '\\' OR b.about_text LIKE ?1 ESCAPE '\\'

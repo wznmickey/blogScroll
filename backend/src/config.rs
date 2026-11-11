@@ -27,6 +27,9 @@ impl Config {
         cfg.apply_env();
         cfg.server.columns = cfg.server.columns.clamp(1, 12);
         let dir = path.parent().unwrap_or(Path::new(""));
+        if let Some(f) = cfg.sources.readers.file.as_mut().filter(|f| f.is_relative()) {
+            *f = dir.join(&*f);
+        }
         for o in &mut cfg.sources.opml {
             if o.path.is_relative() {
                 o.path = dir.join(&o.path);
@@ -180,6 +183,26 @@ pub struct SourcesConfig {
     pub feeds: Vec<FeedSource>,
     /// Feed-reader exports (OPML); every feed in them is added like `feeds`.
     pub opml: Vec<OpmlSource>,
+    /// Feeds readers added themselves, shown only to them (sources/readers.rs).
+    pub readers: ReadersConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ReadersConfig {
+    pub enabled: bool,
+    /// Also the feeds listed here, one address per line (the crawl workflow
+    /// writes it from the Worker's database). Relative to the config file.
+    pub file: Option<PathBuf>,
+}
+
+impl Default for ReadersConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            file: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -354,6 +377,9 @@ pub struct BackupConfig {
     pub push: bool,
     /// Commit even a snapshot with far fewer blogs or posts than the last.
     pub allow_shrink: bool,
+    /// When another crawler pushed first: wait a random time in this range
+    /// (minutes), then take its snapshot in, commit and push again.
+    pub conflict_wait_minutes: [u64; 2],
 }
 
 impl Default for BackupConfig {
@@ -364,6 +390,7 @@ impl Default for BackupConfig {
             every_hours: 6,
             push: true,
             allow_shrink: false,
+            conflict_wait_minutes: [5, 10],
         }
     }
 }

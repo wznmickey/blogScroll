@@ -32,7 +32,8 @@ url = "https://wznmickey.com/about/"
 full = true
 note = "站长本人的博客"
 
-# Personal blogs added by hand, beside the webring (also read by backend/config.toml).
-[[sources.opml]]
-path = "feeds.opml"
-kind = "blog"
+# Feeds readers added themselves (设置 → 来源 → 我添加的来源): crawled like the
+# rest, shown only to them. The crawl workflow writes this file from the
+# Worker's database before each run (one address per line).
+[sources.readers]
+file = "readers.txt"
