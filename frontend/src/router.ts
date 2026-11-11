@@ -26,6 +26,8 @@ export const router = createRouter({
   scrollBehavior(to, from, saved) {
     // Opening/closing a post (?p=) or switching tabs must not jump the feed.
     if (to.path === from.path) return false
-    return saved ?? { top: 0 }
+    if (saved) return saved
+    // A section of the page (/settings#sources).
+    return /^#[\w-]+$/.test(to.hash) ? { el: to.hash, top: 72 } : { top: 0 }
   },
 })

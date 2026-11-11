@@ -5,6 +5,7 @@
 // without the server. Backups: see backup.ts.
 
 import { computed, readonly, ref, type Ref } from 'vue'
+import { report } from './changes'
 import type { PostCard } from './types'
 
 export type ListName = 'likes' | 'saves' | 'history' | 'seen'
@@ -127,8 +128,9 @@ function loadSettings(): Settings {
 const settingsRef = ref<Settings>(loadSettings())
 export const settings = readonly(settingsRef)
 
-export function setSettings(patch: Partial<Settings>) {
+export function setSettings(patch: Partial<Settings>, quiet = false) {
   settingsRef.value = { ...settingsRef.value, ...patch }
+  if (!quiet) report({ kind: 'changed' })
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settingsRef.value))
   } catch {
@@ -160,15 +162,21 @@ export function has(name: ListName, id: number): boolean {
   return idSets[name].value.has(id)
 }
 
+/** Opening and showing happen all the time: they are synced less often. */
+const soft = (name: ListName) => name === 'history' || name === 'seen'
+
 function put(name: ListName, post: PostCard) {
   const rest = lists[name].value.filter((e) => e.post.id !== post.id)
   lists[name].value = [{ post: snapshot(post), at: Date.now() }, ...rest].slice(0, LIMITS[name])
   store(name, lists[name].value)
+  report({ kind: 'changed', soft: soft(name) })
 }
 
 export function remove(name: ListName, id: number) {
   lists[name].value = lists[name].value.filter((e) => e.post.id !== id)
   store(name, lists[name].value)
+  report({ kind: 'removed', collection: name, keys: [id] })
+  report({ kind: 'changed' })
 }
 
 /** Adds or removes; returns whether the post is now in the list. */
@@ -182,8 +190,11 @@ export function toggle(name: ListName, post: PostCard): boolean {
 }
 
 export function clear(name: ListName) {
+  const ids = lists[name].value.map((e) => e.post.id)
   lists[name].value = []
   store(name, [])
+  report({ kind: 'removed', collection: name, keys: ids })
+  report({ kind: 'changed' })
 }
 
 export function recordVisit(post: PostCard) {
@@ -220,6 +231,7 @@ function flushShown() {
     LIMITS.seen,
   )
   store('seen', lists.seen.value)
+  report({ kind: 'changed', soft: true })
 }
 
 document.addEventListener('visibilitychange', () => {

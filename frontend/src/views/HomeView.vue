@@ -11,6 +11,7 @@ import { follows } from '../follow'
 import { relativeTime } from '../format'
 import { entries, passedOverIds, recentIds, recordShown } from '../library'
 import { compareMarks, lastPosition, notePosition, type Mark, type Position } from '../positions'
+import { ownFeeds, ownPosts, reading, refreshOwn } from '../sources'
 import type { PostCard } from '../types'
 
 const route = useRoute()
@@ -61,6 +62,8 @@ const current = computed(() => channel(active.value, tagsInfo.value))
 const filterValue = computed(() => active.value.slice(active.value.indexOf(':') + 1))
 const followIds = computed(() => [...follows.value])
 const isFollowing = computed(() => active.value === 'following')
+/** 订阅: the reader's own feeds, read in this browser (sources.ts). */
+const isOwn = computed(() => active.value === 'sources')
 const personal = computed(() => active.value === 'foryou' || active.value === 'explore')
 const mixed = computed(() => (isMode(active.value) ? personal.value || active.value === 'discover' : !state.value.latest))
 
@@ -114,6 +117,17 @@ function onImpression(post: PostCard) {
 
 const load = async (cursor: string | null) => {
   if (cursor === null) startFeed()
+  if (isOwn.value) {
+    // The first page waits a little for the feeds that are due.
+    if (cursor === null) await Promise.race([refreshOwn(), new Promise((r) => setTimeout(r, 8000))])
+    const page = ownPosts({
+      cursor,
+      hide: anyHidden(prefs.value.hide) ? { ...prefs.value.hide } : undefined,
+      blockWords: readerFilters().blockWords,
+    })
+    if (baseline.value && !resumeMark.value) newCount.value += page.items.filter(isFresh).length
+    return page
+  }
   const q: PostQuery = {
     cursor,
     startAt: resumeMark.value ?? undefined,
@@ -173,6 +187,11 @@ function select(id: ChannelId) {
   go({ c: id, latest: false, from: '' })
 }
 
+async function reloadOwn() {
+  await refreshOwn(true)
+  seed.value = newSeed()
+}
+
 function resume() {
   const o = baseline.value?.oldest
   if (o) go({ from: `${o.sort_at}.${o.id}` })
@@ -196,7 +215,7 @@ const title = computed(() =>
   <div class="container">
     <div class="feed-nav">
       <ChannelBar :active="active" @select="select" />
-      <div v-if="subRow || !isMode(active) || state.dirtag" class="sub">
+      <div v-if="subRow || !isMode(active) || state.dirtag || (isOwn && ownFeeds.length)" class="sub">
         <div v-if="subRow" ref="subsEl" class="subs" role="toolbar" :aria-label="`${subRow.node.label}的子分类`">
           <button
             class="sub-chip"
@@ -216,6 +235,11 @@ const title = computed(() =>
           </button>
         </div>
         <span v-else-if="!isMode(active)" class="context">{{ title }}</span>
+        <span v-else-if="isOwn" class="context">
+          你添加的 {{ ownFeeds.length }} 个订阅
+          <button type="button" class="link" :disabled="reading" @click="reloadOwn">{{ reading ? '读取中…' : '刷新' }}</button>
+          <RouterLink to="/settings#sources" class="link">管理</RouterLink>
+        </span>
         <span v-if="state.dirtag" class="context">
           开往标签：{{ tagLabel(state.dirtag) }}
           <button type="button" class="link" @click="go({ dirtag: '' })">清除</button>
@@ -253,11 +277,17 @@ const title = computed(() =>
       <p class="sub-note">在文章或博客页点「关注」，他们的新文章会出现在这里；关注记录只保存在这台设备的浏览器里。</p>
       <RouterLink to="/blogs" class="btn btn-ghost">去发现博主</RouterLink>
     </div>
+    <div v-else-if="isOwn && !ownFeeds.length" class="empty follow-empty">
+      <p>还没有添加自己的订阅。</p>
+      <p class="sub-note">在「设置 → 来源」里添加 RSS 地址或 OPML 订阅列表，它们的文章会出现在这里，只有你看得到。</p>
+      <RouterLink to="/settings#sources" class="btn btn-ghost">去添加</RouterLink>
+    </div>
     <Waterfall v-else :load="load" :reset-key="resetKey" :is-fresh="isFresh" @impression="onImpression">
       <template #empty>
         <div class="empty">
           <p v-if="!isMode(active) || state.dirtag || anyHidden(prefs.hide)">没有符合条件的文章</p>
           <p v-else-if="isFollowing">关注的博主最近没有新文章</p>
+          <p v-else-if="isOwn">你的订阅还没有读到文章，稍后点「刷新」再看看</p>
           <template v-else>
             <p>还没有文章。</p>
             <p class="sub-note">

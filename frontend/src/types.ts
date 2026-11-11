@@ -183,6 +183,8 @@ export interface BlogDetail extends BlogSummary {
   comments_embedded?: boolean
   /** How crawling goes, for the blog's author to check (absent from older servers). */
   crawl?: CrawlStatus
+  /** A feed the reader added themselves (sources.ts), not one of the site's. */
+  own?: { feed: string; list: string | null; error: string | null; read_at: number | null }
 }
 
 export interface CrawlStatus {

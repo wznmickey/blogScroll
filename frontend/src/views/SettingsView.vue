@@ -1,14 +1,41 @@
 <script setup lang="ts">
-// The reader's settings: what 推荐 weighs and why, what to leave out (pictures,
-// excerpts, comments, adult content, blocked bloggers, sites and words),
-// which directories, and how the page looks. All kept in this browser
-// (options.ts, channels.ts) and included in backups.
-import { blogPath } from '../format'
+// The reader's settings: syncing them between devices, what 推荐 weighs and
+// why, what to leave out (pictures, excerpts, comments, adult content,
+// blocked bloggers, sites and words), where posts come from (the site's
+// directories, and feeds of the reader's own), and how the page looks. All
+// kept in this browser (options.ts, channels.ts, sources.ts), synced
+// (sync.ts) and included in backups.
+import { blogPath, relativeTime } from '../format'
 import { computed, ref, watch } from 'vue'
-import { api, categoryName, meta } from '../api'
-import { COLUMN_CHOICES, HIDE_CHOICES, prefs } from '../channels'
-import { follows } from '../follow'
+import { api, categoryName, meta, tagsInfo } from '../api'
+import { addChannel, COLUMN_CHOICES, HIDE_CHOICES, prefs } from '../channels'
+import { follows, isFollowing, toggleFollow } from '../follow'
 import { recentIds } from '../library'
+import { capabilities } from '../server'
+import {
+  addOwn,
+  fromFile,
+  lookUp,
+  ownBlogId,
+  ownSources,
+  readState,
+  removeOwn,
+  siteKey,
+  type Found,
+  type OwnSource,
+} from '../sources'
+import {
+  deleteSync,
+  joinOffer,
+  newSyncCode,
+  pairingLink,
+  startSync,
+  stopSync,
+  syncCode,
+  syncNow,
+  syncStatus,
+  syncSupported,
+} from '../sync'
 import {
   DEFAULT_WEIGHTS,
   hostKey,
@@ -21,6 +48,56 @@ import {
 import type { InterestProfile } from '../types'
 
 document.title = '设置'
+
+// 多设备同步
+const codeText = ref('')
+const syncError = ref('')
+const codeShown = ref(false)
+const qr = ref('')
+const copied = ref(false)
+const code = computed(() => (syncStatus.value.on ? syncCode() : null))
+async function begin(c: string) {
+  syncError.value = ''
+  try {
+    await startSync(c)
+    codeText.value = ''
+  } catch (e) {
+    syncError.value = (e as Error).message
+  }
+}
+watch(
+  [code, codeShown],
+  async ([c, shown]) => {
+    qr.value = ''
+    if (!c || !shown) return
+    const { renderSVG } = await import('uqr')
+    qr.value = renderSVG(pairingLink(c), { border: 2, pixelSize: 4 })
+  },
+  { immediate: true },
+)
+async function copyLink() {
+  if (!code.value) return
+  await navigator.clipboard.writeText(pairingLink(code.value))
+  copied.value = true
+  setTimeout(() => (copied.value = false), 2000)
+}
+function stop() {
+  if (confirm('这台设备停止同步？数据留在这台设备上，别的设备照常同步。')) stopSync()
+}
+async function removeAll() {
+  if (!confirm('删除服务器上的同步数据？所有设备都会停止同步，各自的数据留在各自的设备上。')) return
+  try {
+    await deleteSync()
+  } catch (e) {
+    syncError.value = (e as Error).message
+  }
+}
+const syncText = computed(() => {
+  const s = syncStatus.value
+  if (s.busy) return '同步中…'
+  if (s.error) return `没能同步：${s.error}`
+  return s.lastSync ? `已同步 · ${relativeTime(s.lastSync / 1000)}` : '已开启'
+})
 
 const isDefault = computed(() => sameWeights(options.value.weights, DEFAULT_WEIGHTS))
 const resetWeights = () => (options.value.weights = { ...DEFAULT_WEIGHTS })
@@ -64,6 +141,62 @@ function addWord() {
 }
 const without = <T,>(list: T[], x: T) => list.filter((y) => y !== x)
 
+// Sources of the reader's own: a feed, a page with one, or a list (OPML).
+const sourceText = ref('')
+const adding = ref(false)
+const sourceNote = ref<{ text: string; bad?: boolean } | null>(null)
+/** Blogs the site has already: followed instead. */
+async function onSite(found: Found) {
+  const key = found.source.kind === 'feed' ? siteKey(found.source.homepage) : null
+  return key ? api.blogByKey(key).catch(() => null) : null
+}
+async function add(get: () => Promise<Found>) {
+  adding.value = true
+  sourceNote.value = null
+  try {
+    const found = await get()
+    const blog = await onSite(found)
+    if (blog) {
+      if (!isFollowing(blog.id)) toggleFollow(blog.id)
+      sourceNote.value = { text: `本站已经收录了「${blog.name}」，已为你关注，它的文章在「关注」频道里。` }
+    } else if (ownSources.value.some((s) => s.url === found.source.url)) {
+      sourceNote.value = { text: '已经添加过了' }
+    } else {
+      addOwn(found)
+      addChannel('sources', tagsInfo.value)
+      const n = found.source.feeds?.length
+      sourceNote.value = { text: `已添加「${found.source.title}」${n ? `（${n} 个订阅）` : ''}，文章在首页的「订阅」频道里。` }
+    }
+    sourceText.value = ''
+  } catch (e) {
+    sourceNote.value = { text: (e as Error).message || '没能读取', bad: true }
+  } finally {
+    adding.value = false
+  }
+}
+const addAddress = () => add(() => lookUp(sourceText.value))
+function addFile(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (file) void add(() => fromFile(file))
+}
+function readText(s: OwnSource): { text: string; bad: boolean } | null {
+  if (s.url.startsWith('file:')) return null
+  const r = readState(s.url)
+  if (!r) return { text: '还没读过', bad: false }
+  if (r.error) return { text: `上次读取失败：${r.error}`, bad: true }
+  return { text: `${relativeTime(r.ok / 1000)}读过${s.kind === 'feed' ? ` · ${r.count} 篇` : ''}`, bad: false }
+}
+/** On GitHub: an issue asking the site to list it (or any blog). */
+function suggestLink(s?: OwnSource): string | null {
+  const repo = meta.value?.repo?.url
+  if (!repo?.startsWith('https://github.com/')) return null
+  const title = s ? `收录建议：${s.title}` : '收录建议'
+  const body = s ? `RSS：${s.url}\n主页：${s.homepage}\n\n（来自「设置 → 来源」）` : 'RSS 或博客地址：\n'
+  return `${repo.replace(/\/$/, '')}/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`
+}
+
 // Sources: every directory unless some are unticked.
 const directories = computed(() => meta.value?.directories ?? [])
 const directoryOn = (id: string) => options.value.directories?.includes(id) ?? true
@@ -77,7 +210,64 @@ function toggleDirectory(id: string) {
   <div class="container">
     <article class="settings">
       <h1>设置</h1>
-      <p class="lead">只保存在这台设备的浏览器里，换设备可以用<RouterLink to="/me?tab=backup">「我的 → 备份与恢复」</RouterLink>带走。</p>
+      <p class="lead">
+        保存在这台设备的浏览器里。开启下面的「多设备同步」，别的设备会自动保持一致；也可以用<RouterLink
+          to="/me?tab=backup"
+          >「我的 → 备份与恢复」</RouterLink
+        >手动带走。
+      </p>
+
+      <section id="sync">
+        <h2>多设备同步</h2>
+        <p class="hint">
+          关注、喜欢、收藏、历史、刷到过、看到哪里、频道栏、这些设置和你添加的来源，在用同一个同步码的设备之间自动保持一致。数据先在浏览器里加密再上传，服务器看不到内容；不需要注册。
+        </p>
+        <p v-if="!capabilities" class="hint">正在检查这里的服务器…</p>
+        <p v-else-if="!capabilities.sync" class="hint">这里的服务器不提供同步（例如放在 GitHub Pages 上的静态版）。</p>
+        <p v-else-if="!syncSupported()" class="hint">这个浏览器不能在本地加密，或网址不是 https，所以不能同步。</p>
+        <template v-else-if="!syncStatus.on">
+          <p v-if="syncStatus.gone" class="hint warn">另一台设备删除了服务器上的同步数据，同步已停止；这台设备上的数据都还在。</p>
+          <div v-if="joinOffer" class="offer">
+            <p>
+              用同步码 <code>{{ joinOffer }}</code> 让这台设备加入同步？这里的数据会和其他设备的合并，不会丢。
+            </p>
+            <p class="row">
+              <button class="btn btn-primary" @click="begin(joinOffer)">加入同步</button>
+              <button class="btn btn-ghost" @click="joinOffer = null">不用了</button>
+            </p>
+          </div>
+          <p class="row"><button class="btn btn-primary" @click="begin(newSyncCode())">开启同步</button></p>
+          <form class="add" @submit.prevent="begin(codeText)">
+            <input v-model="codeText" placeholder="已在别的设备开启？输入那里的同步码" autocomplete="off" spellcheck="false" />
+            <button class="btn btn-ghost" :disabled="!codeText.trim()">加入</button>
+          </form>
+        </template>
+        <template v-else>
+          <p class="state" :class="{ warn: syncStatus.error }">{{ syncText }}</p>
+          <p class="hint">
+            在另一台设备上打开配对链接（或用手机扫码），或在那里的「设置 → 多设备同步」输入同步码。同步码就是钥匙，不要给别人。
+          </p>
+          <div class="pair">
+            <!-- Made here from the code (uqr): no request anywhere. -->
+            <div v-if="qr" class="qr" aria-label="配对二维码" v-html="qr" />
+            <div class="pair-text">
+              <p>
+                <code class="code">{{ codeShown ? code : '••••-••••-••••-••••-••••-••••' }}</code>
+                <button class="link" @click="codeShown = !codeShown">{{ codeShown ? '隐藏' : '显示同步码和二维码' }}</button>
+              </p>
+              <p class="row">
+                <button class="btn btn-ghost" @click="copyLink">{{ copied ? '已复制' : '复制配对链接' }}</button>
+                <button class="btn btn-ghost" :disabled="syncStatus.busy" @click="syncNow()">立即同步</button>
+              </p>
+            </div>
+          </div>
+          <p class="row small">
+            <button class="link" @click="stop">这台设备停止同步</button>
+            <button class="link danger" @click="removeAll">删除服务器上的数据（所有设备停止）</button>
+          </p>
+        </template>
+        <p v-if="syncError" class="hint warn">{{ syncError }}</p>
+      </section>
 
       <section id="recommend">
         <header class="head">
@@ -168,6 +358,7 @@ function toggleDirectory(id: string) {
 
       <section id="sources">
         <h2>来源</h2>
+        <h3>本站的来源 <small>大家共用</small></h3>
         <p class="hint">本站从这些博客目录和订阅列表收录博客；取消勾选的来源，其博客不再出现在推荐、最新和搜索里。</p>
         <p class="checks">
           <label v-for="d in directories" :key="d.id" class="check">
@@ -175,6 +366,40 @@ function toggleDirectory(id: string) {
             <a v-if="d.homepage" :href="d.homepage" target="_blank" rel="noopener"><small>{{ d.homepage }}</small></a>
           </label>
         </p>
+        <p v-if="suggestLink()" class="hint">
+          希望本站收录某个博客？<a :href="suggestLink()!" target="_blank" rel="noopener">在 GitHub 上提建议</a>
+        </p>
+
+        <h3>我添加的来源 <small>只有你看得到</small></h3>
+        <p class="hint">
+          RSS / Atom 地址、博客首页（会找到它的 RSS），或 OPML 订阅列表的地址或文件。文章出现在首页的「订阅」频道；由本站的服务器代为读取，每个最多半小时一次。本站已经收录的博客，会直接帮你关注。
+        </p>
+        <template v-if="capabilities?.fetch">
+          <form class="add" @submit.prevent="addAddress">
+            <input v-model="sourceText" placeholder="https://example.com/feed.xml" :disabled="adding" spellcheck="false" />
+            <button class="btn btn-ghost" :disabled="!sourceText.trim() || adding">{{ adding ? '读取中…' : '添加' }}</button>
+          </form>
+          <p class="row small">
+            <label class="link file">
+              导入 OPML 文件
+              <input type="file" accept=".opml,.xml,text/xml,application/xml,text/x-opml" hidden @change="addFile" />
+            </label>
+          </p>
+          <p v-if="sourceNote" class="hint" :class="{ warn: sourceNote.bad }">{{ sourceNote.text }}</p>
+          <ul v-if="ownSources.length" class="own">
+            <li v-for="s in ownSources" :key="s.url">
+              <div class="own-main">
+                <RouterLink v-if="s.kind === 'feed'" :to="`/blog/${ownBlogId(s.url)}`" class="own-title">{{ s.title }}</RouterLink>
+                <span v-else class="own-title">列表：{{ s.title }} <small>{{ s.feeds?.length ?? 0 }} 个订阅</small></span>
+                <small class="own-url">{{ s.url.startsWith('file:') ? `从文件 ${s.url.slice(5)} 导入` : s.url }}</small>
+                <small v-if="readText(s)" :class="{ warn: readText(s)!.bad }">{{ readText(s)!.text }}</small>
+              </div>
+              <a v-if="s.kind === 'feed' && suggestLink(s)" :href="suggestLink(s)!" target="_blank" rel="noopener" class="link">推荐给本站</a>
+              <button class="link" @click="removeOwn(s.url)">移除</button>
+            </li>
+          </ul>
+        </template>
+        <p v-else-if="capabilities" class="hint">这里的服务器不能代为读取 RSS（例如放在 GitHub Pages 上的静态版），所以暂时不能添加。</p>
       </section>
 
       <section id="display">
@@ -223,6 +448,102 @@ function toggleDirectory(id: string) {
 </template>
 
 <style scoped>
+.warn {
+  color: var(--accent);
+}
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  margin: 10px 0;
+}
+.row.small {
+  font-size: 13px;
+}
+.link.danger {
+  color: var(--accent);
+}
+.offer {
+  margin: 10px 0;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--bg);
+  font-size: 14px;
+}
+.state {
+  margin: 6px 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+.pair {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  margin: 10px 0;
+}
+.qr {
+  flex: none;
+  width: 148px;
+  line-height: 0;
+}
+.qr :deep(svg) {
+  width: 100%;
+  height: auto;
+  border-radius: 8px;
+}
+.pair-text {
+  min-width: 0;
+}
+.code {
+  margin-right: 8px;
+  font-size: 15px;
+  letter-spacing: 0.04em;
+  word-break: break-all;
+}
+h3 small {
+  margin-left: 6px;
+  color: var(--text-3);
+  font-weight: 400;
+  font-size: 12px;
+}
+.file {
+  cursor: pointer;
+}
+.own {
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.own li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+}
+.own-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+.own-title {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+}
+.own-main small {
+  overflow: hidden;
+  color: var(--text-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.own-main small.warn {
+  color: var(--accent);
+}
 .settings {
   max-width: 720px;
   margin: 24px auto 64px;

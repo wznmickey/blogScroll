@@ -1,6 +1,7 @@
 import { shallowRef } from 'vue'
 import type { Hide } from './channels'
 import { WEIGHT_INFO, type Weights } from './options'
+import { ownBlog, ownDetail, ownPost, ownPosts } from './sources'
 import { staticApi } from './staticApi'
 import type {
   BlogDetail,
@@ -93,7 +94,11 @@ export interface BlogQuery {
   sort?: BlogSort
 }
 
-const list = (ids?: number[]) => (ids?.length ? ids.join(',') : undefined)
+/** The site's ids only: the reader's own feeds' (negative) mean nothing to the server. */
+const list = (ids?: number[]) => {
+  const ours = ids?.filter((id) => id > 0)
+  return ours?.length ? ours.join(',') : undefined
+}
 
 // A server from before categories (until it is restarted on the new version)
 // sends `topics` instead of `category`, and its popular tags as `categories`.
@@ -165,7 +170,22 @@ const liveApi = {
   blogByKey: (key: string) => get<BlogDetail>(`/api/sites/${key}`),
 }
 
-export const api: typeof liveApi = isStatic ? staticApi : liveApi
+const siteApi: typeof liveApi = isStatic ? staticApi : liveApi
+
+const notFound = () => Promise.reject(new Error('HTTP 404'))
+
+/** The site's API, with the reader's own feeds (negative ids, sources.ts) answered here. */
+export const api: typeof liveApi = {
+  ...siteApi,
+  posts: (q) =>
+    q.blog !== undefined && q.blog < 0
+      ? Promise.resolve(ownPosts({ blog: q.blog, cursor: q.cursor, limit: q.limit }))
+      : siteApi.posts(q),
+  post: (id) => (id < 0 ? (ownDetail(id) ? Promise.resolve(ownDetail(id)!) : notFound()) : siteApi.post(id)),
+  related: (id, limit) => (id < 0 ? Promise.resolve([]) : siteApi.related(id, limit)),
+  blog: (id) => (id < 0 ? (ownBlog(id) ? Promise.resolve(ownBlog(id)!) : notFound()) : siteApi.blog(id)),
+  blogByKey: (key) => (/^-\d+$/.test(key) ? api.blog(Number(key)) : siteApi.blogByKey(key)),
+}
 
 /** Cards already on screen, so the detail view can render instantly. Bounded. */
 const seenPosts = new Map<number, PostCard>()
@@ -179,7 +199,7 @@ export function rememberPosts(items: PostCard[]) {
   }
 }
 export function cachedPost(id: number): PostCard | undefined {
-  return seenPosts.get(id)
+  return seenPosts.get(id) ?? (id < 0 ? ownPost(id) : undefined)
 }
 
 export const meta = shallowRef<Meta | null>(null)

@@ -3,6 +3,8 @@
 // the next visit, what is newer than the newest counts as new, and reading
 // can resume from the oldest. Kept in this browser; included in backups.
 
+import { report } from './changes'
+
 export interface Mark {
   sort_at: number
   id: number
@@ -90,6 +92,7 @@ export function notePosition(feed: string, post: Mark & { title: string }) {
     at: Date.now(),
   }
   saveTimer ??= setTimeout(save, 1500)
+  report({ kind: 'changed', soft: true })
 }
 
 export function allPositions(): Record<string, Position> {

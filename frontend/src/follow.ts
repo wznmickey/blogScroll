@@ -2,6 +2,7 @@
 // the same with the server and on static hosting.
 
 import { readonly, ref } from 'vue'
+import { report } from './changes'
 
 const COOKIE = 'follows'
 const MAX_FOLLOWS = 500
@@ -42,9 +43,12 @@ export function isFollowing(id: number): boolean {
 
 export function toggleFollow(id: number) {
   const current = readCookie()
-  const next = current.includes(id) ? current.filter((x) => x !== id) : [id, ...current].slice(0, MAX_FOLLOWS)
+  const was = current.includes(id)
+  const next = was ? current.filter((x) => x !== id) : [id, ...current].slice(0, MAX_FOLLOWS)
   writeCookie(next)
   followed.value = next
+  report(was ? { kind: 'removed', collection: 'follows', keys: [id] } : { kind: 'followed', id })
+  report({ kind: 'changed' })
 }
 
 /** Restoring a backup: the given blogs, or those added to the current ones. */

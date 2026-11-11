@@ -4,6 +4,7 @@
 
 import { ref, watch } from 'vue'
 import { options } from './options'
+import { hasOwn } from './sources'
 import type { TagsInfo } from './types'
 
 /**
@@ -26,6 +27,7 @@ const MODES: Channel[] = [
   { id: 'discover', label: '发现', title: '发现 · 不做个性化', type: 'mode' },
   { id: 'latest', label: '最新', title: '最新', type: 'mode' },
   { id: 'following', label: '关注', title: '关注的博主', type: 'mode' },
+  { id: 'sources', label: '订阅', title: '订阅 · 你自己添加的 RSS', type: 'mode' },
 ]
 
 export const isMode = (id: ChannelId) => MODES.some((m) => m.id === id)
@@ -98,7 +100,8 @@ export const maxPinned = () => options.value.maxPinned
 
 function defaultOrder(info: TagsInfo | null): ChannelId[] {
   return [
-    ...MODES.map((m) => m.id),
+    // 订阅 once the reader has added a feed of their own.
+    ...MODES.map((m) => m.id).filter((id) => id !== 'sources' || hasOwn()),
     ...(info?.categories ?? []).filter((c) => c.id !== 'other').map((c) => `cat:${c.id}`),
   ]
 }

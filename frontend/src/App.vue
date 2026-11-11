@@ -14,7 +14,8 @@ loadTags()
 
 const openPost = computed(() => {
   const p = Number(route.query.p)
-  return Number.isInteger(p) && p > 0 ? p : null
+  // Negative: a post of the reader's own feeds (sources.ts).
+  return Number.isInteger(p) && p !== 0 ? p : null
 })
 
 function closePost() {

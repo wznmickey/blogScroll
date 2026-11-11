@@ -10,6 +10,7 @@ import { blogPath, hostOf, relativeTime } from '../format'
 import { recordShown } from '../library'
 import { isBlocked, options, toggleBlock } from '../options'
 import { openInReader, readerIntent, readerIntentEnd } from '../reader'
+import { removeOwn } from '../sources'
 import type { BlogDetail } from '../types'
 
 const route = useRoute()
@@ -56,6 +57,13 @@ function ahead(url: string, title: string, delay?: number) {
   if (blog.value) readerIntent({ url, title, blog: blog.value }, delay)
 }
 
+/** A feed of the reader's own, added on its own (not from a list): it can go. */
+function unsubscribe() {
+  if (!blog.value?.own) return
+  removeOwn(blog.value.own.feed)
+  router.push('/settings#sources')
+}
+
 /** "Hexo 7.3.0" → "Hexo" */
 const engine = computed(() => blog.value?.generator?.split(/\s+/)[0] ?? null)
 </script>
@@ -68,7 +76,9 @@ const engine = computed(() => blog.value?.generator?.split(/\s+/)[0] ?? null)
         <div class="title-row">
           <h1>{{ blog.name }}</h1>
           <FollowButton :blog-id="blog.id" />
+          <button v-if="blog.own && !blog.own.list" type="button" class="block" @click="unsubscribe">移除订阅</button>
           <button
+            v-else-if="!blog.own"
             type="button"
             class="block"
             :class="{ on: isBlocked(blog.id) }"
@@ -94,6 +104,9 @@ const engine = computed(() => blog.value?.generator?.split(/\s+/)[0] ?? null)
         <p class="chips">
           <span v-if="blog.kind && blog.kind.id !== 'blog'" class="chip source">{{ blog.kind.label }}</span>
           <span v-for="d in blog.directories" :key="d.directory" class="chip source">收录于{{ d.name }}</span>
+          <span v-if="blog.own" class="chip source" :title="blog.own.feed">
+            你添加的订阅{{ blog.own.list ? `，来自列表「${blog.own.list}」` : '' }}
+          </span>
           <RouterLink
             v-for="c in blog.categories ?? []"
             :key="c.id"
@@ -121,7 +134,8 @@ const engine = computed(() => blog.value?.generator?.split(/\s+/)[0] ?? null)
           <span><b>{{ blog.post_count }}</b> 篇文章</span>
           <span v-if="blog.last_post_at">最近更新 {{ relativeTime(blog.last_post_at) }}</span>
           <span v-if="!blog.has_feed">暂未找到 RSS</span>
-          <RouterLink :to="{ path: '/me', query: { tab: 'blog', blog: blog.id } }" class="mine">这是你的博客？查看抓取情况</RouterLink>
+          <span v-if="blog.own?.error" class="own-error">上次读取失败：{{ blog.own.error }}</span>
+          <RouterLink v-if="!blog.own" :to="{ path: '/me', query: { tab: 'blog', blog: blog.id } }" class="mine">这是你的博客？查看抓取情况</RouterLink>
         </p>
       </div>
     </section>
@@ -154,12 +168,17 @@ const engine = computed(() => blog.value?.generator?.split(/\s+/)[0] ?? null)
       :reset-key="String(id)"
       @impression="(p) => recordShown(p, blog?.name ?? '博客页')"
     >
-      <template #empty><p class="missing">暂时还没有抓取到这个博客的文章</p></template>
+      <template #empty>
+        <p class="missing">{{ blog.own ? '还没有读到这个订阅的文章' : '暂时还没有抓取到这个博客的文章' }}</p>
+      </template>
     </Waterfall>
   </div>
 </template>
 
 <style scoped>
+.own-error {
+  color: var(--accent);
+}
 .profile {
   display: flex;
   align-items: center;

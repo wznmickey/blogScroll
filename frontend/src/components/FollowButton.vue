@@ -9,6 +9,7 @@ const on = computed(() => follows.value.includes(props.blogId))
 
 <template>
   <button
+    v-if="blogId > 0"
     type="button"
     class="follow"
     :class="{ on, small }"

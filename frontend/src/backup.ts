@@ -8,6 +8,8 @@ import { cleanOptions, options, type Options } from './options'
 import { follows, restoreFollows } from './follow'
 import { cleanEntries, entries, LIST_NAMES, restoreList, setSettings, settings, type Entry } from './library'
 import { allPositions, cleanPositions, restorePositions, type Position } from './positions'
+import { report } from './changes'
+import { cleanSources, ownSources, setOwnSources, type OwnSource } from './sources'
 
 const FORMAT = 'blogscroll-backup'
 const VERSION = 1
@@ -26,6 +28,8 @@ export interface Backup {
   settings: { history: boolean; seen: boolean }
   /** The settings page (weights, blocks, ...); missing in older backups. */
   options: Options | null
+  /** Feeds and lists the reader added (sources.ts); missing in older backups. */
+  sources: OwnSource[]
 }
 
 export function makeBackup(): Backup {
@@ -42,6 +46,7 @@ export function makeBackup(): Backup {
     channels: JSON.parse(JSON.stringify(prefs.value)),
     settings: { ...settings.value },
     options: JSON.parse(JSON.stringify(options.value)),
+    sources: JSON.parse(JSON.stringify(ownSources.value)),
   }
 }
 
@@ -83,6 +88,7 @@ export function parseBackup(text: string): Backup {
       seen: (v.settings as { seen?: unknown } | undefined)?.seen !== false,
     },
     options: v.options ? cleanOptions(v.options) : null,
+    sources: cleanSources(v.sources),
   }
 }
 
@@ -91,6 +97,16 @@ export function parseBackup(text: string): Backup {
  * Replace: makes this browser match the backup.
  */
 export function restoreBackup(b: Backup, mode: 'merge' | 'replace') {
+  // Replacing removes what the backup lacks, on synced devices too.
+  if (mode === 'replace') {
+    const lacks = (col: string, here: (string | number)[], kept: (string | number)[]) => {
+      const keys = here.filter((k) => !kept.includes(k))
+      if (keys.length) report({ kind: 'removed', collection: col, keys })
+    }
+    lacks('follows', [...follows.value], b.follows)
+    for (const name of LIST_NAMES) lacks(name, entries(name).value.map((e) => e.post.id), b[name].map((e) => e.post.id))
+    lacks('sources', ownSources.value.map((s) => s.url), b.sources.map((s) => s.url))
+  }
   restoreFollows(b.follows, mode)
   for (const name of LIST_NAMES) restoreList(name, b[name], mode)
   if (mode === 'replace') {
@@ -98,7 +114,11 @@ export function restoreBackup(b: Backup, mode: 'merge' | 'replace') {
     setSettings(b.settings)
     if (b.options) options.value = b.options
     restorePositions(b.positions)
+    setOwnSources(b.sources)
   } else {
     restorePositions({ ...b.positions, ...allPositions() })
+    const urls = new Set(ownSources.value.map((s) => s.url))
+    setOwnSources([...ownSources.value, ...b.sources.filter((s) => !urls.has(s.url))])
   }
+  report({ kind: 'changed' })
 }
