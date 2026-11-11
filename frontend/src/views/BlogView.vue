@@ -142,7 +142,7 @@ const engine = computed(() => blog.value?.generator?.split(/\s+/)[0] ?? null)
       <div class="info">
         <div class="title-row">
           <h1>{{ blog.name }}</h1>
-          <FollowButton :blog-id="blog.id" />
+          <FollowButton :blog-id="blog.id" :blog-key="blog.key" />
           <button v-if="blog.own && !blog.own.list" type="button" class="block" @click="unsubscribe">移除订阅</button>
           <button
             v-else-if="!blog.own"

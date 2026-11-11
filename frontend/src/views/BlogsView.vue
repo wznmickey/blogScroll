@@ -178,7 +178,7 @@ onBeforeUnmount(() => {
           <div class="info">
             <div class="name-row">
               <h2>{{ b.name }}</h2>
-              <FollowButton :blog-id="b.id" small />
+              <FollowButton :blog-id="b.id" :blog-key="b.key" small />
             </div>
             <p class="host">{{ hostOf(b.homepage) }}</p>
             <p v-if="b.description" class="desc">{{ b.description }}</p>

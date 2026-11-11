@@ -11,6 +11,8 @@
 - **多设备同步**（「设置」最上面）：开启后得到一个同步码，在别的设备上输入、打开配对链接或扫二维码，关注、喜欢、收藏、历史、刷到过、看到哪里、频道栏、设置和自己添加的来源就自动保持一致：打开网站、切回标签页时和每两分钟读一次，改动几秒后写回。数据在浏览器里压缩、加密后才上传，服务器看不到内容；删除、取消关注也会同步（见「读者自己的数据」）
 - **自己的订阅**（「设置 → 来源 → 我添加的来源」）：RSS / Atom 地址、博客首页（自动找它的 RSS）、OPML 订阅列表（地址或文件）。和本站收录的博客一样集中抓取：保留全部历史、自动分类和标签，也出现在推荐、最新、分类和「订阅」频道里，但**只有添加的人看得到**（服务器只记下 RSS 地址，不知道是谁加的）；本站已经收录的博客直接帮你关注。需要自建服务器，或 Cloudflare 上的静态版
 - 每个博主页的主页链接旁有「刷新」：访客可以让本站现在就去读一次这个博客（同一博客 15–30 分钟最多一次，对方要求等待时不提前）
+- 打开一篇文章后，滚轮（在图片一侧，或文字滚到底再继续）、手机上滑到底再上滑、↑ ↓ 或 J / K 换到上一篇 / 下一篇，顺序就是点开它的那个瀑布流，快到头时接着加载；文末也有「继续往下：下一篇」
+- **热度和「大家在看」**（顶栏 / 底栏的「热门」）：匿名使用统计（可在设置里关掉）算出每篇文章和每个博主最近 30 天的热度；「大家在看」列出热门文章、博主、读者自己订阅的博客（可以一键加到自己的来源）、大家在搜的词、热门标签、关键词和分类。设置里可以选「推荐时参考其他读者在看什么」（推荐的一项权重）和「显示热度」（卡片和文章上的 🔥）
 - 按时间排的频道（最新、关注、分类按最新）记得上次看到哪里：之后的新文章标「新」，并可以「从上次看到的地方继续」
 - 搜索一次覆盖文章、博主、分类和标签，以及自己的收藏、喜欢、浏览历史和刷到过的文章；输入时下拉提示
 - 文章详情旁边有博主简介（来自关于页）和「相似文章」
@@ -128,6 +130,7 @@ docker compose up -d          # http://127.0.0.1:8080，前面再挂 Caddy / ngi
 4. 换域名（域名的 DNS 在 Cloudflare 上时）：DNS 里删掉指向 `<你>.github.io` 的那条 CNAME，再到 Workers & Pages → blogscroll → Settings → Domains & Routes → Add → Custom domain 填同一个域名，Cloudflare 会自己加好记录和证书（中间一两分钟打不开）。之后 GitHub 的 Settings → Pages 里去掉自定义域名；不想再发到 Pages 就加 Variable `PUBLISH_TO_PAGES` = `false`。
 
 5. 让 Worker 启动抓取（定时抓取、访客的「刷新」、读者新加的 RSS 都靠它）：GitHub → Settings → Developer settings → Fine-grained tokens → Generate new token，Repository access 只选本仓库，Permissions 里 **Actions: Read and write**；再到 Cloudflare 的 Workers & Pages → blogscroll → Settings → Variables and Secrets → Add，类型 Secret，名字 `GITHUB_TOKEN`，值填这个 token。之后 Worker 每 3 小时（Worker 的变量 `CRAWL_EVERY_HOURS`，0 = 不定时抓取）启动一次抓取。不设这个 token 时网站照常，只是没有「刷新」按钮，抓取仍靠 GitHub 自己的定时。
+6. 让 Worker 把统计提交到私有备份仓库：再建一个 fine-grained token，Repository access 只选那个私有仓库，Permissions 里 **Contents: Read and write**，在 Worker 的 Variables and Secrets 里存成 Secret `DATA_TOKEN`（不设就用 `GITHUB_TOKEN`，那它也要能写那个仓库）。仓库名取自 Variable `BACKUP_REPO`，发布时自动传给 Worker。
 
 之后每次发布（抓取后、推送通过 CI 后、手动）都会同时更新两边。抓取仍在 Actions（或另一台机器的 `feed-server watch`）里，Worker 只负责按时启动它，不在 Cloudflare 上抓。Worker 取 RSS 时用 Variable `FEED_USER_AGENT` 作为 User-Agent。读者自己添加的 RSS 登记在 Worker 的数据库里，抓取工作流用 `CLOUDFLARE_API_TOKEN` 读出这张表（写成 `deploy/readers.txt`）再抓。本地试：`cd worker && npx wrangler@4.148.0 dev`（先按上面「本地预览静态版」构建好 `frontend/dist`）。
 
@@ -272,6 +275,14 @@ feed-server watch --git-dir data/backup --remote git@github-blogscroll-backup:<�
 很多网站用 `X-Frame-Options` 或 CSP `frame-ancestors` 禁止被别的网站嵌入。本站不为此多发请求：每月读博客首页时（本来就要读）顺便看这两个响应头，记在 `blogs.framable`；抓 RSS 时如果响应头已经禁止，也先记为不能嵌入。已知不能嵌入的直接开新标签页；还不知道的先在右侧试，并在工具栏下提示「显示不出来就改用新标签页」，读者点过的会记在浏览器里，下次直接开新标签页。本站用 https 而原文是 http 时，浏览器不允许嵌入，也开新标签页。嵌入的页面带 `sandbox`，不能把整个页面跳走。
 
 ## 读者自己的数据
+
+**匿名使用统计**（「设置 → 统计与热度」，默认开，可以关）：浏览器把访问（每天一次）、停留时长、打开和读原文、喜欢、收藏、关注、搜索词和每天一次用了哪些设置，攒成一批发给服务器（`POST /api/events`，有事件后半分钟，以及离开页面时）。
+
+- 只带一个这台浏览器自己的随机编号（不是同步码，不随同步走），服务器只存它的哈希，用来把同一位访客一天只算一次、把同一个 RSS 的订阅者只算一次；不记 IP。
+- 服务器存的是每天的总数（`stats` 表：哪一天、什么、对哪篇文章 / 哪个博客 / 哪个词，多少），文章和博客用地址而不是数据库编号，数据库重建后也对得上。
+- 静态版：Worker 存在 D1 里，每小时把今天和昨天的总数、各 RSS 的订阅人数提交到私有备份仓库的 `stats/<日期>.json` 和 `stats/subscribers.json`（需要 Worker 的 token 能写那个仓库，见下文；被别处抢先推了就随机等 5–10 分钟再提交，从不强推）。抓取和发布时 `feed-server restore` 把它们读进数据库。
+- 热度：最近 30 天，打开 1、读原文 2、喜欢 4、收藏 5、每看一分钟 1，算出每篇文章的分数，再换成它在所有有人看过的文章里的位置（0–1，显示成 0–100）；博主的分数是关注数 × 5 加上文章分数之和。自建服务器每小时重算，静态版每次发布时重算（`trending.json`）。
+- 「推荐时参考其他读者在看什么」打开时，热度是推荐的一项权重（默认最多往前提 10 天，反推荐反过来往后放），关掉就只看自己的记录。
 
 不需要账号，全部存在浏览器里：「关注」在 cookie 里（静态版也能用），「喜欢」「收藏」「浏览历史」「刷到过」、各频道看到的位置和频道设置在 localStorage 里。喜欢和收藏会连同文章卡片一起保存，文章从站点下架后仍可在「我的」页看到、搜索。
 
@@ -427,6 +438,8 @@ pub trait Directory: Send + Sync {
 | `GET /api/meta` | 站点名、数据来源、统计 |
 | `GET /api/capabilities` | `{"sync":true,"fetch":true}`：这里能同步、能代读 RSS（纯静态托管没有这个地址） |
 | `GET` / `PUT` / `DELETE /api/sync` | 同步副本（加密的二进制）。`Authorization: Bearer <64 位十六进制>`；读时可带 `If-None-Match`（304），写时必须带 `If-Match: "<版本>"`（第一次 `If-None-Match: *`），版本对不上回 412，已删除回 410，最大 1.9 MB |
+| `POST /api/events` | 匿名使用统计：`{"id": "<浏览器的随机编号>", "events": [{"t": "open", "k": "<文章地址>"}, ...]}`，一次最多 200 条 |
+| `GET /api/trending` | 大家在看：热门文章、博主、读者订阅的博客、搜索词、标签、关键词、分类、访客数（静态版是 `data/trending.json`） |
 | `POST /api/readers/feeds` | 登记读者自己的全部 RSS（`{"feeds": [...]}`），之后像收录的博客一样抓取；回答已经抓到的是哪个博客（`{"blogs": {"<地址>": 12}}`，Worker 上为空，用 `data/own/`） |
 | `POST /api/refresh` | 现在就读一次某个博客（`{"site": "example.com/blog"}` 或读者的 RSS 地址）：自建服务器当场抓（`done`），Worker 排队启动抓取工作流（`queued`，约 5 分钟）；太频繁或对方要求等待时 429（`later` + `retry_at`） |
 | …`/api/posts?own=12,13` | 再列出这些读者自己的博客（私有的只有这样才出现） |

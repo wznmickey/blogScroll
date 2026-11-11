@@ -165,6 +165,7 @@ function submit() {
       </form>
       <nav class="nav">
         <RouterLink to="/" class="desktop-only" exact-active-class="active">首页</RouterLink>
+        <RouterLink to="/trending" active-class="active">热门</RouterLink>
         <RouterLink to="/blogs" active-class="active">博客</RouterLink>
         <RouterLink to="/me" active-class="active">我的</RouterLink>
         <RouterLink to="/settings" active-class="active">设置</RouterLink>

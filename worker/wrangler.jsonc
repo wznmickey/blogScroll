@@ -23,8 +23,15 @@
   // entries. Starting runs needs the secret GITHUB_TOKEN (set it in the
   // dashboard: Settings → Variables and Secrets).
   "triggers": { "crons": ["*/5 * * * *"] },
-  // The publish workflow passes USER_AGENT (Variable FEED_USER_AGENT) and
-  // GITHUB_REPO (the repository it runs in) instead.
-  "vars": { "USER_AGENT": "blogScroll (RSS reader)", "GITHUB_REPO": "", "CRAWL_EVERY_HOURS": "3" },
+  // The publish workflow passes USER_AGENT (Variable FEED_USER_AGENT),
+  // GITHUB_REPO (the repository it runs in) and DATA_REPO (Variable
+  // BACKUP_REPO: where the hourly counts go, with the secret DATA_TOKEN, a
+  // token that may write its contents, or else GITHUB_TOKEN) instead.
+  "vars": {
+    "USER_AGENT": "blogScroll (RSS reader)",
+    "GITHUB_REPO": "",
+    "DATA_REPO": "",
+    "CRAWL_EVERY_HOURS": "3"
+  },
   "observability": { "enabled": true }
 }

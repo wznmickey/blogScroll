@@ -11,6 +11,7 @@ import PostRow from '../components/PostRow.vue'
 import Waterfall from '../components/Waterfall.vue'
 import { blogPath, hostOf } from '../format'
 import { readerFilters } from '../options'
+import { track } from '../telemetry'
 import { LIST_LABELS, recordShown, searchList, type ListName } from '../library'
 import type { BlogSummary, CategoryNode, Page, PostCard, TagStat } from '../types'
 
@@ -70,12 +71,15 @@ async function loadBlogs(reset: boolean) {
   }
 }
 
+let counted = ''
 watch(
   () => [q.value, type.value],
   async () => {
     if (route.name !== 'search') return
     document.title = q.value ? `搜索：${q.value}` : '搜索'
     tags.value = []
+    // What readers look for (大家在看), once per search.
+    if (q.value && q.value !== counted) track('search', (counted = q.value))
     void loadBlogs(true)
     if (!q.value) return
     try {
@@ -161,7 +165,7 @@ const localLoad = computed(() => (type.value in LIST_LABELS ? localPages(type.va
                 <span class="hit-name">{{ b.name }}</span>
                 <span class="hit-sub">{{ b.description || hostOf(b.homepage) }}</span>
               </span>
-              <FollowButton :blog-id="b.id" small />
+              <FollowButton :blog-id="b.id" :blog-key="b.key" small />
             </RouterLink>
           </li>
         </ul>

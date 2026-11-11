@@ -1,10 +1,17 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { follows, toggleFollow } from '../follow'
+import { track } from '../telemetry'
 
-const props = withDefaults(defineProps<{ blogId: number; small?: boolean }>(), { small: false })
+/** `blogKey`: its address, for counting follows (statistics). */
+const props = withDefaults(defineProps<{ blogId: number; blogKey?: string; small?: boolean }>(), { small: false })
 
 const on = computed(() => follows.value.includes(props.blogId))
+
+function toggle() {
+  toggleFollow(props.blogId)
+  if (props.blogKey) track('follow', props.blogKey, on.value ? 1 : -1)
+}
 </script>
 
 <template>
@@ -14,7 +21,7 @@ const on = computed(() => follows.value.includes(props.blogId))
     class="follow"
     :class="{ on, small }"
     :aria-pressed="on"
-    @click.prevent.stop="toggleFollow(blogId)"
+    @click.prevent.stop="toggle"
   >
     {{ on ? '已关注' : '关注' }}
   </button>

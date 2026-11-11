@@ -16,6 +16,7 @@ import { report } from './changes'
 import { hasLongExcerpt, hostOf } from './format'
 import { parseOpmlFile, parseSource, type ListedFeed, type ParsedFeed, type ParsedItem } from './feedParse'
 import { fetchRemote, FetchFailed, loadCapabilities } from './server'
+import { sendingStats, statsId } from './telemetry'
 import type { BlogDetail, BlogRef, Page, PostCard, PostDetail } from './types'
 import type { Hide } from './channels'
 
@@ -163,7 +164,8 @@ export async function registerOwn(): Promise<void> {
     const res = await fetch('/api/readers/feeds', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ feeds }),
+      // With statistics on, counted among each feed's readers (by this browser's random id).
+      body: JSON.stringify({ feeds, who: statsId(), counted: sendingStats() }),
     })
     if (!res.ok) return
     const answer = await res.json()

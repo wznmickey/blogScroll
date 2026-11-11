@@ -14,6 +14,8 @@ export interface Weights {
   noise: number
   sameBlog: number
   perBlog: number
+  /** What other readers took to (heat), days ahead; counts only with `useOthers`. */
+  heat: number
 }
 
 export const DEFAULT_WEIGHTS: Weights = {
@@ -25,6 +27,7 @@ export const DEFAULT_WEIGHTS: Weights = {
   noise: 14,
   sameBlog: 5,
   perBlog: 8,
+  heat: 10,
 }
 
 /** In the order the server reads them (`w=`), with the settings page's wording. */
@@ -37,6 +40,7 @@ export const WEIGHT_INFO: { key: keyof Weights; label: string; hint: string; max
   { key: 'noise', label: '随机打散', hint: '每篇随机加 0 到这么多天，同一时间的文章才不会总是一样的顺序', max: 60, step: 1 },
   { key: 'sameBlog', label: '同一博主', hint: '同一个博主每多一篇，往后放多少天，免得一个人刷屏', max: 30, step: 1 },
   { key: 'perBlog', label: '每位博主最多', hint: '每个博主最多出现几篇（反推荐最多 3 篇）', max: 30, step: 1 },
+  { key: 'heat', label: '其他读者在看', hint: '其他读者打开、喜欢、收藏、读得久的文章往前提多少天（反推荐往后放）', max: 60, step: 1 },
 ]
 
 export interface BlockedBlog {
@@ -59,6 +63,12 @@ export interface Options {
   blockWords: string[]
   /** Only blogs from these directories; null = all of them. */
   directories: string[] | null
+  /** Send anonymous counts of what one does here (telemetry.ts). */
+  sendStats: boolean
+  /** 推荐 counts what other readers took to (the `heat` weight). */
+  useOthers: boolean
+  /** Show posts' 热度 on cards and in posts. */
+  showHeat: boolean
 }
 
 export const TEXT_SIZES = [
@@ -99,6 +109,9 @@ export function cleanOptions(v: unknown): Options {
     blockHosts: strings(o.blockHosts, 200).map(hostKey).filter(Boolean),
     blockWords: strings(o.blockWords, 100),
     directories: o.directories == null ? null : strings(o.directories, 20),
+    sendStats: o.sendStats !== false,
+    useOthers: o.useOthers !== false,
+    showHeat: o.showHeat !== false,
   }
 }
 
@@ -162,4 +175,8 @@ export function readerFilters() {
   }
 }
 
-export const weightsFor = () => (sameWeights(options.value.weights, DEFAULT_WEIGHTS) ? undefined : { ...options.value.weights })
+/** 推荐's weights as the reader set them (left out when they are the default); others' reading only if they want it. */
+export function weightsFor() {
+  const w = { ...options.value.weights, heat: options.value.useOthers ? options.value.weights.heat : 0 }
+  return sameWeights(w, DEFAULT_WEIGHTS) ? undefined : w
+}

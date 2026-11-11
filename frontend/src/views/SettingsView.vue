@@ -289,7 +289,7 @@ function toggleDirectory(id: string) {
         <p class="hint">
           「推荐」按发布时间排，再按下面几项把文章提前或推后若干天；「反推荐」把兴趣、分类和博主这几项反过来。打开推荐里的文章，可以看到它为什么排在那里。
         </p>
-        <div v-for="w in WEIGHT_INFO" :key="w.key" class="weight">
+        <div v-for="w in WEIGHT_INFO.filter((x) => x.key !== 'heat' || options.useOthers)" :key="w.key" class="weight">
           <label :for="`w-${w.key}`">
             <span class="name">{{ w.label }}</span>
             <span class="value">{{ options.weights[w.key] }}{{ w.key === 'perBlog' ? ' 篇' : ' 天' }}</span>
@@ -318,6 +318,25 @@ function toggleDirectory(id: string) {
             <span v-for="[term, w] in topTerms" :key="term" class="chip term" :style="{ '--w': w }">{{ term }}</span>
           </p>
         </template>
+      </section>
+
+      <section id="stats">
+        <h2>统计与热度</h2>
+        <label class="check">
+          <input v-model="options.sendStats" type="checkbox" /> 发送匿名使用统计
+          <small>
+            访问、停留时长、打开和读原文、喜欢、收藏、关注、搜索词，以及每天一次用了哪些设置。用来算热度、「大家在看」和「其他读者在看」的推荐。只带一个这台浏览器自己的随机编号（不是同步码，不随同步走），用来把同一位访客、同一个订阅的读者只算一次；服务器存的是它的哈希和每天的总数，不记 IP，也不知道你是谁。关掉后不再发送，你添加的来源也不再计入订阅人数。
+          </small>
+        </label>
+        <label class="check">
+          <input v-model="options.useOthers" type="checkbox" /> 推荐时参考其他读者在看什么
+          <small>其他读者打开、喜欢、收藏、读得久的文章在「推荐」里往前提（多少天见上面的「其他读者在看」），「反推荐」里往后放。</small>
+        </label>
+        <label class="check">
+          <input v-model="options.showHeat" type="checkbox" /> 显示热度
+          <small>卡片和文章上显示 🔥 热度：最近 30 天里，比多少百分比的文章更受读者关注。</small>
+        </label>
+        <p class="hint"><RouterLink to="/trending">看看大家在看什么 →</RouterLink></p>
       </section>
 
       <section id="filter">

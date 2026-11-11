@@ -6,6 +6,7 @@
 
 import { computed, readonly, ref, type Ref } from 'vue'
 import { report } from './changes'
+import { track } from './telemetry'
 import type { PostCard } from './types'
 
 export type ListName = 'likes' | 'saves' | 'history' | 'seen'
@@ -170,9 +171,12 @@ function put(name: ListName, post: PostCard) {
   lists[name].value = [{ post: snapshot(post), at: Date.now() }, ...rest].slice(0, LIMITS[name])
   store(name, lists[name].value)
   report({ kind: 'changed', soft: soft(name) })
+  if (name === 'likes' || name === 'saves') track(name === 'likes' ? 'like' : 'save', post.url, 1)
 }
 
 export function remove(name: ListName, id: number) {
+  const gone = lists[name].value.find((e) => e.post.id === id)
+  if (gone && (name === 'likes' || name === 'saves')) track(name === 'likes' ? 'like' : 'save', gone.post.url, -1)
   lists[name].value = lists[name].value.filter((e) => e.post.id !== id)
   store(name, lists[name].value)
   report({ kind: 'removed', collection: name, keys: [id] })

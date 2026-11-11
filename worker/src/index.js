@@ -13,6 +13,11 @@
 //                       them) for the crawler, which takes them in like the
 //                       site's blogs; the crawl workflow reads the list (D1)
 //   /api/refresh        a visitor asks for one blog to be read again
+//   /api/events         what readers do, counted per day with nobody in it
+//                       (backend/src/stats.rs); every hour the counts go to
+//                       the backup repository (DATA_REPO: stats/<day>.json,
+//                       stats/subscribers.json), from where the publish
+//                       workflow makes heat and 大家在看 of them
 //
 // The crawling itself is the crawl workflow's (GitHub Actions, the Rust
 // crawler): every CRAWL_EVERY_HOURS this Worker's timer starts it, so data
@@ -45,12 +50,13 @@ export default {
     const url = new URL(request.url)
     try {
       if (url.pathname === '/api/capabilities') {
-        return json({ sync: true, fetch: true, readers: true, refresh: !!env.GITHUB_TOKEN })
+        return json({ sync: true, fetch: true, readers: true, refresh: !!env.GITHUB_TOKEN, stats: true })
       }
       if (url.pathname === '/api/sync') return await sync(request, env)
       if (url.pathname === '/api/fetch' && request.method === 'GET') return await fetchFeed(url, env, ctx)
       if (url.pathname === '/api/readers/feeds' && request.method === 'POST') return await register(request, env, ctx)
       if (url.pathname === '/api/refresh' && request.method === 'POST') return await refresh(request, env, ctx)
+      if (url.pathname === '/api/events' && request.method === 'POST') return await events(request, env)
     } catch (e) {
       console.error(e)
       return error(500, 'server error')
@@ -67,11 +73,16 @@ export default {
       await env.DB.batch([
         env.DB.prepare('DELETE FROM sync_docs WHERE updated_at < ?').bind(now - KEEP_DAYS * 86400),
         env.DB.prepare('DELETE FROM reader_feeds WHERE last_at < ?').bind(now - READER_DAYS * 86400),
+        env.DB.prepare('DELETE FROM reader_subs WHERE last_at < ?').bind(now - READER_DAYS * 86400),
         env.DB.prepare('DELETE FROM seen_feeds WHERE at < ?').bind(now - 30 * 86400),
         env.DB.prepare('DELETE FROM refreshes WHERE requested_at < ?').bind(now - 86400),
+        // The backup repository has every day; here only what may still change.
+        env.DB.prepare('DELETE FROM stats WHERE day < ?').bind(dayOf(now - 7 * 86400)),
+        env.DB.prepare('DELETE FROM visitors WHERE day < ?').bind(dayOf(now - 2 * 86400)),
       ])
       await setState(env, 'pruned', now)
     }
+    await pushStats(env)
     if (!env.GITHUB_TOKEN) return
     await dispatchRefreshes(env)
     const every = Number(env.CRAWL_EVERY_HOURS ?? 3) * 3600
@@ -106,6 +117,11 @@ function ready(env) {
       'CREATE TABLE IF NOT EXISTS reader_feeds (url TEXT PRIMARY KEY, first_at INTEGER NOT NULL, last_at INTEGER NOT NULL)',
       // Feeds /api/fetch found to be feeds: only those may be registered.
       'CREATE TABLE IF NOT EXISTS seen_feeds (url TEXT PRIMARY KEY, at INTEGER NOT NULL)',
+      // Counts of what readers do, per day (stats.rs); visitors only to count them once.
+      'CREATE TABLE IF NOT EXISTS stats (day TEXT NOT NULL, metric TEXT NOT NULL, key TEXT NOT NULL, n REAL NOT NULL, PRIMARY KEY (day, metric, key))',
+      'CREATE TABLE IF NOT EXISTS visitors (day TEXT NOT NULL, who TEXT NOT NULL, PRIMARY KEY (day, who))',
+      // Who has each own feed, as browsers' random ids (hashed): only to count them.
+      'CREATE TABLE IF NOT EXISTS reader_subs (url TEXT NOT NULL, who TEXT NOT NULL, last_at INTEGER NOT NULL, PRIMARY KEY (url, who))',
       // Blogs asked to be read again (`site`: an address or a reader's feed).
       'CREATE TABLE IF NOT EXISTS refreshes (site TEXT PRIMARY KEY, requested_at INTEGER NOT NULL, dispatched_at INTEGER)',
       'CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value INTEGER NOT NULL)',
@@ -403,44 +419,240 @@ async function seen(env, url) {
 
 // ---- Readers' own feeds, and reading a blog again ----
 
-/** All the feeds a reader has: the new ones are crawled from the next run (soon). */
+/**
+ * All the feeds a reader has: the new ones are crawled from the next run
+ * (soon). With `who` (their browser's random id, statistics on), counted
+ * among each feed's readers; `counted: false` takes them out of the counts.
+ * Whole sets at a time: D1 allows few queries per request.
+ */
 async function register(request, env, ctx) {
   const body = await request.json().catch(() => null)
-  const feeds = Array.isArray(body?.feeds)
-    ? [...new Set(body.feeds.filter((f) => typeof f === 'string' && f.length <= 2000).map((f) => f.trim()))].slice(0, MAX_OWN_FEEDS)
-    : []
+  const feeds = (Array.isArray(body?.feeds) ? body.feeds : [])
+    .filter((f) => typeof f === 'string' && f.length <= 2000)
+    .map((f) => f.trim())
+    .filter((f) => {
+      try {
+        return allowed(new URL(f))
+      } catch {
+        return false
+      }
+    })
+  const list = JSON.stringify([...new Set(feeds)].slice(0, MAX_OWN_FEEDS))
   await ready(env)
   const now = Math.floor(Date.now() / 1000)
-  let count = await env.DB.prepare('SELECT COUNT(*) AS n FROM reader_feeds').first('n')
-  const fresh = []
-  for (const url of feeds) {
-    let u
-    try {
-      u = new URL(url)
-    } catch {
-      continue
+  const db = env.DB
+  // New ones: only feeds this Worker fetched as feeds (not any address), while there is room.
+  const room = MAX_READER_FEEDS - (await db.prepare('SELECT COUNT(*) AS n FROM reader_feeds').first('n'))
+  const { results: fresh } = await db
+    .prepare(
+      `SELECT value AS url FROM json_each(?1)
+       WHERE value NOT IN (SELECT url FROM reader_feeds) AND value IN (SELECT url FROM seen_feeds) LIMIT ?2`,
+    )
+    .bind(list, Math.max(0, room))
+    .all()
+  const freshList = JSON.stringify(fresh.map((r) => r.url))
+  const steps = [
+    db.prepare('UPDATE reader_feeds SET last_at = ?1 WHERE url IN (SELECT value FROM json_each(?2))').bind(now, list),
+    db.prepare('INSERT OR IGNORE INTO reader_feeds (url, first_at, last_at) SELECT value, ?1, ?1 FROM json_each(?2)').bind(now, freshList),
+  ]
+  const who = await whoOf(body?.who)
+  if (who) {
+    const counted = body?.counted !== false
+    steps.push(
+      db.prepare('DELETE FROM reader_subs WHERE who = ?1 AND url NOT IN (SELECT value FROM json_each(?2))').bind(who, counted ? list : '[]'),
+    )
+    if (counted) {
+      steps.push(
+        db.prepare(
+          `INSERT INTO reader_subs (url, who, last_at) SELECT value, ?1, ?2 FROM json_each(?3) WHERE true
+           ON CONFLICT (url, who) DO UPDATE SET last_at = excluded.last_at`,
+        ).bind(who, now, list),
+      )
     }
-    if (!allowed(u)) continue
-    const known = await env.DB.prepare('UPDATE reader_feeds SET last_at = ? WHERE url = ?').bind(now, url).run()
-    if (known.meta.changes) continue
-    // New: only a feed this Worker has fetched as one (not any address), and room for it.
-    if (count >= MAX_READER_FEEDS || !(await env.DB.prepare('SELECT 1 AS y FROM seen_feeds WHERE url = ?').bind(url).first('y'))) continue
-    await env.DB.prepare('INSERT OR IGNORE INTO reader_feeds (url, first_at, last_at) VALUES (?, ?, ?)').bind(url, now, now).run()
-    count++
-    fresh.push(url)
   }
   if (fresh.length && env.GITHUB_TOKEN) {
-    await env.DB.batch(
-      fresh.map((site) =>
-        env.DB.prepare(
-          'INSERT INTO refreshes (site, requested_at) VALUES (?, ?) ON CONFLICT (site) DO UPDATE SET requested_at = excluded.requested_at',
-        ).bind(site, now),
-      ),
+    steps.push(
+      db.prepare(
+        `INSERT INTO refreshes (site, requested_at) SELECT value, ?1 FROM json_each(?2) WHERE true
+         ON CONFLICT (site) DO UPDATE SET requested_at = excluded.requested_at`,
+      ).bind(now, freshList),
     )
-    ctx.waitUntil(dispatchRefreshes(env))
   }
+  await db.batch(steps)
+  if (fresh.length && env.GITHUB_TOKEN) ctx.waitUntil(dispatchRefreshes(env))
   // Which blog each is: in the site's files (data/own/), not known here.
   return json({ blogs: {}, added: fresh.length })
+}
+
+/** A browser's random id, as kept: hashed (as stats.rs `who`). */
+async function whoOf(id) {
+  if (typeof id !== 'string' || !/^[A-Za-z0-9]{16,64}$/.test(id.trim())) return null
+  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`blogscroll reader ${id.trim()}`))
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+const dayOf = (secs) => new Date(secs * 1000).toISOString().slice(0, 10)
+
+/** One interaction, checked, as stats.rs `count_of` does: [metric, key, amount] or null. */
+function countOf(e) {
+  const t = e?.t
+  const key = typeof e?.k === 'string' ? e.k.trim() : ''
+  const n = Number.isFinite(e?.n) ? e.n : null
+  const addr = /^https?:\/\//.test(key) && key.length <= 500
+  const sign = n !== null && n < 0 ? -1 : 1
+  if (t === 'visit') return ['visit', '', 1]
+  if (t === 'dwell' && n !== null) return ['dwell', '', Math.min(3600, Math.max(0, n))]
+  if (t === 'dwell_post' && addr && n !== null) return ['dwell_post', key, Math.min(3600, Math.max(0, n))]
+  if ((t === 'open' || t === 'read') && addr) return [t, key, 1]
+  if ((t === 'like' || t === 'save') && addr) return [t, key, sign]
+  if (t === 'follow' && key && key.length <= 300) return ['follow', key, sign]
+  if (t === 'search') {
+    const term = [...key.toLowerCase().split(/\s+/).filter(Boolean).join(' ')].slice(0, 40).join('')
+    return term ? ['search', term, 1] : null
+  }
+  if (t === 'setting' && key && key.length <= 80) return ['setting', key, 1]
+  return null
+}
+
+/** What a reader did, a batch at a time: added to today's counts. */
+async function events(request, env) {
+  const body = await request.json().catch(() => null)
+  const list = Array.isArray(body?.events) ? body.events.slice(0, 200) : []
+  await ready(env)
+  const day = dayOf(Math.floor(Date.now() / 1000))
+  const sums = new Map()
+  let visit = false
+  for (const e of list) {
+    const c = countOf(e)
+    if (!c) continue
+    if (c[0] === 'visit') {
+      visit = true
+      continue
+    }
+    const k = `${c[0]}\n${c[1]}`
+    sums.set(k, (sums.get(k) ?? 0) + c[2])
+  }
+  // A visitor once a day.
+  const who = await whoOf(body?.id)
+  if (visit && who) {
+    const r = await env.DB.prepare('INSERT OR IGNORE INTO visitors (day, who) VALUES (?, ?)').bind(day, who).run()
+    if (r.meta.changes) sums.set('visit\n', 1)
+  }
+  const rows = [...sums].map(([k, n]) => {
+    const [m, key] = k.split('\n')
+    return { m, k: key, n }
+  })
+  if (rows.length) {
+    await env.DB.prepare(
+      `INSERT INTO stats (day, metric, key, n)
+       SELECT ?1, json_extract(value, '$.m'), json_extract(value, '$.k'), json_extract(value, '$.n') FROM json_each(?2) WHERE true
+       ON CONFLICT (day, metric, key) DO UPDATE SET n = n + excluded.n`,
+    )
+      .bind(day, JSON.stringify(rows))
+      .run()
+  }
+  return json({ counted: rows.length })
+}
+
+// ---- The counts, every hour, to the backup repository ----
+
+const fnv = (s) => {
+  let h = 0x811c9dc5
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193)
+  return h >>> 0
+}
+
+/** The files as committed: today's and yesterday's counts (they may still change), and readers per feed. */
+async function statsFiles(env) {
+  const now = Math.floor(Date.now() / 1000)
+  const files = []
+  for (const day of [dayOf(now - 86400), dayOf(now)]) {
+    const { results } = await env.DB.prepare('SELECT metric, key, n FROM stats WHERE day = ? ORDER BY metric, key').bind(day).all()
+    if (!results.length) continue
+    const metrics = {}
+    for (const r of results) (metrics[r.metric] ??= {})[r.key] = Math.round(r.n * 100) / 100
+    files.push({ path: `stats/${day}.json`, content: `${JSON.stringify({ day, metrics }, null, 1)}\n` })
+  }
+  const { results } = await env.DB.prepare(
+    'SELECT url, COUNT(*) AS n FROM reader_subs WHERE last_at >= ? GROUP BY url ORDER BY url',
+  )
+    .bind(now - READER_DAYS * 86400)
+    .all()
+  const feeds = Object.fromEntries(results.map((r) => [r.url, r.n]))
+  files.push({ path: 'stats/subscribers.json', content: `${JSON.stringify({ feeds }, null, 1)}\n` })
+  return files
+}
+
+/**
+ * Commits what changed since the last time, at most hourly. When another
+ * crawler pushed in between (the ref moved), waits a random 5-10 minutes and
+ * does it again from the newer commit, as the backups do (backup.rs).
+ */
+async function pushStats(env) {
+  const token = env.DATA_TOKEN || env.GITHUB_TOKEN
+  if (!env.DATA_REPO || !token) return
+  const now = Math.floor(Date.now() / 1000)
+  if (now - (await getState(env, 'stats_pushed')) < 3600 || now < (await getState(env, 'stats_retry_at'))) return
+  const later = () => setState(env, 'stats_retry_at', now + 300 + Math.floor(Math.random() * 301))
+  const files = []
+  for (const f of await statsFiles(env)) {
+    const h = fnv(f.content)
+    if (h !== (await getState(env, `stats_hash:${f.path}`))) files.push({ ...f, h })
+  }
+  if (!files.length) return setState(env, 'stats_pushed', now)
+  const repo = `/repos/${env.DATA_REPO}`
+  const branch = env.DATA_BRANCH || 'main'
+  const gh = (method, path, body) => github(env, token, method, `${repo}${path}`, body)
+  const ref = await gh('GET', `/git/ref/heads/${branch}`)
+  if (!ref.ok) return later()
+  const head = (await ref.json()).object.sha
+  const parent = await gh('GET', `/git/commits/${head}`)
+  if (!parent.ok) return later()
+  const tree = await gh('POST', '/git/trees', {
+    base_tree: (await parent.json()).tree.sha,
+    tree: files.map((f) => ({ path: f.path, mode: '100644', type: 'blob', content: f.content })),
+  })
+  if (!tree.ok) return later()
+  const commit = await gh('POST', '/git/commits', {
+    message: `统计 ${dayOf(now)}：${files.map((f) => f.path.replace('stats/', '')).join('、')}`,
+    tree: (await tree.json()).sha,
+    parents: [head],
+    author: { name: 'blogScroll', email: 'backup@blogscroll.invalid' },
+  })
+  if (!commit.ok) return later()
+  // Never forced: someone else's newer commit means trying again on top of it.
+  const moved = await gh('PATCH', `/git/refs/heads/${branch}`, { sha: (await commit.json()).sha, force: false })
+  if (!moved.ok) {
+    console.error('stats push refused', moved.status)
+    return later()
+  }
+  await env.DB.batch([
+    ...files.map((f) =>
+      env.DB.prepare('INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value').bind(
+        `stats_hash:${f.path}`,
+        f.h,
+      ),
+    ),
+    env.DB.prepare('INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value').bind(
+      'stats_pushed',
+      now,
+    ),
+  ])
+}
+
+function github(env, token, method, path, body) {
+  // GITHUB_API: only to try it out locally against a stand-in.
+  return fetch(`${env.GITHUB_API || 'https://api.github.com'}${path}`, {
+    method,
+    headers: {
+      authorization: `Bearer ${token}`,
+      accept: 'application/vnd.github+json',
+      'x-github-api-version': '2022-11-28',
+      'user-agent': 'blogscroll-worker',
+      ...(body ? { 'content-type': 'application/json' } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  })
 }
 
 /** A blog of the site (`example.com/blog`) or a reader's feed, to be read again. */
@@ -487,9 +699,9 @@ async function dispatchRefreshes(env) {
     .all()
   if (!results.length) return
   const sites = results.map((r) => r.site)
-  await env.DB.batch([
-    ...sites.map((s) => env.DB.prepare('UPDATE refreshes SET dispatched_at = ? WHERE site = ?').bind(now, s)),
-  ])
+  await env.DB.prepare('UPDATE refreshes SET dispatched_at = ? WHERE site IN (SELECT value FROM json_each(?))')
+    .bind(now, JSON.stringify(sites))
+    .run()
   await setState(env, 'refresh_dispatched', now)
   await setState(env, 'refresh_hour', hour)
   await setState(env, 'refresh_count', used + 1)
@@ -498,21 +710,10 @@ async function dispatchRefreshes(env) {
 
 /** Starts the crawl workflow (.github/workflows/pages.yml) of the code repository. */
 async function dispatch(env, inputs) {
-  const res = await fetch(
-    // GITHUB_API: only to try it out locally against a stand-in.
-    `${env.GITHUB_API || 'https://api.github.com'}/repos/${env.GITHUB_REPO}/actions/workflows/pages.yml/dispatches`,
-    {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${env.GITHUB_TOKEN}`,
-        accept: 'application/vnd.github+json',
-        'x-github-api-version': '2022-11-28',
-        'user-agent': 'blogscroll-worker',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({ ref: env.GITHUB_REF || 'main', inputs }),
-    },
-  )
+  const res = await github(env, env.GITHUB_TOKEN, 'POST', `/repos/${env.GITHUB_REPO}/actions/workflows/pages.yml/dispatches`, {
+    ref: env.GITHUB_REF || 'main',
+    inputs,
+  })
   if (!res.ok) console.error('dispatch failed', res.status, await res.text())
   return res.ok
 }

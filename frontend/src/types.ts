@@ -59,6 +59,8 @@ export interface PostCard {
   nsfw?: boolean
   /** In 推荐 / 反推荐: what made up its place, in days of freshness. */
   why?: Why
+  /** How much readers took to it lately, 0-1 (its standing among those they did anything with). */
+  heat?: number
   blog: BlogRef
 }
 
@@ -132,6 +134,8 @@ export interface Why {
   blog: number
   seen: number
   shown: number
+  /** What other readers took to (absent from servers before it). */
+  heat?: number
 }
 
 /** What 推荐 makes of the reader's signals (GET /api/interest). */
@@ -244,3 +248,23 @@ export type BlogSort = 'recent' | 'posts' | 'name'
 
 /** `explore` leans away from the reader's interests, `discover` (with signals) towards them. */
 export type FeedMode = 'discover' | 'explore' | 'latest'
+
+/** 大家在看 (GET /api/trending, or trending.json): what other readers took to lately. */
+export interface Trending {
+  generated_at: number
+  days: number
+  visitors: { today: number; week: number }
+  posts: PostCard[]
+  blogs: (BlogSummary & { followers: number; score: number })[]
+  /** Feeds readers added themselves that the site does not list. */
+  reader_feeds: { feed: string; subscribers: number; blog: BlogSummary; posts: PostCard[] }[]
+  searches: TermCount[]
+  tags: TermCount[]
+  keywords: TermCount[]
+  categories: { category: CategoryRef; n: number }[]
+}
+
+export interface TermCount {
+  term: string
+  n: number
+}

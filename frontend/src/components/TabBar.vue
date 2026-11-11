@@ -8,6 +8,7 @@ const route = useRoute()
 
 const TABS = [
   { to: '/', label: '首页', icon: 'M4 11 12 4l8 7v8a1 1 0 0 1-1 1h-4v-6h-6v6H5a1 1 0 0 1-1-1z', exact: true },
+  { to: '/trending', label: '热门', icon: 'M12 3s6 5 6 11a6 6 0 0 1-12 0c0-2.7 1.3-4.7 2.5-6 0 2.3 1.2 3.5 2.5 3.5 0-3.5-1-6 1-8.5z', exact: false },
   { to: '/blogs', label: '博客', icon: 'M5 4h10l4 4v12H5zM14 4v5h5M8 13h8M8 17h5', exact: false },
   { to: '/me', label: '我的', icon: 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 20a8 8 0 0 1 16 0', exact: false },
   {

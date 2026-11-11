@@ -14,6 +14,8 @@ export interface Capabilities {
   readers: boolean
   /** A blog can be read again on request (POST /api/refresh). */
   refresh: boolean
+  /** Anonymous counts are taken (POST /api/events). */
+  stats: boolean
 }
 
 /** null until known. */
@@ -29,12 +31,13 @@ export function loadCapabilities(): Promise<Capabilities> {
         fetch: c?.fetch === true,
         readers: c?.readers === true,
         refresh: c?.refresh === true,
+        stats: c?.stats === true,
       })
     })
     .catch(() => {
       // Offline: ask again next time.
       asking = null
-      return { sync: false, fetch: false, readers: false, refresh: false }
+      return { sync: false, fetch: false, readers: false, refresh: false, stats: false }
     })
   return asking
 }

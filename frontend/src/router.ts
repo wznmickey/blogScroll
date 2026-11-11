@@ -18,6 +18,7 @@ export const router = createRouter({
     // Named after the blog's address (/blog/example.com/blog/); old links by number still work.
     { path: '/blog/:key(.*)', name: 'blog', component: () => import('./views/BlogView.vue') },
     { path: '/search', name: 'search', component: () => import('./views/SearchView.vue') },
+    { path: '/trending', name: 'trending', component: () => import('./views/TrendingView.vue') },
     { path: '/me', name: 'me', component: () => import('./views/MeView.vue') },
     { path: '/settings', name: 'settings', component: () => import('./views/SettingsView.vue') },
     { path: '/about', name: 'about', component: () => import('./views/AboutView.vue') },

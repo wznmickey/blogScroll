@@ -18,6 +18,7 @@ import type {
   TagCount,
   TagStat,
   TagsInfo,
+  Trending,
 } from './types'
 
 type Params = Record<string, string | number | null | undefined>
@@ -116,6 +117,8 @@ export const isStatic = import.meta.env.VITE_STATIC === '1'
 
 const liveApi = {
   meta: () => get<Meta>('/api/meta'),
+  /** 大家在看: what other readers took to lately. */
+  trending: () => get<Trending>('/api/trending'),
   tags: () => get<TagsInfo>('/api/tags'),
   /** Tags whose name contains `q`, most used first. */
   searchTags: (q: string, limit = 20) => get<TagStat[]>('/api/tags/search', { q, limit }),

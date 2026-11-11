@@ -17,6 +17,7 @@ import type {
   PostDetail,
   TagsInfo,
   TagStat,
+  Trending,
   Why,
 } from './types'
 
@@ -276,12 +277,23 @@ async function discover(q: PostQuery, limit: number): Promise<Page<PostCard>> {
       blog: known.has(p.blog.id) ? w.blog : 0,
       seen: seen.has(p.id) ? -w.seen : 0,
       shown: shown.has(p.id) ? -w.shown : 0,
+      heat: (p.heat ?? 0) * w.heat,
     }
     const score =
-      p.sort_at / 86400 + why.noise + why.same_blog + why.interest + why.category + why.blog + why.seen + why.shown
+      p.sort_at / 86400 + why.noise + why.same_blog + why.interest + why.category + why.blog + why.seen + why.shown +
+      (why.heat ?? 0)
     const round = (x: number) => Math.round(x * 10) / 10
     scored.push({
-      p: { ...p, why: { ...why, noise: round(why.noise), interest: round(why.interest), category: round(why.category) } },
+      p: {
+        ...p,
+        why: {
+          ...why,
+          noise: round(why.noise),
+          interest: round(why.interest),
+          category: round(why.category),
+          heat: round(why.heat ?? 0),
+        },
+      },
       score: p.undated ? score - 1e9 : score,
     })
   }
@@ -296,7 +308,15 @@ async function discover(q: PostQuery, limit: number): Promise<Page<PostCard>> {
 /** 推荐 as set; 反推荐 the other way round (as `Weights::leaning` on the server). */
 function leaning(w: Weights, explore: boolean): Weights {
   if (!explore) return w
-  return { ...w, interest: -w.interest, category: -2 * w.category, blog: -4 * w.blog, perBlog: Math.min(w.perBlog, 3) }
+  return {
+    ...w,
+    interest: -w.interest,
+    category: -2 * w.category,
+    blog: -4 * w.blog,
+    perBlog: Math.min(w.perBlog, 3),
+    // And what others read most, last.
+    heat: -w.heat,
+  }
 }
 
 /** Position of the first post at or after `start` in the newest-first feed. */
@@ -427,6 +447,7 @@ async function blogs(q: BlogQuery): Promise<Page<BlogSummary>> {
 
 export const staticApi = {
   meta: () => file<Meta>('meta.json'),
+  trending: () => file<Trending>('trending.json'),
   tags: () => file<TagsInfo>('tags.json'),
   searchTags,
   posts,

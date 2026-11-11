@@ -135,7 +135,10 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           WRANGLER_SEND_METRICS: 'false'
+          # Where the Worker commits its hourly counts (stats/): the backup repository.
+          BACKUP_REPO: ${{ vars.BACKUP_REPO }}
         run: >-
           npx --yes wrangler@4.148.0 deploy
           --var "GITHUB_REPO:$GITHUB_REPOSITORY"
+          ${BACKUP_REPO:+--var "DATA_REPO:$BACKUP_REPO"}
           ${FEED_USER_AGENT:+--var "USER_AGENT:$FEED_USER_AGENT"}

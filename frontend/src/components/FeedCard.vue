@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, inject, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { blogPath, clampCover, COVER_DEFAULT, relativeTime, textCoverRatio } from '../format'
+import { options } from '../options'
 import type { PostCard } from '../types'
 import BlogAvatar from './BlogAvatar.vue'
 import LibraryButton from './LibraryButton.vue'
@@ -15,6 +16,10 @@ const failed = ref(false)
 const ratio = ref<number | null>(null)
 
 const showImage = computed(() => !!props.post.cover && !failed.value)
+/** Tells the waterfall it is the list to move through (postNav.ts). */
+const openedFrom = inject<(() => void) | null>('openedFrom', null)
+/** 热度, as a number out of 100 (settings: 显示热度). */
+const heat = computed(() => (options.value.showHeat && props.post.heat ? Math.round(props.post.heat * 100) : null))
 const detailLink = computed(() => ({ path: route.path, query: { ...route.query, p: String(props.post.id) } }))
 
 function onLoad(e: Event) {
@@ -31,7 +36,7 @@ function onLoad(e: Event) {
 
 <template>
   <article class="card">
-    <RouterLink :to="detailLink" class="body">
+    <RouterLink :to="detailLink" class="body" @click="openedFrom?.()">
       <span v-if="fresh" class="fresh" title="上次之后的新文章">新</span>
       <div v-if="showImage" class="cover" :style="{ aspectRatio: `1 / ${ratio ?? COVER_DEFAULT}` }">
         <img
@@ -61,12 +66,27 @@ function onLoad(e: Event) {
       <time v-else-if="!post.undated" class="time" :datetime="new Date(post.sort_at * 1000).toISOString()">{{
         relativeTime(post.sort_at)
       }}</time>
+      <span v-if="heat" class="heat" :title="`热度 ${heat}：比 ${heat}% 的文章更受读者关注（最近 30 天）`">
+        <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden="true">
+          <path d="M12 2s5 4.5 5 10a5 5 0 0 1-10 0c0-2.2 1-3.9 2-5 0 2 1 3 2 3 0-3-1-5 1-8z" />
+        </svg>
+        {{ heat }}
+      </span>
       <LibraryButton :post="post" list="likes" :size="15" class="like" />
     </footer>
   </article>
 </template>
 
 <style scoped>
+.heat {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+  color: #f97316;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
 .card {
   background: var(--card);
   border-radius: 8px;
