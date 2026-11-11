@@ -4,7 +4,7 @@ import { useRoute } from 'vue-router'
 import { api, cachedPost, categoryName, rememberPosts } from '../api'
 import { blogPath, fullDate, hostOf, hue, initial } from '../format'
 import { recordVisit } from '../library'
-import { openInReader, readerIntent, readerIntentEnd, warmUp } from '../reader'
+import { openInReader, readerIntent, readerIntentEnd, readerOpen, readerShare, warmUp } from '../reader'
 import type { PostCard, PostDetail } from '../types'
 import BlogAboutCard from './BlogAboutCard.vue'
 import BlogAvatar from './BlogAvatar.vue'
@@ -56,6 +56,9 @@ const relatedLink = (id: number) => ({ path: route.path, query: { ...route.query
 
 onMounted(async () => {
   document.addEventListener('keydown', onKey)
+  window.addEventListener('resize', placeSheet)
+  if (box.value) resized.observe(box.value)
+  placeSheet()
   document.documentElement.style.overflow = 'hidden'
   if (card.value) recordVisit(card.value)
   api
@@ -75,6 +78,8 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   document.removeEventListener('keydown', onKey)
+  window.removeEventListener('resize', placeSheet)
+  resized.disconnect()
   document.documentElement.style.overflow = ''
 })
 
@@ -82,14 +87,42 @@ function onKey(e: KeyboardEvent) {
   if (e.key === 'Escape') emit('close')
 }
 
-// On a wide screen the original opens beside the feed, and this closes.
+// On a wide screen the original opens beside the feed, and this moves aside.
 function openBeside(e: MouseEvent, url: string, title: string) {
   const p = post.value
-  if (p && openInReader({ url, title, blog: p.blog, post: p }, e)) {
-    e.preventDefault()
-    emit('close')
-  }
+  if (p && openInReader({ url, title, blog: p.blog, post: p }, e)) e.preventDefault()
 }
+
+// While the reader pane is open, the sheet keeps its layout and slides left,
+// into the room the pane leaves (like the page behind it, see placePage);
+// smaller as well only when it would not fit there, down to MIN_SCALE, past
+// which the pane covers the rest. `box` is its place without the move, to
+// measure; the sheet itself is moved (translate / scale, beside its opening
+// animation's transform).
+const GAP = 16
+const MIN_SCALE = 0.75
+const box = ref<HTMLElement>()
+const aside = ref({ x: 0, scale: 1 })
+const resized = new ResizeObserver(() => placeSheet())
+function placeSheet() {
+  const paneW = readerOpen.value ? readerShare.value * window.innerWidth : 0
+  const r = box.value?.getBoundingClientRect()
+  if (!r || !paneW || !r.width) {
+    aside.value = { x: 0, scale: 1 }
+    return
+  }
+  const room = document.documentElement.clientWidth - paneW
+  const scale = Math.min(1, Math.max(MIN_SCALE, (room - 2 * GAP) / r.width))
+  const left = Math.max(GAP, (room - r.width * scale) / 2)
+  // Scaled about its centre, its left edge moves in by half what it loses.
+  aside.value = { x: left - r.left - (r.width * (1 - scale)) / 2, scale }
+}
+watch([readerOpen, readerShare], placeSheet)
+const asideStyle = computed(() =>
+  aside.value.x || aside.value.scale !== 1
+    ? { translate: `${aside.value.x.toFixed(1)}px 0`, scale: aside.value.scale.toFixed(3) }
+    : undefined,
+)
 
 // The original may be next: be connected to its site, and once the pointer
 // rests on a link to it, load it in the (hidden) pane.
@@ -106,167 +139,176 @@ function ahead(url: string, title: string, delay?: number) {
 
 <template>
   <div class="overlay" @click.self="emit('close')">
-    <div class="sheet" :class="{ 'no-media': !hasCover }" role="dialog" aria-modal="true" :aria-label="post?.title">
-      <button class="close" aria-label="关闭" @click="emit('close')">
-        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-          <path d="M6 6l12 12M18 6 6 18" />
-        </svg>
-      </button>
+    <div ref="box" class="box" :class="{ 'no-media': !hasCover }" @click.self="emit('close')">
+      <div
+        class="sheet"
+        :class="{ 'no-media': !hasCover }"
+        :style="asideStyle"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="post?.title"
+      >
+        <button class="close" aria-label="关闭" @click="emit('close')">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M6 6l12 12M18 6 6 18" />
+          </svg>
+        </button>
 
-      <template v-if="post">
-        <header class="mobile-bar">
-          <button class="back" aria-label="返回" @click="emit('close')">
-            <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-              <path d="m15 5-7 7 7 7" />
-            </svg>
-          </button>
-          <RouterLink :to="blogPath(post.blog)" class="who">
-            <BlogAvatar :name="post.blog.name" :icon="post.blog.icon" :size="30" />
-            <span>{{ post.blog.name }}</span>
-          </RouterLink>
-          <FollowButton :blog-id="post.blog.id" small />
-        </header>
-
-        <div class="media">
-          <img
-            v-if="hasCover"
-            :src="post.cover!"
-            alt=""
-            referrerpolicy="no-referrer"
-            @error="coverFailed = true"
-          />
-          <TextCover v-else class="media-text" :post="post" :ratio="1.33" large />
-        </div>
-
-        <section class="panel">
-          <header class="panel-head">
+        <template v-if="post">
+          <header class="mobile-bar">
+            <button class="back" aria-label="返回" @click="emit('close')">
+              <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <path d="m15 5-7 7 7 7" />
+              </svg>
+            </button>
             <RouterLink :to="blogPath(post.blog)" class="who">
-              <BlogAvatar :name="post.blog.name" :icon="post.blog.icon" :size="36" />
+              <BlogAvatar :name="post.blog.name" :icon="post.blog.icon" :size="30" />
               <span>{{ post.blog.name }}</span>
             </RouterLink>
-            <FollowButton :blog-id="post.blog.id" />
+            <FollowButton :blog-id="post.blog.id" small />
           </header>
 
-          <div class="scroll">
-            <h1 class="title">{{ post.title }}</h1>
-            <div v-if="detail?.content_html" class="content" v-html="detail.content_html" />
-            <template v-else>
-              <!-- Its formatting, when the feed had some: a few tags without attributes, written on the server. -->
-              <div v-if="post.excerpt_html" class="excerpt rich" v-html="post.excerpt_html" />
-              <p v-else-if="post.excerpt" class="excerpt">{{ post.excerpt }}</p>
-              <p class="note">
-                以上为 RSS 摘要。为尊重作者，完整内容请到原博客阅读。
-              </p>
-            </template>
-            <details v-if="why" class="why">
-              <summary>为什么推荐这篇</summary>
-              <ul>
-                <li><span>发布于 {{ why.age }} 天前</span><span class="w">起点</span></li>
-                <li v-for="p in why.parts" :key="p.label">
-                  <span>{{ p.label }}</span><span class="w" :class="{ up: p.days > 0 }">{{ days(p.days) }}</span>
-                </li>
-              </ul>
-              <p>
-                排序时相当于 {{ why.effective >= 0 ? `${why.effective} 天前` : `${-why.effective} 天后` }}发布的文章。
-                <RouterLink to="/settings">调整推荐权重</RouterLink>
-              </p>
-            </details>
-            <p v-if="category" class="category">
-              <span class="label">分类</span>
-              <RouterLink :to="{ path: '/', query: { c: `cat:${category.id}` } }">{{ categoryName(category) }}</RouterLink>
-            </p>
-            <p v-if="ownTags.length || autoTags.length" class="tags">
-              <RouterLink v-for="t in ownTags" :key="t" :to="{ path: '/', query: { c: `tag:${t}` } }">#{{ t }}</RouterLink>
-              <RouterLink
-                v-for="t in autoTags"
-                :key="t"
-                :to="{ path: '/', query: { c: `tag:${t}` } }"
-                class="auto"
-                title="根据摘要自动提取的标签"
-                >#{{ t }}</RouterLink
-              >
-            </p>
-            <p class="date">
-              {{ post.undated ? '发布日期未知' : fullDate(post.published_at ?? post.sort_at) }}
-              <template v-if="post.author && post.author !== post.blog.name"> · {{ post.author }}</template>
-            </p>
-            <p v-if="error" class="note">详情加载失败，可直接阅读原文。</p>
-
-            <BlogAboutCard :blog="post.blog" />
-
-            <section v-if="post.comment_count != null || comments" class="comments">
-              <header class="comments-head">
-                <span class="comments-title">评论</span>
-                <span v-if="post.comment_count != null" class="comments-count">{{ post.comment_count }}</span>
-                <span v-if="comments" class="comments-sys">{{ comments.system }}</span>
-                <a
-                  :href="commentsLink"
-                  target="_blank"
-                  rel="noopener"
-                  class="comments-go"
-                  @pointerenter="ahead(commentsLink!, `评论 · ${post.title}`)"
-                  @pointerleave="readerIntentEnd"
-                  @focus="ahead(commentsLink!, `评论 · ${post.title}`)"
-                  @pointerdown="ahead(commentsLink!, `评论 · ${post.title}`, 0)"
-                  @click="openBeside($event, commentsLink!, `评论 · ${post.title}`)"
-                  >去原文评论 ↗</a
-                >
-              </header>
-              <CommentEmbed v-if="comments?.embed" :key="post.id" :config="comments.embed" />
-            </section>
-
-            <section v-if="related.length" class="related">
-              <h2>相似文章</h2>
-              <ul>
-                <li v-for="r in related" :key="r.id">
-                  <RouterLink :to="relatedLink(r.id)" replace class="rel">
-                    <img
-                      v-if="r.cover && !brokenThumbs.has(r.id)"
-                      :src="r.cover"
-                      alt=""
-                      loading="lazy"
-                      referrerpolicy="no-referrer"
-                      class="thumb"
-                      @error="brokenThumbs.add(r.id)"
-                    />
-                    <span v-else class="thumb thumb-text" :style="{ '--h': hue(r.blog.name) }">{{
-                      initial(r.title)
-                    }}</span>
-                    <span class="rel-text">
-                      <span class="rel-title">{{ r.title }}</span>
-                      <span class="rel-blog">{{ r.blog.name }}</span>
-                    </span>
-                  </RouterLink>
-                </li>
-              </ul>
-            </section>
+          <div class="media">
+            <img
+              v-if="hasCover"
+              :src="post.cover!"
+              alt=""
+              referrerpolicy="no-referrer"
+              @error="coverFailed = true"
+            />
+            <TextCover v-else class="media-text" :post="post" :ratio="1.33" large />
           </div>
 
-          <footer class="actions">
-            <LibraryButton :post="post" list="likes" :size="22" label class="act" />
-            <LibraryButton :post="post" list="saves" :size="22" label class="act" />
-            <span class="host">{{ hostOf(post.url) }}</span>
-            <a
-              :href="post.url"
-              target="_blank"
-              rel="noopener"
-              class="btn btn-primary read"
-              :title="post.blog.framable === false ? '这个网站不允许被嵌入别的页面，会在新标签页打开' : undefined"
-              @pointerenter="ahead(post.url, post.title)"
-              @pointerleave="readerIntentEnd"
-              @focus="ahead(post.url, post.title)"
-              @pointerdown="ahead(post.url, post.title, 0)"
-              @click="openBeside($event, post.url, post.title)"
-              >{{ post.blog.framable === false ? '阅读原文（新标签页）' : '阅读原文' }} ↗</a
-            >
-          </footer>
-        </section>
-      </template>
-      <div v-else-if="error" class="missing">
-        <p>找不到这篇文章</p>
-        <button class="btn btn-ghost" @click="emit('close')">返回</button>
+          <section class="panel">
+            <header class="panel-head">
+              <RouterLink :to="blogPath(post.blog)" class="who">
+                <BlogAvatar :name="post.blog.name" :icon="post.blog.icon" :size="36" />
+                <span>{{ post.blog.name }}</span>
+              </RouterLink>
+              <FollowButton :blog-id="post.blog.id" />
+            </header>
+
+            <div class="scroll">
+              <h1 class="title">{{ post.title }}</h1>
+              <div v-if="detail?.content_html" class="content" v-html="detail.content_html" />
+              <template v-else>
+                <!-- Its formatting, when the feed had some: a few tags without attributes, written on the server. -->
+                <div v-if="post.excerpt_html" class="excerpt rich" v-html="post.excerpt_html" />
+                <p v-else-if="post.excerpt" class="excerpt">{{ post.excerpt }}</p>
+                <p class="note">
+                  以上为 RSS 摘要。为尊重作者，完整内容请到原博客阅读。
+                </p>
+              </template>
+              <details v-if="why" class="why">
+                <summary>为什么推荐这篇</summary>
+                <ul>
+                  <li><span>发布于 {{ why.age }} 天前</span><span class="w">起点</span></li>
+                  <li v-for="p in why.parts" :key="p.label">
+                    <span>{{ p.label }}</span><span class="w" :class="{ up: p.days > 0 }">{{ days(p.days) }}</span>
+                  </li>
+                </ul>
+                <p>
+                  排序时相当于 {{ why.effective >= 0 ? `${why.effective} 天前` : `${-why.effective} 天后` }}发布的文章。
+                  <RouterLink to="/settings">调整推荐权重</RouterLink>
+                </p>
+              </details>
+              <p v-if="category" class="category">
+                <span class="label">分类</span>
+                <RouterLink :to="{ path: '/', query: { c: `cat:${category.id}` } }">{{ categoryName(category) }}</RouterLink>
+              </p>
+              <p v-if="ownTags.length || autoTags.length" class="tags">
+                <RouterLink v-for="t in ownTags" :key="t" :to="{ path: '/', query: { c: `tag:${t}` } }">#{{ t }}</RouterLink>
+                <RouterLink
+                  v-for="t in autoTags"
+                  :key="t"
+                  :to="{ path: '/', query: { c: `tag:${t}` } }"
+                  class="auto"
+                  title="根据摘要自动提取的标签"
+                  >#{{ t }}</RouterLink
+                >
+              </p>
+              <p class="date">
+                {{ post.undated ? '发布日期未知' : fullDate(post.published_at ?? post.sort_at) }}
+                <template v-if="post.author && post.author !== post.blog.name"> · {{ post.author }}</template>
+              </p>
+              <p v-if="error" class="note">详情加载失败，可直接阅读原文。</p>
+
+              <BlogAboutCard :blog="post.blog" />
+
+              <section v-if="post.comment_count != null || comments" class="comments">
+                <header class="comments-head">
+                  <span class="comments-title">评论</span>
+                  <span v-if="post.comment_count != null" class="comments-count">{{ post.comment_count }}</span>
+                  <span v-if="comments" class="comments-sys">{{ comments.system }}</span>
+                  <a
+                    :href="commentsLink"
+                    target="_blank"
+                    rel="noopener"
+                    class="comments-go"
+                    @pointerenter="ahead(commentsLink!, `评论 · ${post.title}`)"
+                    @pointerleave="readerIntentEnd"
+                    @focus="ahead(commentsLink!, `评论 · ${post.title}`)"
+                    @pointerdown="ahead(commentsLink!, `评论 · ${post.title}`, 0)"
+                    @click="openBeside($event, commentsLink!, `评论 · ${post.title}`)"
+                    >去原文评论 ↗</a
+                  >
+                </header>
+                <CommentEmbed v-if="comments?.embed" :key="post.id" :config="comments.embed" />
+              </section>
+
+              <section v-if="related.length" class="related">
+                <h2>相似文章</h2>
+                <ul>
+                  <li v-for="r in related" :key="r.id">
+                    <RouterLink :to="relatedLink(r.id)" replace class="rel">
+                      <img
+                        v-if="r.cover && !brokenThumbs.has(r.id)"
+                        :src="r.cover"
+                        alt=""
+                        loading="lazy"
+                        referrerpolicy="no-referrer"
+                        class="thumb"
+                        @error="brokenThumbs.add(r.id)"
+                      />
+                      <span v-else class="thumb thumb-text" :style="{ '--h': hue(r.blog.name) }">{{
+                        initial(r.title)
+                      }}</span>
+                      <span class="rel-text">
+                        <span class="rel-title">{{ r.title }}</span>
+                        <span class="rel-blog">{{ r.blog.name }}</span>
+                      </span>
+                    </RouterLink>
+                  </li>
+                </ul>
+              </section>
+            </div>
+
+            <footer class="actions">
+              <LibraryButton :post="post" list="likes" :size="22" label class="act" />
+              <LibraryButton :post="post" list="saves" :size="22" label class="act" />
+              <span class="host">{{ hostOf(post.url) }}</span>
+              <a
+                :href="post.url"
+                target="_blank"
+                rel="noopener"
+                class="btn btn-primary read"
+                :title="post.blog.framable === false ? '这个网站不允许被嵌入别的页面，会在新标签页打开' : undefined"
+                @pointerenter="ahead(post.url, post.title)"
+                @pointerleave="readerIntentEnd"
+                @focus="ahead(post.url, post.title)"
+                @pointerdown="ahead(post.url, post.title, 0)"
+                @click="openBeside($event, post.url, post.title)"
+                >{{ post.blog.framable === false ? '阅读原文（新标签页）' : '阅读原文' }} ↗</a
+              >
+            </footer>
+          </section>
+        </template>
+        <div v-else-if="error" class="missing">
+          <p>找不到这篇文章</p>
+          <button class="btn btn-ghost" @click="emit('close')">返回</button>
+        </div>
+        <div v-else class="missing"><span class="spinner" /></div>
       </div>
-      <div v-else class="missing"><span class="spinner" /></div>
     </div>
   </div>
 </template>
@@ -275,8 +317,7 @@ function ahead(url: string, title: string, delay?: number) {
 .overlay {
   position: fixed;
   inset: 0;
-  /* Beside the reader pane, not over it. */
-  right: var(--pane-w, 0px);
+  /* Under the reader pane (ReaderPane.vue), which takes the right part. */
   z-index: 50;
   display: grid;
   place-items: center;
@@ -284,21 +325,29 @@ function ahead(url: string, title: string, delay?: number) {
   background: var(--overlay);
   animation: fade 0.18s ease-out;
 }
-.sheet {
+.box {
   /* Text size (settings). */
   zoom: var(--zoom, 1);
-  position: relative;
-  display: flex;
   width: min(1120px, 100%);
   height: min(860px, 100%);
+}
+.box.no-media {
+  width: min(1000px, 100%);
+}
+.sheet {
+  position: relative;
+  display: flex;
+  width: 100%;
+  height: 100%;
   overflow: hidden;
   border-radius: 20px;
   background: var(--bg);
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
   animation: pop 0.22s cubic-bezier(0.2, 0.9, 0.3, 1.1);
-}
-.sheet.no-media {
-  width: min(1000px, 100%);
+  /* Moving aside for the reader pane, as fast as the pane opens. */
+  transition:
+    translate 0.3s cubic-bezier(0.2, 0.8, 0.2, 1),
+    scale 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 .close {
   position: absolute;
@@ -647,6 +696,11 @@ function ahead(url: string, title: string, delay?: number) {
     opacity: 0;
   }
 }
+@media (prefers-reduced-motion: reduce) {
+  .sheet {
+    transition: none;
+  }
+}
 @keyframes pop {
   from {
     opacity: 0;
@@ -680,11 +734,13 @@ function ahead(url: string, title: string, delay?: number) {
     background: var(--bg);
     animation: none;
   }
-  .sheet,
-  .sheet.no-media {
-    flex-direction: column;
+  .box,
+  .box.no-media {
     width: 100%;
     height: 100%;
+  }
+  .sheet {
+    flex-direction: column;
     border-radius: 0;
     overflow-y: auto;
     overscroll-behavior: contain;

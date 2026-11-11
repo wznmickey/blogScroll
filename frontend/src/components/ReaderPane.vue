@@ -199,7 +199,8 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
   top: 0;
   right: 0;
   bottom: 0;
-  z-index: 45;
+  /* Over an open post's overlay (PostDetail.vue), which slides aside for it. */
+  z-index: 55;
   display: flex;
   flex-direction: column;
   border-left: 1px solid var(--line);
