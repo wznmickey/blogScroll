@@ -11,7 +11,7 @@ import { follows } from '../follow'
 import { relativeTime } from '../format'
 import { entries, passedOverIds, recentIds, recordShown } from '../library'
 import { compareMarks, lastPosition, notePosition, type Mark, type Position } from '../positions'
-import { ownFeeds, ownPosts, reading, refreshOwn } from '../sources'
+import { crawledIds, ownFeeds, pageOf, previewPosts, reading, refreshOwn } from '../sources'
 import type { PostCard } from '../types'
 
 const route = useRoute()
@@ -118,13 +118,8 @@ function onImpression(post: PostCard) {
 const load = async (cursor: string | null) => {
   if (cursor === null) startFeed()
   if (isOwn.value) {
-    // The first page waits a little for the feeds that are due.
-    if (cursor === null) await Promise.race([refreshOwn(), new Promise((r) => setTimeout(r, 8000))])
-    const page = ownPosts({
-      cursor,
-      hide: anyHidden(prefs.value.hide) ? { ...prefs.value.hide } : undefined,
-      blockWords: readerFilters().blockWords,
-    })
+    if (cursor === null) ownList = await loadOwn()
+    const page = pageOf(ownList, cursor)
     if (baseline.value && !resumeMark.value) newCount.value += page.items.filter(isFresh).length
     return page
   }
@@ -185,6 +180,28 @@ function select(id: ChannelId) {
     return
   }
   go({ c: id, latest: false, from: '' })
+}
+
+/**
+ * 订阅: the reader's feeds that the site crawls (from it, like 关注), and
+ * those it does not (yet), read here; the first page waits a little for
+ * what is due.
+ */
+let ownList: PostCard[] = []
+async function loadOwn(): Promise<PostCard[]> {
+  await Promise.race([refreshOwn(), new Promise((r) => setTimeout(r, 8000))])
+  const hide = anyHidden(prefs.value.hide) ? { ...prefs.value.hide } : undefined
+  const ids = crawledIds()
+  const crawled: PostCard[] = []
+  for (let c: string | null = null; ids.length && crawled.length < 600; ) {
+    const page = await api.posts({ mode: 'latest', blogs: ids, cursor: c, limit: 100, hide, ...readerFilters() })
+    crawled.push(...page.items)
+    c = page.next_cursor
+    if (!c) break
+  }
+  const shown = new Set(crawled.map((p) => p.url))
+  return [...crawled, ...previewPosts({ hide, blockWords: readerFilters().blockWords }).filter((p) => !shown.has(p.url))]
+    .sort((a, b) => b.sort_at - a.sort_at || b.id - a.id)
 }
 
 async function reloadOwn() {

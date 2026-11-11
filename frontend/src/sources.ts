@@ -1,17 +1,22 @@
 // The reader's own sources (设置 → 来源 → 我添加的): feeds, and lists of
-// feeds (OPML, from an address or a file), that only they see: in the 订阅
-// channel, and a page per feed (/blog/-123, negative ids are theirs). Their
-// browser reads them through the site's server (server.ts: /api/fetch), each
-// at most every half hour (a list once a day); what was read stays here, so
-// the channel opens at once. The sources are synced and backed up; what was
-// read from them is not.
+// feeds (OPML, from an address or a file), that only they see.
+//
+// Every feed is registered with the site's server (registerOwn), which then
+// crawls it like the site's own blogs: whole history, categories, tags, 推荐.
+// It stays off every list but theirs: their requests name it (`own=`, live
+// site) or their browser reads its file (data/own/, static site). Until the
+// crawler has it (`crawled`), and where the server does not crawl, their
+// browser reads it itself through /api/fetch (server.ts), at most every half
+// hour (a list once a day), for the 订阅 channel and a page per feed
+// (/blog/-123: negative ids are those). The sources are synced and backed
+// up; what was read from them is not.
 
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { report } from './changes'
 import { hasLongExcerpt, hostOf } from './format'
 import { parseOpmlFile, parseSource, type ListedFeed, type ParsedFeed, type ParsedItem } from './feedParse'
-import { fetchRemote, FetchFailed } from './server'
-import type { BlogDetail, Page, PostCard, PostDetail } from './types'
+import { fetchRemote, FetchFailed, loadCapabilities } from './server'
+import type { BlogDetail, BlogRef, Page, PostCard, PostDetail } from './types'
 import type { Hide } from './channels'
 
 export interface OwnSource {
@@ -39,6 +44,8 @@ interface Read {
 
 const KEY = 'sources'
 const READ_KEY = 'sources:read'
+const CRAWLED_KEY = 'sources:crawled'
+const REGISTERED_KEY = 'sources:registered'
 const MAX_SOURCES = 300
 const MAX_FEEDS = 500
 const FEED_EVERY = 30 * 60_000
@@ -123,6 +130,63 @@ export const ownFeeds = computed(() => {
   return [...out.values()].slice(0, MAX_FEEDS)
 })
 
+/** Which of the reader's feeds the site crawls itself, as which blog. */
+export const crawled = ref<Record<string, number>>(load(CRAWLED_KEY, {}))
+
+export function noteCrawled(url: string, id: number) {
+  if (crawled.value[url] === id) return
+  crawled.value = { ...crawled.value, [url]: id }
+  store(CRAWLED_KEY, crawled.value)
+}
+
+/** The site's blogs that are the reader's own feeds: asked for by id (`own=`). */
+export function crawledIds(): number[] {
+  const mine = new Set(ownFeeds.value.map((f) => f.url))
+  return [...new Set(Object.entries(crawled.value).filter(([u]) => mine.has(u)).map(([, id]) => id))]
+}
+
+/** The feed a blog of the site is, when it is one of the reader's (for asking to read it again). */
+export const crawledFeed = (blogId: number) => Object.entries(crawled.value).find(([, id]) => id === blogId)?.[0]
+
+/** Feeds the site does not crawl (yet): read here. */
+const previewFeeds = computed(() => ownFeeds.value.filter((f) => !crawled.value[f.url]))
+
+/**
+ * Tells the server every feed the reader has, so the crawler takes in the
+ * new ones and keeps the rest (it drops what nobody asked for in months);
+ * learns which blog each crawled one is. Without who the reader is.
+ */
+export async function registerOwn(): Promise<void> {
+  const feeds = ownFeeds.value.map((f) => f.url)
+  if (!feeds.length || !(await loadCapabilities()).readers) return
+  try {
+    const res = await fetch('/api/readers/feeds', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ feeds }),
+    })
+    if (!res.ok) return
+    const answer = await res.json()
+    for (const [url, id] of Object.entries(answer?.blogs ?? {})) {
+      if (Number.isInteger(id) && (id as number) > 0) noteCrawled(url, id as number)
+    }
+    store(REGISTERED_KEY, Date.now())
+  } catch {
+    // Next time.
+  }
+}
+
+let registerTimer: ReturnType<typeof setTimeout> | undefined
+watch(
+  () => ownFeeds.value.map((f) => f.url).join('\n'),
+  () => {
+    clearTimeout(registerTimer)
+    registerTimer = setTimeout(registerOwn, 2000)
+  },
+)
+// Once a day anyway, to say they are still wanted.
+if (Date.now() - load<number>(REGISTERED_KEY, 0) > 86_400_000) setTimeout(registerOwn, 5000)
+
 function hash(s: string): number {
   let h = 0x811c9dc5
   for (let i = 0; i < s.length; i++) {
@@ -134,7 +198,7 @@ function hash(s: string): number {
 export const ownBlogId = (feedUrl: string) => -(hash(feedUrl) % 2_000_000_000) - 1
 const ownPostId = (feedUrl: string, guid: string) => -(hash(`${feedUrl}\n${guid}`) % 2_000_000_000) - 1
 
-function cards(feed: ListedFeed, parsed: ParsedFeed, before: PostCard[]): PostCard[] {
+function cards(feed: ListedFeed, parsed: ParsedFeed, before: PostCard[], blog?: BlogRef): PostCard[] {
   const old = new Map(before.map((p) => [p.id, p]))
   const now = Math.floor(Date.now() / 1000)
   return parsed.items.slice(0, KEEP_PER_FEED).map((it: ParsedItem, i) => {
@@ -156,7 +220,7 @@ function cards(feed: ListedFeed, parsed: ParsedFeed, before: PostCard[]): PostCa
       has_full_text: false,
       comment_count: it.comments,
       comments_url: it.commentsUrl,
-      blog: {
+      blog: blog ?? {
         id: ownBlogId(feed.url),
         name: feed.title || parsed.title || hostOf(feed.homepage || feed.url),
         homepage: feed.homepage || parsed.homepage,
@@ -166,6 +230,18 @@ function cards(feed: ListedFeed, parsed: ParsedFeed, before: PostCard[]): PostCa
       },
     }
   })
+}
+
+/**
+ * A blog of the site's feed as it is right now, read here (after asking for
+ * it to be read again, before the site has): its posts as cards of that
+ * blog, with ids of their own (negative) until the site has them.
+ */
+export async function readNow(feedUrl: string, blog: BlogRef): Promise<PostCard[]> {
+  const got = await fetchRemote(feedUrl)
+  if (got.kind !== 'feed') return []
+  const parsed = parseSource(got.text, got.url)
+  return 'feed' in parsed ? cards({ url: feedUrl, title: blog.name, homepage: blog.homepage }, parsed.feed, [], blog) : []
 }
 
 function noteRead(url: string, r: Read) {
@@ -229,11 +305,14 @@ export function refreshOwn(force = false): Promise<void> {
       }
       const lists = ownSources.value.filter((s) => s.kind === 'list' && !s.url.startsWith('file:') && due(s.url, LIST_EVERY))
       await inTurn(lists, readList, 2)
-      await inTurn(ownFeeds.value.filter((f) => due(f.url, FEED_EVERY)), readFeed, 4)
+      await inTurn(previewFeeds.value.filter((f) => due(f.url, FEED_EVERY)), readFeed, 4)
     } finally {
       reading.value = false
       pass = null
     }
+    // What was just read can be registered now (the Worker takes only feeds
+    // it has fetched), and the crawler may have some by now.
+    void registerOwn()
   })()
   return pass
 }
@@ -244,7 +323,7 @@ export function readState(url: string): { ok: number; error?: string; count: num
 }
 
 function allItems(): PostCard[] {
-  return ownFeeds.value
+  return previewFeeds.value
     .flatMap((f) => reads.value[f.url]?.items ?? [])
     .sort((a, b) => b.sort_at - a.sort_at || a.id - b.id)
 }
@@ -258,18 +337,29 @@ export interface OwnQuery {
   blockWords?: string[]
 }
 
-export function ownPosts(q: OwnQuery): Page<PostCard> {
+/** What the reader's filters (channel bar, blocked words) leave of `list`. */
+export function keepOwn(list: PostCard[], q: OwnQuery): PostCard[] {
   const words = (q.blockWords ?? []).map((w) => w.toLowerCase())
-  const keep = (p: PostCard) =>
-    (q.blog === undefined || p.blog.id === q.blog) &&
-    (!q.hide?.noCover || !!p.cover) &&
-    (!q.hide?.shortExcerpt || hasLongExcerpt(p)) &&
-    (!q.hide?.noComments || (p.comment_count ?? 0) > 0) &&
-    !words.some((w) => `${p.title}\n${p.excerpt}`.toLowerCase().includes(w) || p.tags.some((t) => t.toLowerCase() === w))
-  const all = allItems().filter(keep)
-  const offset = Math.max(0, Number(q.cursor) || 0)
-  const limit = q.limit ?? 30
+  return list.filter(
+    (p) =>
+      (q.blog === undefined || p.blog.id === q.blog) &&
+      (!q.hide?.noCover || !!p.cover) &&
+      (!q.hide?.shortExcerpt || hasLongExcerpt(p)) &&
+      (!q.hide?.noComments || (p.comment_count ?? 0) > 0) &&
+      !words.some((w) => `${p.title}\n${p.excerpt}`.toLowerCase().includes(w) || p.tags.some((t) => t.toLowerCase() === w)),
+  )
+}
+
+export function pageOf(all: PostCard[], cursor: string | null | undefined, limit = 30): Page<PostCard> {
+  const offset = Math.max(0, Number(cursor) || 0)
   return { items: all.slice(offset, offset + limit), next_cursor: offset + limit < all.length ? String(offset + limit) : null }
+}
+
+/** Posts read here from the feeds the site does not crawl (yet), newest first. */
+export const previewPosts = (q: OwnQuery) => keepOwn(allItems(), q)
+
+export function ownPosts(q: OwnQuery): Page<PostCard> {
+  return pageOf(previewPosts(q), q.cursor, q.limit)
 }
 
 export function ownPost(id: number): PostCard | undefined {
@@ -328,9 +418,13 @@ export async function lookUp(input: string): Promise<Found> {
   let got = await fetchRemote(url)
   if (got.kind === 'page') {
     if (!got.feeds.length) throw new Error('这个网页上没有找到 RSS')
-    got = await fetchRemote(got.feeds[0])
+    url = got.feeds[0]
+    got = await fetchRemote(url)
     if (got.kind !== 'feed') throw new Error('这个网页上没有找到 RSS')
   }
+  // Known by the address asked for (redirects or not): the crawler finds a
+  // feed it already has by it, with its history.
+  got = { ...got, url: new URL(url).href }
   const parsed = parseSource(got.text, got.url)
   const at = Date.now()
   if ('list' in parsed) {
@@ -353,6 +447,8 @@ export function addOwn(found: Found) {
   changed([s, ...ownSources.value.filter((x) => x.url !== s.url)])
   if (found.feed) noteRead(s.url, { tried: Date.now(), ok: Date.now(), items: cards(s, found.feed, []) })
   void refreshOwn()
+  // A server that crawls reads it at once: which blog it is, a little later.
+  setTimeout(registerOwn, 30_000)
 }
 
 export function removeOwn(url: string) {

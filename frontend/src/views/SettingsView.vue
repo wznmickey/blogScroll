@@ -14,6 +14,7 @@ import { recentIds } from '../library'
 import { capabilities } from '../server'
 import {
   addOwn,
+  crawled,
   fromFile,
   lookUp,
   ownBlogId,
@@ -182,6 +183,11 @@ function addFile(e: Event) {
   if (file) void add(() => fromFile(file))
 }
 function readText(s: OwnSource): { text: string; bad: boolean } | null {
+  if (s.kind === 'feed' && crawled.value[s.url]) return { text: '本站在抓取', bad: false }
+  if (s.kind === 'list' && s.feeds?.length) {
+    const n = s.feeds.filter((f) => crawled.value[f.url]).length
+    if (n) return { text: `本站在抓取其中 ${n} 个`, bad: false }
+  }
   if (s.url.startsWith('file:')) return null
   const r = readState(s.url)
   if (!r) return { text: '还没读过', bad: false }
@@ -372,7 +378,11 @@ function toggleDirectory(id: string) {
 
         <h3>我添加的来源 <small>只有你看得到</small></h3>
         <p class="hint">
-          RSS / Atom 地址、博客首页（会找到它的 RSS），或 OPML 订阅列表的地址或文件。文章出现在首页的「订阅」频道；由本站的服务器代为读取，每个最多半小时一次。本站已经收录的博客，会直接帮你关注。
+          RSS / Atom 地址、博客首页（会找到它的 RSS），或 OPML 订阅列表的地址或文件。本站已经收录的博客，会直接帮你关注。
+          <template v-if="capabilities?.readers">
+            其余的由本站像收录的博客一样抓取：保留全部历史、自动分类，也出现在推荐、最新和分类里，但只有你看得到（服务器只记下这些 RSS 地址，不知道是谁添加的）。在本站抓到之前，先由你的浏览器经本站读取最新的几篇，放在首页的「订阅」频道。
+          </template>
+          <template v-else>文章出现在首页的「订阅」频道；由本站的服务器代为读取，每个最多半小时一次。</template>
         </p>
         <template v-if="capabilities?.fetch">
           <form class="add" @submit.prevent="addAddress">

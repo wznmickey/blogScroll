@@ -1,7 +1,8 @@
 // What the site's server offers besides the site itself (backend/src/readers.rs,
 // or for the static site the Cloudflare Worker, worker/src/index.js): sync
-// between a reader's devices, and fetching the feeds they add themselves.
-// Plain static hosting (GitHub Pages) has neither.
+// between a reader's devices, fetching the feeds they add themselves (and
+// crawling them like the site's own), and reading a blog again on request.
+// Plain static hosting (GitHub Pages) has none of it.
 
 import { ref } from 'vue'
 import { decode } from './feedParse'
@@ -9,6 +10,10 @@ import { decode } from './feedParse'
 export interface Capabilities {
   sync: boolean
   fetch: boolean
+  /** Readers' own feeds are crawled too (POST /api/readers/feeds). */
+  readers: boolean
+  /** A blog can be read again on request (POST /api/refresh). */
+  refresh: boolean
 }
 
 /** null until known. */
@@ -19,12 +24,17 @@ export function loadCapabilities(): Promise<Capabilities> {
   asking ??= fetch('/api/capabilities', { cache: 'no-store' })
     .then(async (r) => {
       const c = r.ok && r.headers.get('content-type')?.includes('json') ? await r.json() : {}
-      return (capabilities.value = { sync: c?.sync === true, fetch: c?.fetch === true })
+      return (capabilities.value = {
+        sync: c?.sync === true,
+        fetch: c?.fetch === true,
+        readers: c?.readers === true,
+        refresh: c?.refresh === true,
+      })
     })
     .catch(() => {
       // Offline: ask again next time.
       asking = null
-      return { sync: false, fetch: false }
+      return { sync: false, fetch: false, readers: false, refresh: false }
     })
   return asking
 }

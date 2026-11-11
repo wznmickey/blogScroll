@@ -1,7 +1,7 @@
 import { shallowRef } from 'vue'
 import type { Hide } from './channels'
 import { WEIGHT_INFO, type Weights } from './options'
-import { ownBlog, ownDetail, ownPost, ownPosts } from './sources'
+import { crawledIds, ownBlog, ownDetail, ownPost, ownPosts } from './sources'
 import { staticApi } from './staticApi'
 import type {
   BlogDetail,
@@ -149,6 +149,8 @@ const liveApi = {
       block_words: blockWords?.length ? blockWords.join(',') : undefined,
       nsfw: nsfw ? 1 : undefined,
       directories: directories?.join(','),
+      // The reader's own feeds that the site crawls: listed for them.
+      own: list(crawledIds()),
       w: weights ? WEIGHT_INFO.map(({ key }) => weights[key]).join(',') : undefined,
       blogs: list(blogs),
       follow: list(follow),

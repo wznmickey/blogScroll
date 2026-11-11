@@ -6,6 +6,7 @@ import type { BlogQuery, InterestQuery, PostQuery } from './api'
 import { hasLongExcerpt } from './format'
 import { DEFAULT_WEIGHTS, hostKey, type Weights } from './options'
 import { entries } from './library'
+import { noteCrawled, ownFeeds } from './sources'
 import type {
   BlogDetail,
   BlogSummary,
@@ -67,12 +68,54 @@ async function file<T>(name: string): Promise<T> {
 }
 
 const shard = (i: number) => file<PostCard[]>(`feed-${i}.json`)
-const blogFile = (id: number) => file<BlogFile>(`blogs/${id}.json`)
 const allBlogs = () => file<BlogSummary[]>('blogs.json')
+/** A blog's page; the reader's own feeds that only they have are under own/. */
+const blogFile = (id: number) => file<BlogFile>(`blogs/${id}.json`).catch(() => file<BlogFile>(`own/blogs/${id}.json`))
+
+// The reader's own feeds, crawled like the site's blogs: each in a file named
+// after the SHA-256 of its address (export.rs `own_file`), with its newest
+// posts; none until the crawler has it.
+interface OwnFile {
+  feed: string
+  blog: BlogDetail
+  posts: PostCard[]
+}
+async function sha256(s: string): Promise<string> {
+  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s))
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+const ownCache = new Map<string, Promise<OwnFile | null>>()
+function ownFile(url: string): Promise<OwnFile | null> {
+  let p = ownCache.get(url)
+  if (!p) {
+    p = sha256(url)
+      .then((h) => file<OwnFile>(`own/${h}.json`))
+      .then((f) => {
+        noteCrawled(url, f.blog.id)
+        return f
+      })
+      .catch(() => null)
+    ownCache.set(url, p)
+  }
+  return p
+}
+async function ownFiles(): Promise<OwnFile[]> {
+  if (!globalThis.crypto?.subtle) return []
+  return (await Promise.all(ownFeeds.value.map((f) => ownFile(f.url)))).filter((f): f is OwnFile => !!f)
+}
+const newestFirst = (a: PostCard, b: PostCard) => b.sort_at - a.sort_at || b.id - a.id
+
+/** The site's newest posts with the reader's own feeds' among them. */
+async function withOwn(posts: PostCard[]): Promise<PostCard[]> {
+  const own = (await ownFiles()).flatMap((f) => f.posts)
+  if (!own.length) return posts
+  const ids = new Set(posts.map((p) => p.id))
+  return [...posts, ...own.filter((p) => !ids.has(p.id))].sort(newestFirst)
+}
 
 async function allPosts(): Promise<PostCard[]> {
   const idx = await index()
-  return (await Promise.all(Array.from({ length: idx.feed_shards }, (_, i) => shard(i)))).flat()
+  return withOwn((await Promise.all(Array.from({ length: idx.feed_shards }, (_, i) => shard(i)))).flat())
 }
 
 function page<T>(all: T[], cursor: string | null | undefined, limit: number): Page<T> {
@@ -101,6 +144,8 @@ async function postFilter(q: PostQuery) {
   const hosts = q.blockHosts ?? []
   const words = (q.blockWords ?? []).map(lower)
   const listed = q.directories ? await blogsIn(q.directories) : null
+  // The reader's own feeds are not in a directory of the site's.
+  for (const f of q.directories ? await ownFiles() : []) listed?.add(f.blog.id)
   const host = (url: string) => hostKey(url)
   return (p: PostCard) =>
     (q.nsfw || !p.nsfw) &&
@@ -194,7 +239,7 @@ async function discover(q: PostQuery, limit: number): Promise<Page<PostCard>> {
   // A narrow channel needs the whole feed to fill a page.
   const narrow = !!(q.tag || q.category || q.kind || q.dirtag)
   const n = narrow ? idx.feed_shards : Math.min(DISCOVER_SHARDS, idx.feed_shards)
-  const pool = (await Promise.all(Array.from({ length: n }, (_, i) => shard(i)))).flat()
+  const pool = await withOwn((await Promise.all(Array.from({ length: n }, (_, i) => shard(i)))).flat())
   const { terms, categories } = await interests(q)
   const explore = q.mode === 'explore'
   const w = leaning(q.weights ?? DEFAULT_WEIGHTS, explore)
@@ -293,18 +338,22 @@ async function posts(q: PostQuery): Promise<Page<PostCard>> {
   if (!newestFirst) return discover(q, limit)
 
   const filter = await postFilter(q)
+  const matches = (p: PostCard) =>
+    filter(p) &&
+    (!search ||
+      lower(p.title).includes(search) ||
+      lower(p.excerpt).includes(search) ||
+      lower(p.blog.name).includes(search) ||
+      tagsOf(p).some((t) => lower(t) === search))
+  // With the reader's own feeds: all of it at once, theirs among the site's.
+  if ((await ownFiles()).length) {
+    const all = (await allPosts()).filter(matches)
+    const start = q.startAt
+    const at = start ? all.findIndex((p) => p.sort_at < start.sort_at || (p.sort_at === start.sort_at && p.id <= start.id)) : -1
+    return page(all, q.cursor ?? (start ? String(at < 0 ? all.length : at) : null), limit)
+  }
   const cursor = q.cursor ?? (q.startAt ? String(await positionOf(q.startAt)) : null)
-  return scan(
-    (p) =>
-      filter(p) &&
-      (!search ||
-        lower(p.title).includes(search) ||
-        lower(p.excerpt).includes(search) ||
-        lower(p.blog.name).includes(search) ||
-        tagsOf(p).some((t) => lower(t) === search)),
-    cursor,
-    limit,
-  )
+  return scan(matches, cursor, limit)
 }
 
 async function post(id: number): Promise<PostDetail> {
@@ -312,11 +361,8 @@ async function post(id: number): Promise<PostDetail> {
   // have their own file with all of it.
   const detailed = await file<number[]>('details.json').catch(() => [] as number[])
   if (detailed.includes(id)) return file<PostDetail>(`posts/${id}.json`)
-  const idx = await index()
-  for (let s = 0; s < idx.feed_shards; s++) {
-    const found = (await shard(s)).find((p) => p.id === id)
-    if (found) return { ...found, content_html: null }
-  }
+  const found = (await allPosts()).find((p) => p.id === id)
+  if (found) return { ...found, content_html: null }
   throw new Error('HTTP 404')
 }
 
@@ -385,7 +431,7 @@ export const staticApi = {
   blogs,
   blog: async (id: number) => (await blogFile(id)).blog,
   blogByKey: async (key: string) => {
-    const found = (await allBlogs()).find((b) => b.key === key)
+    const found = (await allBlogs()).find((b) => b.key === key) ?? (await ownFiles()).find((f) => f.blog.key === key)?.blog
     if (!found) throw new Error('HTTP 404')
     return (await blogFile(found.id)).blog
   },

@@ -10,7 +10,9 @@ import { blogPath, hostOf, relativeTime } from '../format'
 import { recordShown } from '../library'
 import { isBlocked, options, toggleBlock } from '../options'
 import { openInReader, readerIntent, readerIntentEnd } from '../reader'
-import { removeOwn } from '../sources'
+import { capabilities, loadCapabilities } from '../server'
+import { crawledFeed, readNow, refreshOwn, removeOwn } from '../sources'
+import type { PostCard } from '../types'
 import type { BlogDetail } from '../types'
 
 const route = useRoute()
@@ -42,8 +44,73 @@ watch(
 )
 
 // The blog's own page shows its posts even if the reader blocked it (they came here).
-const load = (cursor: string | null) =>
-  api.posts({ mode: 'latest', blog: id.value, cursor, nsfw: options.value.showNsfw || undefined })
+const load = async (cursor: string | null) => {
+  const page = await api.posts({ mode: 'latest', blog: id.value, cursor, nsfw: options.value.showNsfw || undefined })
+  if (cursor !== null || !justRead.value.length) return page
+  // Read just now, ahead of the site: on top, marked new.
+  const have = new Set(page.items.map((p) => p.url))
+  return { ...page, items: [...justRead.value.filter((p) => !have.has(p.url)), ...page.items] }
+}
+
+// 刷新: a visitor asks for the blog to be read again now. A server that
+// crawls does it at once; the static site's Worker has the crawler run for it
+// (a few minutes) and meanwhile the feed is read here, its new posts shown.
+void loadCapabilities()
+const refreshing = ref(false)
+const refreshNote = ref<string | null>(null)
+const justRead = ref<PostCard[]>([])
+const pageKey = ref(0)
+watch(id, () => {
+  refreshNote.value = null
+  justRead.value = []
+})
+const minutes = (at: number) => Math.max(1, Math.ceil((at - Date.now() / 1000) / 60))
+async function refresh() {
+  const b = blog.value
+  if (!b || refreshing.value) return
+  refreshing.value = true
+  refreshNote.value = null
+  try {
+    // A feed of the reader's own that the site does not crawl: read here.
+    if (b.id < 0) {
+      await refreshOwn(true)
+      refreshNote.value = '已重新读取'
+      pageKey.value++
+      return
+    }
+    const res = await fetch('/api/refresh', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ site: crawledFeed(b.id) ?? b.key ?? String(b.id) }),
+    })
+    const r = await res.json().catch(() => ({}))
+    if (r.status === 'done') {
+      refreshNote.value = r.new_posts ? `读到 ${r.new_posts} 篇新文章` : '读过了，没有新文章'
+      pageKey.value++
+    } else if (r.status === 'queued') {
+      refreshNote.value = `已请求，约 ${r.eta_minutes ?? 5} 分钟后网站更新`
+      const feed = b.crawl?.feed_url ?? crawledFeed(b.id)
+      if (feed) {
+        const newest = (await api.posts({ mode: 'latest', blog: b.id, limit: 1 })).items[0]?.sort_at ?? 0
+        const ref = { id: b.id, key: b.key, name: b.name, homepage: b.homepage, icon: b.icon, kind: b.kind.id, framable: b.framable }
+        justRead.value = (await readNow(feed, ref).catch(() => [])).filter((p) => p.sort_at > newest)
+        if (justRead.value.length) {
+          refreshNote.value += `；先显示刚读到的 ${justRead.value.length} 篇`
+          pageKey.value++
+        }
+      }
+    } else if (r.status === 'later' && r.retry_at) {
+      refreshNote.value = `${r.error}，${minutes(r.retry_at)} 分钟后可以再刷新`
+    } else {
+      refreshNote.value = r.error ?? `没能刷新（HTTP ${res.status}）`
+    }
+  } catch {
+    refreshNote.value = '没能刷新，稍后再试'
+  } finally {
+    refreshing.value = false
+  }
+}
+const isFresh = (p: PostCard) => justRead.value.some((x) => x.id === p.id)
 
 const aboutOpen = ref(false)
 watch(id, () => (aboutOpen.value = false))
@@ -100,6 +167,20 @@ const engine = computed(() => blog.value?.generator?.split(/\s+/)[0] ?? null)
           @click="openBeside($event, blog.homepage, blog.name)"
           >{{ hostOf(blog.homepage) }} ↗</a
         >
+        <button
+          v-if="capabilities?.refresh || blog.id < 0"
+          type="button"
+          class="refresh"
+          :disabled="refreshing"
+          title="现在就去读一次这个博客的 RSS"
+          @click="refresh"
+        >
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" :class="{ spin: refreshing }">
+            <path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" />
+          </svg>
+          {{ refreshing ? '读取中…' : '刷新' }}
+        </button>
+        <span v-if="refreshNote" class="refresh-note">{{ refreshNote }}</span>
         <p v-if="blog.description" class="desc">{{ blog.description }}</p>
         <p class="chips">
           <span v-if="blog.kind && blog.kind.id !== 'blog'" class="chip source">{{ blog.kind.label }}</span>
@@ -165,7 +246,8 @@ const engine = computed(() => blog.value?.generator?.split(/\s+/)[0] ?? null)
     <Waterfall
       v-if="blog"
       :load="load"
-      :reset-key="String(id)"
+      :reset-key="`${id}|${pageKey}`"
+      :is-fresh="isFresh"
       @impression="(p) => recordShown(p, blog?.name ?? '博客页')"
     >
       <template #empty>
@@ -230,6 +312,35 @@ h1 {
 .home {
   color: var(--link);
   font-size: 14px;
+}
+.refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 10px;
+  padding: 2px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text-2);
+  font-size: 12px;
+  vertical-align: 1px;
+}
+.refresh:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.refresh .spin {
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.refresh-note {
+  margin-left: 8px;
+  color: var(--text-3);
+  font-size: 12px;
 }
 .chips {
   display: flex;
