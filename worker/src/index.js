@@ -593,7 +593,12 @@ async function pushStats(env) {
   if (!env.DATA_REPO || !token) return
   const now = Math.floor(Date.now() / 1000)
   if (now - (await getState(env, 'stats_pushed')) < 3600 || now < (await getState(env, 'stats_retry_at'))) return
-  const later = () => setState(env, 'stats_retry_at', now + 300 + Math.floor(Math.random() * 301))
+  // Refused or unreachable: again in 5-10 minutes. Why goes to the Worker's
+  // logs (404 on the first call: the token cannot see DATA_REPO).
+  const later = (res) => {
+    console.error('stats push refused', res.status, new URL(res.url).pathname)
+    return setState(env, 'stats_retry_at', now + 300 + Math.floor(Math.random() * 301))
+  }
   const files = []
   for (const f of await statsFiles(env)) {
     const h = fnv(f.content)
@@ -604,28 +609,25 @@ async function pushStats(env) {
   const branch = env.DATA_BRANCH || 'main'
   const gh = (method, path, body) => github(env, token, method, `${repo}${path}`, body)
   const ref = await gh('GET', `/git/ref/heads/${branch}`)
-  if (!ref.ok) return later()
+  if (!ref.ok) return later(ref)
   const head = (await ref.json()).object.sha
   const parent = await gh('GET', `/git/commits/${head}`)
-  if (!parent.ok) return later()
+  if (!parent.ok) return later(parent)
   const tree = await gh('POST', '/git/trees', {
     base_tree: (await parent.json()).tree.sha,
     tree: files.map((f) => ({ path: f.path, mode: '100644', type: 'blob', content: f.content })),
   })
-  if (!tree.ok) return later()
+  if (!tree.ok) return later(tree)
   const commit = await gh('POST', '/git/commits', {
     message: `统计 ${dayOf(now)}：${files.map((f) => f.path.replace('stats/', '')).join('、')}`,
     tree: (await tree.json()).sha,
     parents: [head],
     author: { name: 'blogScroll', email: 'backup@blogscroll.invalid' },
   })
-  if (!commit.ok) return later()
+  if (!commit.ok) return later(commit)
   // Never forced: someone else's newer commit means trying again on top of it.
   const moved = await gh('PATCH', `/git/refs/heads/${branch}`, { sha: (await commit.json()).sha, force: false })
-  if (!moved.ok) {
-    console.error('stats push refused', moved.status)
-    return later()
-  }
+  if (!moved.ok) return later(moved)
   await env.DB.batch([
     ...files.map((f) =>
       env.DB.prepare('INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value').bind(
