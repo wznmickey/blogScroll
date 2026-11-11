@@ -8,6 +8,7 @@
 //! tag-index.json    every tag used more than once (= GET /api/tags/search), for search
 //! feed-N.json       newest posts, newest first, `shard_size` per file (= latest mode)
 //! related.json      { post id: [related post ids] }, limited to posts in the feed files
+//! trending.json     = GET /api/trending (大家在看)
 //! blogs.json        every blog (= GET /api/blogs, all pages)
 //! blogs/{id}.json   { blog: GET /api/blogs/{id}, posts: [every stored post, newest first] }
 //! posts/{id}.json   = GET /api/posts/{id}, only for blogs whose authors allowed full text
@@ -114,6 +115,8 @@ pub async fn export(app: Router, pool: &SqlitePool, out: &Path, opts: &ExportOpt
         }
     }
     write(&tmp.join("related.json"), &Value::Object(related))?;
+    // 大家在看 (stats.rs), from the counts the backup brought.
+    write(&tmp.join("trending.json"), &get(&app, "/api/trending").await?)?;
 
     let blogs = paged(&app, usize::MAX, |c| {
         format!("/api/blogs?limit=200&offset={}", c.unwrap_or("0"))

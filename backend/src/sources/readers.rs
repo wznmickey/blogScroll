@@ -150,6 +150,8 @@ pub async fn report(pool: &SqlitePool) -> anyhow::Result<String> {
     .fetch_all(pool)
     .await?;
     let rows: Vec<Row> = rows.into_iter().filter(|r| parse_http_url(&r.url).is_some()).collect();
+    // Counted only from browsers that send statistics.
+    let readers = crate::stats::subscribers(pool).await?;
     let day =
         |t: i64| chrono::DateTime::from_timestamp(t, 0).map_or_else(String::new, |d| d.format("%Y-%m-%d").to_string());
     let cell = |s: &str| s.replace('|', "\\|").replace('\n', " ");
@@ -158,10 +160,10 @@ pub async fn report(pool: &SqlitePool) -> anyhow::Result<String> {
         "# 读者订阅\n\n\
          读者在「设置 → 来源 → 我添加的来源」里添加的 RSS。本站像收录的博客一样抓取、分析、备份，\
          只给添加的人看（只被这里列着的博客不进任何公开的列表、搜索和导出）。\
-         这里只有地址：不知道是谁、有几个人添加的。90 天没人再登记的不再抓，也不再列在这里\
-         （已抓的文章留在 sites/ 里）。这个文件由备份自动生成，每次覆盖。\n\n\
+         这里只有地址和人数，不知道是谁（人数只算开着统计的浏览器）。90 天没人再登记的不再抓，\
+         也不再列在这里（已抓的文章留在 sites/ 里）。这个文件由备份自动生成，每次覆盖。\n\n\
          共 {} 个，其中 {} 个只有读者订阅，其余本站本来就收录。\n\n\
-         | RSS | 博客 | 文章 | 最近一篇 | 抓取 | 首次登记 | 最近登记 |\n|---|---|---|---|---|---|---|\n",
+         | RSS | 博客 | 订阅人数 | 文章 | 最近一篇 | 抓取 | 首次登记 | 最近登记 |\n|---|---|---|---|---|---|---|---|\n",
         rows.len(),
         only
     );
@@ -178,9 +180,10 @@ pub async fn report(pool: &SqlitePool) -> anyhow::Result<String> {
             (true, None, _) => "还没读到".to_string(),
         };
         out.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
             cell(&r.url),
             blog,
+            readers.get(&r.url).copied().unwrap_or(0),
             r.posts.unwrap_or(0),
             r.newest.map(day).unwrap_or_default(),
             crawl,
@@ -316,7 +319,7 @@ mod tests {
             "{report}"
         );
         assert!(
-            report.contains("| https://b2.example/feed.xml | Blog 2 | 5 |"),
+            report.contains("| https://b2.example/feed.xml | Blog 2 | 0 | 5 |"),
             "{report}"
         );
 

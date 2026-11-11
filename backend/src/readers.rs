@@ -19,6 +19,7 @@
 //! - `/api/refresh`: a visitor asks for one blog to be read again now (the
 //!   button on its page); at most every REFRESH_SECS, never over a site's own
 //!   request to wait.
+//! - `/api/events`: what readers do, counted without them in it (stats.rs).
 //! - `/api/capabilities`: which of these are here (none on plain static hosting).
 //!
 //! The Cloudflare Worker (worker/src/index.js) answers the same for the
@@ -78,6 +79,7 @@ pub fn router(pool: SqlitePool, proxy: FeedProxy, crawler: Option<Arc<Crawler>>)
         .route("/api/fetch", get(fetch))
         .route("/api/readers/feeds", post(register))
         .route("/api/refresh", post(refresh))
+        .route("/api/events", post(events))
         .layer(DefaultBodyLimit::max(MAX_SYNC_BYTES))
         .with_state(ReaderState {
             pool,
@@ -103,7 +105,10 @@ fn db_error(e: sqlx::Error) -> Response {
 
 async fn capabilities(State(s): State<ReaderState>) -> Response {
     let crawls = s.crawler.is_some();
-    no_store(Json(json!({ "sync": true, "fetch": true, "readers": crawls, "refresh": crawls })).into_response())
+    no_store(
+        Json(json!({ "sync": true, "fetch": true, "readers": crawls, "refresh": crawls, "stats": true }))
+            .into_response(),
+    )
 }
 
 // ---- Sync ----
@@ -632,6 +637,12 @@ async fn fetch(State(s): State<ReaderState>, Query(q): Query<FetchQuery>) -> Res
 #[derive(Deserialize)]
 struct Registration {
     feeds: Vec<String>,
+    /// The browser's random id (statistics), to count each feed's readers.
+    #[serde(default)]
+    who: Option<String>,
+    /// False: statistics turned off, so they are not counted (any more).
+    #[serde(default)]
+    counted: Option<bool>,
 }
 
 /// All the feeds a reader has, each time they change (and now and then, to
@@ -683,6 +694,12 @@ async fn register(State(s): State<ReaderState>, Json(r): Json<Registration>) -> 
         };
         blogs.insert(raw.to_string(), blog.into());
     }
+    if let Some(who) = r.who.as_deref().and_then(crate::stats::who) {
+        let feeds: Vec<String> = blogs.keys().cloned().collect();
+        if let Err(e) = crate::stats::note_subscriptions(&s.pool, &who, &feeds, r.counted != Some(false)).await {
+            return db_error(e);
+        }
+    }
     // New to this server: listed and read now, not at the next sync.
     if let Some(crawler) = s.crawler.clone().filter(|_| !fresh.is_empty()) {
         let pool = s.pool.clone();
@@ -702,6 +719,24 @@ async fn register(State(s): State<ReaderState>, Json(r): Json<Registration>) -> 
         });
     }
     no_store(Json(json!({ "blogs": blogs })).into_response())
+}
+
+#[derive(Deserialize)]
+struct Events {
+    /// The browser's random id: hashed, only to count each visitor once a day.
+    #[serde(default)]
+    id: Option<String>,
+    events: Vec<crate::stats::Event>,
+}
+
+/// What a reader did (a batch, sent now and then and when they leave).
+async fn events(State(s): State<ReaderState>, Json(e): Json<Events>) -> Response {
+    let who = e.id.as_deref().and_then(crate::stats::who);
+    let list = &e.events[..e.events.len().min(200)];
+    match crate::stats::record(&s.pool, who.as_deref(), list).await {
+        Ok(n) => no_store(Json(json!({ "counted": n })).into_response()),
+        Err(e) => db_error(e),
+    }
 }
 
 #[derive(Deserialize)]
@@ -1078,7 +1113,7 @@ mod tests {
         let r = call(&strict, "GET", "/api/capabilities", &[], b"").await;
         assert_eq!(
             bytes(r).await,
-            br#"{"fetch":true,"readers":false,"refresh":false,"sync":true}"#
+            br#"{"fetch":true,"readers":false,"refresh":false,"stats":true,"sync":true}"#
         );
     }
 

@@ -18,6 +18,7 @@ mod readers;
 mod rich;
 mod seo;
 mod sources;
+mod stats;
 mod util;
 
 use std::path::PathBuf;
@@ -338,6 +339,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let s = analyze::retag_all(&pool).await?;
             println!("analyzed {} posts", s.posts);
+            stats::refresh_heat(&pool).await?;
             let state = AppState {
                 pool: pool.clone(),
                 site_name: cfg.server.site_name.clone(),
@@ -389,6 +391,16 @@ async fn main() -> anyhow::Result<()> {
             if let Err(e) = readers::prune(&pool).await {
                 tracing::warn!(error = %e, "pruning old sync copies failed");
             }
+            // Heat from what readers do, hourly.
+            let heat_pool = pool.clone();
+            tokio::spawn(async move {
+                loop {
+                    if let Err(e) = stats::refresh_heat(&heat_pool).await {
+                        tracing::warn!(error = %e, "heat not recomputed");
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                }
+            });
             let cache = Arc::new(ResponseCache::new(cfg.server.api_cache_entries));
             let mut app: Router = api::router(state)
                 .route_layer(from_fn_with_state(cache, cache::api_cache))

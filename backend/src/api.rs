@@ -63,6 +63,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/blogs", get(list_blogs))
         .route("/api/blogs/{id}", get(get_blog))
         .route("/api/sites/{*key}", get(get_blog_by_key))
+        .route("/api/trending", get(trending))
         .with_state(state)
 }
 
@@ -676,6 +677,7 @@ struct PostRow {
     blog_kind: String,
     blog_framable: Option<bool>,
     nsfw: bool,
+    heat: Option<f64>,
     /// What made up its place in 推荐 / 反推荐 (JSON), only there.
     #[sqlx(default)]
     why: Option<String>,
@@ -726,6 +728,10 @@ pub struct PostCard {
     /// Adult content: only listed when asked for (`nsfw=1`).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     nsfw: bool,
+    /// How much readers took to it lately, 0-1 (its standing among the posts
+    /// they did anything with; stats.rs); absent when nobody did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    heat: Option<f64>,
     /// In 推荐 and 反推荐: each part of the post's score, in days of freshness.
     #[serde(skip_serializing_if = "Option::is_none")]
     why: Option<serde_json::Value>,
@@ -753,6 +759,7 @@ impl From<PostRow> for PostCard {
             comment_count: r.comment_count,
             comments_url: r.comments_url,
             nsfw: r.nsfw,
+            heat: r.heat.map(|h| (h * 100.0).round() / 100.0),
             why: r.why.and_then(|w| serde_json::from_str(&w).ok()),
             blog: BlogRef {
                 id: r.blog_id,
@@ -782,7 +789,8 @@ macro_rules! post_columns {
      b.id AS blog_id, b.site_key AS blog_key, b.name AS blog_name, b.homepage_url AS blog_homepage,
      COALESCE(b.avatar_custom, b.avatar_url, b.icon_url) AS blog_icon,
      (SELECT json_group_array(DISTINCT bt.tag) FROM blog_tags bt WHERE bt.blog_id = b.id) AS blog_tags,
-     COALESCE(b.kind, b.detected_kind, 'blog') AS blog_kind, b.framable AS blog_framable, p.nsfw"
+     COALESCE(b.kind, b.detected_kind, 'blog') AS blog_kind, b.framable AS blog_framable, p.nsfw,
+     (SELECT ph.heat FROM post_heat ph WHERE ph.post_id = p.id) AS heat"
     };
 }
 
@@ -1162,6 +1170,8 @@ struct Leaning {
     noise: f64,
     same_blog: f64,
     per_blog: i64,
+    /// Days ahead for the posts other readers took to most (their heat, 0-1).
+    heat: f64,
 }
 
 /// The reader's settings for 推荐, all in days of freshness except
@@ -1176,6 +1186,8 @@ struct Weights {
     noise: f64,
     same_blog: f64,
     per_blog: i64,
+    /// What other readers took to (heat, stats.rs), when the reader wants it counted.
+    heat: f64,
 }
 
 /// 推荐 as it comes: towards what the reader likes, and the blogs they follow.
@@ -1188,19 +1200,23 @@ const DEFAULT_WEIGHTS: Weights = Weights {
     noise: 14.0,
     same_blog: 5.0,
     per_blog: 8,
+    heat: 10.0,
 };
 
 impl Weights {
-    /// `interest,category,blog,seen,shown,noise,same_blog,per_blog`, each
-    /// kept within a sensible range; `None` if any is missing or not a number.
+    /// `interest,category,blog,seen,shown,noise,same_blog,per_blog[,heat]`,
+    /// each kept within a sensible range; `None` if any is missing or not a
+    /// number. Without `heat` (clients from before it), the default.
     fn parse(s: &str) -> Option<Weights> {
         let v: Vec<f64> = s
             .split(',')
             .map(|x| x.trim().parse::<f64>())
             .collect::<Result<_, _>>()
             .ok()?;
-        let [interest, category, blog, seen, shown, noise, same_blog, per_blog] = v[..] else {
-            return None;
+        let (interest, category, blog, seen, shown, noise, same_blog, per_blog, heat) = match v[..] {
+            [a, b, c, d, e, f, g, h] => (a, b, c, d, e, f, g, h, DEFAULT_WEIGHTS.heat),
+            [a, b, c, d, e, f, g, h, i] => (a, b, c, d, e, f, g, h, i),
+            _ => return None,
         };
         if v.iter().any(|x| !x.is_finite()) {
             return None;
@@ -1214,6 +1230,7 @@ impl Weights {
             noise: noise.clamp(0.0, 60.0),
             same_blog: same_blog.clamp(0.0, 30.0),
             per_blog: (per_blog.round() as i64).clamp(1, 30),
+            heat: heat.clamp(0.0, 60.0),
         })
     }
 
@@ -1231,15 +1248,18 @@ impl Weights {
             noise: self.noise,
             same_blog: self.same_blog,
             per_blog: self.per_blog,
+            heat: self.heat,
         };
         if !explore {
             return base;
         }
+        // And what others read most, last: less trodden ground first.
         Leaning {
             interest: -self.interest,
             category: -2.0 * self.category,
             blog: -4.0 * self.blog,
             per_blog: self.per_blog.min(3),
+            heat: -self.heat,
             ..base
         }
     }
@@ -1284,8 +1304,10 @@ async fn discover_posts(
                    (COALESCE(c1.w, 0) + COALESCE(c2.w, 0)) * ?17 AS category,
                    (p.blog_id IN (SELECT value FROM json_each(?7))) * ?18 AS blog,
                    -(p.id IN (SELECT value FROM json_each(?8))) * ?19 AS seen,
-                   -(p.id IN (SELECT value FROM json_each(?20))) * ?21 AS shown
+                   -(p.id IN (SELECT value FROM json_each(?20))) * ?21 AS shown,
+                   COALESCE(ph.heat, 0) * ?24 AS heat
             FROM ranked r JOIN posts p ON p.id = r.post_id
+            LEFT JOIN post_heat ph ON ph.post_id = p.id
             LEFT JOIN sim ON sim.post_id = p.id
             LEFT JOIN cat c1 ON c1.id = p.category
             LEFT JOIN cat c2 ON c2.id = substr(p.category, 1, instr(p.category || '/', '/') - 1)
@@ -1297,10 +1319,11 @@ async fn discover_posts(
         ",
          json_object('age_days', round((unixepoch() - s.sort_at) / 86400.0, 1), 'noise', round(s.noise, 1),
                      'same_blog', s.same_blog, 'interest', round(s.interest, 1), 'category', round(s.category, 1),
-                     'blog', s.blog, 'seen', s.seen, 'shown', s.shown) AS why
+                     'blog', s.blog, 'seen', s.seen, 'shown', s.shown, 'heat', round(s.heat, 1)) AS why
          FROM scored s JOIN posts p ON p.id = s.post_id JOIN blogs b ON b.id = p.blog_id
          ORDER BY s.undated,
-                  s.sort_at / 86400.0 + s.noise + s.same_blog + s.interest + s.category + s.blog + s.seen + s.shown DESC,
+                  s.sort_at / 86400.0 + s.noise + s.same_blog + s.interest + s.category + s.blog + s.seen + s.shown
+                    + s.heat DESC,
                   p.id DESC
          LIMIT ?2 OFFSET ?3"
     ))
@@ -1322,6 +1345,7 @@ async fn discover_posts(
         .bind(leaning.shown)
         .bind(leaning.noise)
         .bind(leaning.same_blog)
+        .bind(leaning.heat)
         .fetch_all(pool)
         .await?;
     let next_cursor = (rows.len() as i64 == limit).then(|| (offset + limit).to_string());
@@ -1592,6 +1616,207 @@ macro_rules! blog_summary_sql {
              WHERE de.blog_id = b.id AND de.active = 1) AS directory_ids
          FROM blogs b"
     };
+}
+
+// ---- 大家在看: what other readers took to lately (stats.rs) ----
+
+#[derive(Debug, Serialize)]
+pub struct Trending {
+    generated_at: i64,
+    /// The counts cover this many days.
+    days: i64,
+    /// Visitors today and in the last 7 days.
+    visitors: Visitors,
+    /// Most taken to: opened, read, liked, saved, read for long.
+    posts: Vec<PostCard>,
+    blogs: Vec<TrendingBlog>,
+    /// Feeds readers added themselves that the site does not list: others can add them too.
+    reader_feeds: Vec<ReaderFeed>,
+    /// What readers searched for (last 14 days).
+    searches: Vec<Count>,
+    /// Tags and keywords of the posts readers took to, and their categories.
+    tags: Vec<Count>,
+    keywords: Vec<Count>,
+    categories: Vec<CategoryHeat>,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct Visitors {
+    today: i64,
+    week: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TrendingBlog {
+    #[serde(flatten)]
+    blog: BlogSummary,
+    /// Follows counted (net), and its standing (follows and its posts' heat).
+    followers: i64,
+    score: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReaderFeed {
+    feed: String,
+    subscribers: i64,
+    blog: BlogSummary,
+    /// Its newest few.
+    posts: Vec<PostCard>,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct Count {
+    term: String,
+    n: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CategoryHeat {
+    category: CategoryRef,
+    n: f64,
+}
+
+async fn trending(State(st): State<AppState>) -> ApiResult<Trending> {
+    let pool = &st.pool;
+    let day = |d: i64| {
+        (chrono::Utc::now() - chrono::Duration::days(d))
+            .format("%Y-%m-%d")
+            .to_string()
+    };
+    let visitors: Visitors = sqlx::query_as(
+        "SELECT CAST(COALESCE(SUM(CASE WHEN day = ?1 THEN n END), 0) AS INTEGER) AS today,
+                CAST(COALESCE(SUM(n), 0) AS INTEGER) AS week
+         FROM stats WHERE metric = 'visit' AND day >= ?2",
+    )
+    .bind(day(0))
+    .bind(day(6))
+    .fetch_one(pool)
+    .await?;
+    let posts: Vec<PostRow> = sqlx::query_as(concat!(
+        "SELECT ",
+        post_columns!(),
+        " FROM post_heat ph JOIN posts p ON p.id = ph.post_id JOIN blogs b ON b.id = p.blog_id
+         WHERE ",
+        public!(),
+        " AND p.nsfw = 0
+         ORDER BY ph.score DESC, p.sort_at DESC
+         LIMIT 60"
+    ))
+    .fetch_all(pool)
+    .await?;
+
+    let heat: Vec<(i64, f64, f64)> =
+        sqlx::query_as("SELECT blog_id, followers, score FROM blog_heat ORDER BY score DESC LIMIT 60")
+            .fetch_all(pool)
+            .await?;
+    let ids: Vec<i64> = heat.iter().map(|h| h.0).collect();
+    let rows: Vec<BlogSummaryRow> = sqlx::query_as(concat!(
+        blog_summary_sql!(),
+        " WHERE b.id IN (SELECT value FROM json_each(?)) AND ",
+        public!()
+    ))
+    .bind(serde_json::to_string(&ids).unwrap_or_default())
+    .fetch_all(pool)
+    .await?;
+    let mut blogs: Vec<TrendingBlog> = rows
+        .into_iter()
+        .filter_map(|r| {
+            let (_, followers, score) = *heat.iter().find(|h| h.0 == r.id)?;
+            Some(TrendingBlog {
+                blog: BlogSummary::from_row(&st, r),
+                followers: followers as i64,
+                score: (score * 10.0).round() / 10.0,
+            })
+        })
+        .collect();
+    blogs.sort_by(|a, b| b.score.total_cmp(&a.score));
+    blogs.truncate(30);
+
+    // Others' own feeds, those no directory of the site lists: anyone may add them.
+    let subscribers = crate::stats::subscribers(pool).await?;
+    let mut reader_feeds = Vec::new();
+    let mut wanted: Vec<(&String, &i64)> = subscribers.iter().filter(|(_, n)| **n > 0).collect();
+    wanted.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    for (feed, n) in wanted {
+        if reader_feeds.len() >= 30 {
+            break;
+        }
+        let row: Option<BlogSummaryRow> = sqlx::query_as(concat!(
+            blog_summary_sql!(),
+            " JOIN directory_entries d ON d.blog_id = b.id AND d.directory = ? AND d.external_id = ? AND d.active = 1
+              WHERE b.private = 1 AND b.excluded = 0 AND b.flagged IS NULL"
+        ))
+        .bind(crate::db::READERS)
+        .bind(feed)
+        .fetch_optional(pool)
+        .await?;
+        let Some(row) = row else { continue };
+        let recent: Vec<PostRow> = sqlx::query_as(concat!(
+            "SELECT ",
+            post_columns!(),
+            " FROM posts p JOIN blogs b ON b.id = p.blog_id WHERE p.blog_id = ? AND p.nsfw = 0
+              ORDER BY p.sort_at DESC LIMIT 3"
+        ))
+        .bind(row.id)
+        .fetch_all(pool)
+        .await?;
+        reader_feeds.push(ReaderFeed {
+            feed: feed.clone(),
+            subscribers: *n,
+            blog: BlogSummary::from_row(&st, row),
+            posts: recent.into_iter().map(Into::into).collect(),
+        });
+    }
+
+    let searches: Vec<Count> = sqlx::query_as(
+        "SELECT key AS term, SUM(n) AS n FROM stats WHERE metric = 'search' AND day >= ?
+         GROUP BY key ORDER BY n DESC, key LIMIT 30",
+    )
+    .bind(day(13))
+    .fetch_all(pool)
+    .await?;
+    let terms = |tag: bool| {
+        sqlx::query_as::<_, Count>(concat!(
+            "SELECT COALESCE(l.label, pt.term) AS term, ROUND(SUM(ph.score * pt.weight), 2) AS n
+             FROM post_heat ph JOIN post_terms pt ON pt.post_id = ph.post_id
+             JOIN posts p ON p.id = ph.post_id JOIN blogs b ON b.id = p.blog_id
+             LEFT JOIN tag_labels l ON l.term = pt.term
+             WHERE pt.is_tag = ? AND ",
+            public!(),
+            " GROUP BY pt.term ORDER BY n DESC LIMIT 30"
+        ))
+        .bind(tag)
+        .fetch_all(pool)
+    };
+    let tags = terms(true).await?;
+    let keywords = terms(false).await?;
+    let categories: Vec<(String, f64)> = sqlx::query_as(concat!(
+        "SELECT p.category, ROUND(SUM(ph.score), 1) AS n
+         FROM post_heat ph JOIN posts p ON p.id = ph.post_id JOIN blogs b ON b.id = p.blog_id
+         WHERE p.category <> 'other' AND ",
+        public!(),
+        " GROUP BY p.category ORDER BY n DESC LIMIT 20"
+    ))
+    .fetch_all(pool)
+    .await?;
+    Ok(Json(Trending {
+        generated_at: crate::util::now(),
+        days: crate::stats::HEAT_DAYS,
+        visitors,
+        posts: posts.into_iter().map(Into::into).collect(),
+        blogs,
+        reader_feeds,
+        searches,
+        tags,
+        keywords,
+        categories: categories
+            .into_iter()
+            .map(|(id, n)| CategoryHeat {
+                category: CategoryRef::new(&id),
+                n,
+            })
+            .collect(),
+    }))
 }
 
 async fn list_blogs(State(st): State<AppState>, Query(q): Query<BlogQuery>) -> ApiResult<Page<BlogSummary>> {

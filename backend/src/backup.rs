@@ -607,6 +607,10 @@ pub async fn restore(pool: &SqlitePool, dir: &Path, opts: &MergeOptions) -> anyh
     if stats.blogs_added + stats.posts_added > 0 {
         crate::analyze::retag_all(pool).await?;
     }
+    // The static site's counts (the Worker commits them, stats/).
+    if crate::stats::import(pool, dir).await? > 0 {
+        crate::stats::refresh_heat(pool).await?;
+    }
     Ok(stats)
 }
 
