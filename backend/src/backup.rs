@@ -5,6 +5,8 @@
 //! README.md            what this is and how to restore
 //! meta.json            format, version, counts
 //! sites/<site>.json    { blog, directories, tags, posts }, named after the blog's address
+//! readers.md           the feeds readers added themselves, and how crawling them goes
+//!                      (a report for the owner, written anew each time)
 //! ```
 //!
 //! One pretty-printed file per blog, posts in the order they were first
@@ -493,6 +495,9 @@ pub async fn write_snapshot(pool: &SqlitePool, dir: &Path, allow_shrink: bool) -
         posts: stats.posts,
     };
     stats.changed += usize::from(write_if_changed(&dir.join("meta.json"), &pretty(&meta)?)?);
+    // For the owner: which feeds readers added (not who), and how they go.
+    let readers = crate::sources::readers::report(pool).await?;
+    stats.changed += usize::from(write_if_changed(&dir.join("readers.md"), &readers)?);
     // Written once; after that the README is the repository owner's to edit.
     let readme = dir.join("README.md");
     if std::fs::read_to_string(&readme).map_or(true, |t| t == README_V1) {
@@ -1075,7 +1080,7 @@ mod tests {
 
         let first = write_snapshot(&st.pool, &dir, false).await.unwrap();
         assert_eq!((first.blogs, first.posts), (3, 15));
-        assert_eq!(first.changed, 3 + 2, "three blogs, meta.json and README.md");
+        assert_eq!(first.changed, 3 + 3, "three blogs, meta.json, README.md and readers.md");
         let again = write_snapshot(&st.pool, &dir, false).await.unwrap();
         assert_eq!(again.changed, 0, "nothing changed, nothing rewritten");
 

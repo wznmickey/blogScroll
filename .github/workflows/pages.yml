@@ -161,8 +161,8 @@ jobs:
           if [ -z "$db" ]; then echo "No database yet."; exit 0; fi
           since=$(( $(date +%s) - 90 * 86400 ))
           curl -sf -H "$auth" -H 'Content-Type: application/json' "$api/$db/query" \
-            -d "{\"sql\": \"SELECT url FROM reader_feeds WHERE last_at >= $since ORDER BY url\"}" \
-            | jq -r '.result[0].results[].url' > deploy/readers.txt.new
+            -d "{\"sql\": \"SELECT url, first_at, last_at FROM reader_feeds WHERE last_at >= $since ORDER BY url\"}" \
+            | jq -r '.result[0].results[] | [.url, .first_at, .last_at] | @tsv' > deploy/readers.txt.new
           mv deploy/readers.txt.new deploy/readers.txt
           echo "$(wc -l < deploy/readers.txt) feeds readers added"
 

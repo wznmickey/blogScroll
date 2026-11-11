@@ -57,6 +57,9 @@ enum Command {
     },
     /// Fetch the blog directories once and apply [policy].
     Sync,
+    /// List the feeds readers added themselves (设置 → 来源 → 我添加的来源)
+    /// and how crawling them goes; the same table as readers.md in the backup.
+    Readers,
     /// Crawl on and on without serving: feeds as they fall due, profiles,
     /// the daily directory sync, and a backup every `[backup] every_hours`.
     /// For a second machine that crawls more often than the scheduled runs;
@@ -219,6 +222,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command.unwrap_or(Command::Serve { no_crawl: false }) {
         Command::Sync => crawler.sync_directories().await?,
+        Command::Readers => print!("{}", sources::readers::report(&pool).await?),
         Command::Watch {
             git_dir,
             remote,

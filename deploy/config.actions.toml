@@ -34,6 +34,7 @@ note = "站长本人的博客"
 
 # Feeds readers added themselves (设置 → 来源 → 我添加的来源): crawled like the
 # rest, shown only to them. The crawl workflow writes this file from the
-# Worker's database before each run (one address per line).
+# Worker's database before each run (address, first and last asked for).
+# Which feeds there are: readers.md in the backup repository.
 [sources.readers]
 file = "readers.txt"

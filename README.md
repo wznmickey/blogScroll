@@ -55,6 +55,7 @@ cargo run --release -- serve       # http://127.0.0.1:8080
 cargo run -- sync                  # 只同步成员列表
 cargo run -- crawl --limit 20      # 只抓 20 个到期的博客，然后退出
 cargo run -- crawl --blog 42       # 立刻抓某一个博客
+cargo run -- readers               # 读者自己添加了哪些 RSS，抓得怎样
 cargo run -- serve --no-crawl      # 只提供网页和 API
 cargo run -- crawl --sync --all    # 定时任务用：同步（如到期）并抓完所有到期的博客
 cargo run -- analyze               # 重算全部关键词、标签、分类和相似度（serve 每 6 小时自动做）
@@ -192,6 +193,7 @@ GitHub Pages 的项目页（`你.github.io/blogScroll/`）不在域名根目录�
 README.md            说明
 meta.json            格式版本、博客数、文章数
 sites/<博客地址>.json  一个博客一个文件：博客信息、所属目录、全部文章（按首次抓到的时间排序）
+readers.md           读者自己添加了哪些 RSS、成了哪个博客、抓得怎样（给站长看，每次重写）
 ```
 
 每次提交只包含有变化的博客，diff 可以直接读；抓取过程中的临时状态（ETag、刷新时间、错误）和能重新算出来的内容（分类、标签向量、评论数）不进备份。目前约 1600 个博客、一万多篇文章，快照十几 MB，git 压缩后几百 KB。
@@ -292,6 +294,7 @@ feed-server watch --git-dir data/backup --remote git@github-blogscroll-backup:<�
 - 自己看得到：自建服务器上，浏览器的请求带着自己那些博客的编号（`own=`）；静态版导出时为每个登记的 RSS 写一个 `data/own/<地址的 SHA-256>.json`（最新 30 篇，博主页另有完整的文件），只有知道这个地址的浏览器才会去读。
 - 本站抓到之前（新加的一般几分钟内），以及不抓取的服务器上，由浏览器经本站代读最新的几篇，放在「订阅」频道。
 - Worker 只接受它代读过、确实是 RSS 的地址登记，总数最多 5000 个。
+- 站长看有哪些被订阅：私有备份仓库里的 `readers.md`（每次备份更新：RSS、成了哪个博客、文章数、最近一篇、抓取是否正常、首次和最近登记的日期），自建服务器上 `feed-server readers` 打印同样的表；Cloudflare 后台 D1 → blogscroll → Console 里 `SELECT * FROM reader_feeds` 是 Worker 收到的原始登记。只有地址和时间，不知道是谁、有几个人。
 
 浏览器不能直接读别的网站，由本站的服务器代读（`/api/fetch`）：只转交 RSS / Atom / JSON Feed 和 OPML（当作下载，不当网页），给网页只回答它链接的 RSS 地址；不访问内网和本机地址（每次跳转、每次解析域名后都检查）；同一个地址 15 分钟内只真正请求一次，所有读者共用；对方回 429 / 503 时照它的 `Retry-After` 等。每个来源最多半小时读一次，OPML 列表一天一次。
 

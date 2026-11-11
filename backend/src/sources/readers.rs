@@ -5,9 +5,12 @@
 //!
 //! The list is every feed some reader asked for lately: those registered with
 //! this server (`reader_feeds`, readers.rs), plus, for the static site, a
-//! file the crawl workflow writes from the Worker's database (one address
-//! per line). A feed this server already crawls (an old 自选订阅, say) keeps
-//! its blog and history: it is matched by its feed address.
+//! file the crawl workflow writes from the Worker's database (a line per
+//! feed: its address, and when it was first and last asked for, tab
+//! separated), taken into `reader_feeds` too. A feed this server already
+//! crawls (an old 自选订阅, say) keeps its blog and history: it is matched by
+//! its feed address. Which feeds there are, and how crawling them goes, is in
+//! [`report`] (readers.md in the backup, `feed-server readers`).
 
 use std::path::PathBuf;
 
@@ -43,10 +46,28 @@ impl Readers {
             .fetch_all(&self.pool)
             .await?;
         if let Some(path) = &self.file {
-            match std::fs::read_to_string(path) {
-                Ok(text) => urls.extend(text.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from)),
+            let text = match std::fs::read_to_string(path) {
+                Ok(text) => text,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
                 Err(e) => anyhow::bail!("reading {}: {e}", path.display()),
+            };
+            for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                let mut cols = line.split('\t');
+                let url = cols.next().unwrap_or_default().trim().to_string();
+                let mut time = || cols.next().and_then(|t| t.trim().parse::<i64>().ok()).unwrap_or(now());
+                let (first, last) = (time(), time());
+                // Here too, for the report.
+                sqlx::query(
+                    "INSERT INTO reader_feeds (url, first_at, last_at) VALUES (?, ?, ?)
+                     ON CONFLICT (url) DO UPDATE SET first_at = MIN(first_at, excluded.first_at),
+                         last_at = MAX(last_at, excluded.last_at)",
+                )
+                .bind(&url)
+                .bind(first)
+                .bind(last)
+                .execute(&self.pool)
+                .await?;
+                urls.push(url);
             }
         }
         urls.sort();
@@ -94,6 +115,80 @@ impl Readers {
         }
         Ok(Some(out))
     }
+}
+
+/// Every feed readers asked for lately, and how crawling it goes, as a
+/// Markdown table: for the site's owner (readers.md in the backup,
+/// `feed-server readers`). Who asked is not known here.
+pub async fn report(pool: &SqlitePool) -> anyhow::Result<String> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        url: String,
+        first_at: i64,
+        last_at: i64,
+        name: Option<String>,
+        private: Option<bool>,
+        posts: Option<i64>,
+        newest: Option<i64>,
+        last_success_at: Option<i64>,
+        failures: Option<i64>,
+        last_error: Option<String>,
+    }
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT f.url, f.first_at, f.last_at, b.name, b.private,
+                (SELECT COUNT(*) FROM posts p WHERE p.blog_id = b.id) AS posts,
+                (SELECT MAX(p.sort_at) FROM posts p WHERE p.blog_id = b.id) AS newest,
+                b.last_success_at, b.failures, b.last_error
+         FROM reader_feeds f
+         LEFT JOIN directory_entries d ON d.directory = ? AND d.external_id = f.url
+         LEFT JOIN blogs b ON b.id = d.blog_id
+         WHERE f.last_at >= ?
+         ORDER BY f.first_at DESC, f.url",
+    )
+    .bind(crate::db::READERS)
+    .bind(now() - KEEP_DAYS * 86400)
+    .fetch_all(pool)
+    .await?;
+    let rows: Vec<Row> = rows.into_iter().filter(|r| parse_http_url(&r.url).is_some()).collect();
+    let day =
+        |t: i64| chrono::DateTime::from_timestamp(t, 0).map_or_else(String::new, |d| d.format("%Y-%m-%d").to_string());
+    let cell = |s: &str| s.replace('|', "\\|").replace('\n', " ");
+    let only = rows.iter().filter(|r| r.private == Some(true)).count();
+    let mut out = format!(
+        "# 读者订阅\n\n\
+         读者在「设置 → 来源 → 我添加的来源」里添加的 RSS。本站像收录的博客一样抓取、分析、备份，\
+         只给添加的人看（只被这里列着的博客不进任何公开的列表、搜索和导出）。\
+         这里只有地址：不知道是谁、有几个人添加的。90 天没人再登记的不再抓，也不再列在这里\
+         （已抓的文章留在 sites/ 里）。这个文件由备份自动生成，每次覆盖。\n\n\
+         共 {} 个，其中 {} 个只有读者订阅，其余本站本来就收录。\n\n\
+         | RSS | 博客 | 文章 | 最近一篇 | 抓取 | 首次登记 | 最近登记 |\n|---|---|---|---|---|---|---|\n",
+        rows.len(),
+        only
+    );
+    for r in &rows {
+        let blog = match (&r.name, r.private) {
+            (Some(n), Some(true)) => format!("{}（只给订阅者）", cell(n)),
+            (Some(n), _) => cell(n),
+            (None, _) => "—".into(),
+        };
+        let crawl = match (r.name.is_some(), r.last_success_at, r.failures.unwrap_or(0)) {
+            (false, ..) => "还没抓".to_string(),
+            (true, _, f) if f > 0 => format!("出错 {f} 次：{}", cell(r.last_error.as_deref().unwrap_or(""))),
+            (true, Some(t), _) => format!("{} 读过", day(t)),
+            (true, None, _) => "还没读到".to_string(),
+        };
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} | {} |\n",
+            cell(&r.url),
+            blog,
+            r.posts.unwrap_or(0),
+            r.newest.map(day).unwrap_or_default(),
+            crawl,
+            day(r.first_at),
+            day(r.last_at),
+        ));
+    }
+    Ok(out)
 }
 
 impl Directory for Readers {
@@ -213,6 +308,18 @@ mod tests {
         assert!(private(own).await, "listed only by readers");
         assert!(!private(2).await, "still the site's");
 
+        // The owner's list: every feed, which blog it became, nobody's name.
+        let report = report(pool).await.unwrap();
+        assert!(report.contains("共 2 个，其中 1 个只有读者订阅"), "{report}");
+        assert!(
+            report.contains("| https://own.example/feed.xml | own.example（只给订阅者） | 0 |"),
+            "{report}"
+        );
+        assert!(
+            report.contains("| https://b2.example/feed.xml | Blog 2 | 5 |"),
+            "{report}"
+        );
+
         // Crawled like any other blog.
         let item = ParsedItem {
             guid: "own-1".into(),
@@ -281,6 +388,26 @@ mod tests {
             .await
             .unwrap();
         assert!(!active);
+
+        // The crawl workflow's file: address, first and last asked for.
+        let file = std::env::temp_dir().join(format!("readers-test-{}.txt", std::process::id()));
+        std::fs::write(&file, format!("https://file.example/rss\t100\t{now}\n\n")).unwrap();
+        let from_file = Readers::new(pool.clone(), Some(file.clone()));
+        let urls: Vec<String> = from_file
+            .entries()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_iter()
+            .map(|e| e.external_id)
+            .collect();
+        assert!(urls.contains(&"https://file.example/rss".to_string()));
+        let first: i64 = sqlx::query_scalar("SELECT first_at FROM reader_feeds WHERE url = 'https://file.example/rss'")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(first, 100);
+        std::fs::remove_file(file).unwrap();
 
         // A list file that is not there (a run that did not fetch it): no change.
         let missing = Readers::new(pool.clone(), Some("/nonexistent/readers.txt".into()));
