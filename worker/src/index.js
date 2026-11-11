@@ -9,11 +9,30 @@
 //   /api/fetch?url=     a feed a reader added, fetched for their browser
 //                       (frontend/src/sources.ts); kept a quarter of an hour,
 //                       so readers of the same feed share one fetch
+//   /api/readers/feeds  the feeds readers added, registered (not who added
+//                       them) for the crawler, which takes them in like the
+//                       site's blogs; the crawl workflow reads the list (D1)
+//   /api/refresh        a visitor asks for one blog to be read again
 //
-// Old sync copies nobody wrote for 400 days are dropped once a day.
+// The crawling itself is the crawl workflow's (GitHub Actions, the Rust
+// crawler): every CRAWL_EVERY_HOURS this Worker's timer starts it, so data
+// keeps coming whatever happens in the code repository; asked-for refreshes
+// (and readers' new feeds) start a short run for just those blogs. Both need
+// the secret GITHUB_TOKEN (a fine-grained token, Actions: read and write, on
+// the code repository GITHUB_REPO). Once a day old entries are dropped: sync
+// copies nobody wrote for 400 days, feeds nobody asked for in 90.
 
 const MAX_SYNC_BYTES = 1_900_000
 const MAX_SYNC_DOCS = 20_000
+const MAX_OWN_FEEDS = 500
+const MAX_READER_FEEDS = 5000
+const READER_DAYS = 90
+/** A blog is read again on request at most this often. */
+const REFRESH_SECS = 30 * 60
+/** Runs for refreshes start at most this often, at most this many an hour, for this many blogs. */
+const REFRESH_GAP = 3 * 60
+const REFRESHES_PER_HOUR = 12
+const SITES_PER_RUN = 30
 const MAX_FEED_BYTES = 4 * 1024 * 1024
 const FEED_TTL = 15 * 60
 const FAILURE_TTL = 10 * 60
@@ -25,9 +44,13 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url)
     try {
-      if (url.pathname === '/api/capabilities') return json({ sync: true, fetch: true })
+      if (url.pathname === '/api/capabilities') {
+        return json({ sync: true, fetch: true, readers: true, refresh: !!env.GITHUB_TOKEN })
+      }
       if (url.pathname === '/api/sync') return await sync(request, env)
       if (url.pathname === '/api/fetch' && request.method === 'GET') return await fetchFeed(url, env, ctx)
+      if (url.pathname === '/api/readers/feeds' && request.method === 'POST') return await register(request, env, ctx)
+      if (url.pathname === '/api/refresh' && request.method === 'POST') return await refresh(request, env, ctx)
     } catch (e) {
       console.error(e)
       return error(500, 'server error')
@@ -36,10 +59,27 @@ export default {
     return env.ASSETS.fetch(request)
   },
 
+  // Every five minutes (wrangler.jsonc).
   async scheduled(_event, env) {
     await ready(env)
-    const before = Math.floor(Date.now() / 1000) - KEEP_DAYS * 86400
-    await env.DB.prepare('DELETE FROM sync_docs WHERE updated_at < ?').bind(before).run()
+    const now = Math.floor(Date.now() / 1000)
+    if (now - (await getState(env, 'pruned')) >= 86400) {
+      await env.DB.batch([
+        env.DB.prepare('DELETE FROM sync_docs WHERE updated_at < ?').bind(now - KEEP_DAYS * 86400),
+        env.DB.prepare('DELETE FROM reader_feeds WHERE last_at < ?').bind(now - READER_DAYS * 86400),
+        env.DB.prepare('DELETE FROM seen_feeds WHERE at < ?').bind(now - 30 * 86400),
+        env.DB.prepare('DELETE FROM refreshes WHERE requested_at < ?').bind(now - 86400),
+      ])
+      await setState(env, 'pruned', now)
+    }
+    if (!env.GITHUB_TOKEN) return
+    await dispatchRefreshes(env)
+    const every = Number(env.CRAWL_EVERY_HOURS ?? 3) * 3600
+    if (every > 0 && now - (await getState(env, 'crawled')) >= every) {
+      // Counted as started even if GitHub refused, so a broken token is not retried every five minutes.
+      await setState(env, 'crawled', now)
+      await dispatch(env, { crawl: 'true', scheduled: 'true' })
+    }
   },
 }
 
@@ -54,24 +94,36 @@ const error = (status, message, headers) => json({ error: message }, status, hea
 
 // ---- Sync ----
 
-// The table, made on first use (the database itself is made by the first deploy).
+// The tables, made on first use (the database itself is made by the first deploy).
 let schema
 function ready(env) {
-  schema ??= env.DB.prepare(
-    `CREATE TABLE IF NOT EXISTS sync_docs (
-      id TEXT PRIMARY KEY,
-      version INTEGER NOT NULL,
-      data BLOB NOT NULL,
-      deleted INTEGER NOT NULL DEFAULT 0,
-      updated_at INTEGER NOT NULL
-    )`,
-  )
-    .run()
-    .catch((e) => {
-      schema = undefined
-      throw e
-    })
+  schema ??= env.DB.batch(
+    [
+      `CREATE TABLE IF NOT EXISTS sync_docs (
+        id TEXT PRIMARY KEY, version INTEGER NOT NULL, data BLOB NOT NULL,
+        deleted INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL)`,
+      // Readers' own feeds, for the crawler: no reader, only when last asked for.
+      'CREATE TABLE IF NOT EXISTS reader_feeds (url TEXT PRIMARY KEY, first_at INTEGER NOT NULL, last_at INTEGER NOT NULL)',
+      // Feeds /api/fetch found to be feeds: only those may be registered.
+      'CREATE TABLE IF NOT EXISTS seen_feeds (url TEXT PRIMARY KEY, at INTEGER NOT NULL)',
+      // Blogs asked to be read again (`site`: an address or a reader's feed).
+      'CREATE TABLE IF NOT EXISTS refreshes (site TEXT PRIMARY KEY, requested_at INTEGER NOT NULL, dispatched_at INTEGER)',
+      'CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value INTEGER NOT NULL)',
+    ].map((sql) => env.DB.prepare(sql)),
+  ).catch((e) => {
+    schema = undefined
+    throw e
+  })
   return schema
+}
+
+async function getState(env, key) {
+  return (await env.DB.prepare('SELECT value FROM state WHERE key = ?').bind(key).first('value')) ?? 0
+}
+function setState(env, key, value) {
+  return env.DB.prepare('INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value')
+    .bind(key, value)
+    .run()
 }
 
 /** `Bearer <64 hex>` → its SHA-256: what is stored is not enough to write. */
@@ -337,5 +389,130 @@ async function fetchFeed(url, env, ctx) {
   }
   const a = await answer(target, env)
   ctx.waitUntil(caches.default.put(key, respond(a, 'public')))
+  // A real feed now: it may be registered for crawling.
+  if (a.body) ctx.waitUntil(seen(env, target.href))
   return respond(a, 'private')
+}
+
+async function seen(env, url) {
+  await ready(env)
+  await env.DB.prepare('INSERT INTO seen_feeds (url, at) VALUES (?, ?) ON CONFLICT (url) DO UPDATE SET at = excluded.at')
+    .bind(url, Math.floor(Date.now() / 1000))
+    .run()
+}
+
+// ---- Readers' own feeds, and reading a blog again ----
+
+/** All the feeds a reader has: the new ones are crawled from the next run (soon). */
+async function register(request, env, ctx) {
+  const body = await request.json().catch(() => null)
+  const feeds = Array.isArray(body?.feeds)
+    ? [...new Set(body.feeds.filter((f) => typeof f === 'string' && f.length <= 2000).map((f) => f.trim()))].slice(0, MAX_OWN_FEEDS)
+    : []
+  await ready(env)
+  const now = Math.floor(Date.now() / 1000)
+  let count = await env.DB.prepare('SELECT COUNT(*) AS n FROM reader_feeds').first('n')
+  const fresh = []
+  for (const url of feeds) {
+    let u
+    try {
+      u = new URL(url)
+    } catch {
+      continue
+    }
+    if (!allowed(u)) continue
+    const known = await env.DB.prepare('UPDATE reader_feeds SET last_at = ? WHERE url = ?').bind(now, url).run()
+    if (known.meta.changes) continue
+    // New: only a feed this Worker has fetched as one (not any address), and room for it.
+    if (count >= MAX_READER_FEEDS || !(await env.DB.prepare('SELECT 1 AS y FROM seen_feeds WHERE url = ?').bind(url).first('y'))) continue
+    await env.DB.prepare('INSERT OR IGNORE INTO reader_feeds (url, first_at, last_at) VALUES (?, ?, ?)').bind(url, now, now).run()
+    count++
+    fresh.push(url)
+  }
+  if (fresh.length && env.GITHUB_TOKEN) {
+    await env.DB.batch(
+      fresh.map((site) =>
+        env.DB.prepare(
+          'INSERT INTO refreshes (site, requested_at) VALUES (?, ?) ON CONFLICT (site) DO UPDATE SET requested_at = excluded.requested_at',
+        ).bind(site, now),
+      ),
+    )
+    ctx.waitUntil(dispatchRefreshes(env))
+  }
+  // Which blog each is: in the site's files (data/own/), not known here.
+  return json({ blogs: {}, added: fresh.length })
+}
+
+/** A blog of the site (`example.com/blog`) or a reader's feed, to be read again. */
+async function refresh(request, env, ctx) {
+  if (!env.GITHUB_TOKEN) return error(503, '这里还不能请求刷新')
+  const body = await request.json().catch(() => null)
+  const site = typeof body?.site === 'string' ? body.site.trim().replace(/\/+$/, '') : ''
+  await ready(env)
+  let known = false
+  if (/^https?:\/\//.test(site)) {
+    known = !!(await env.DB.prepare('SELECT 1 AS y FROM reader_feeds WHERE url = ?').bind(site).first('y'))
+  } else if (/^[a-z0-9.-]+(\/[^\s?#]*)?$/i.test(site)) {
+    // A blog of the site has its page.
+    const page = await env.ASSETS.fetch(new Request(new URL(`/blog/${site}/`, request.url)))
+    known = page.status === 200
+  }
+  if (!known) return error(404, '找不到这个博客')
+  const now = Math.floor(Date.now() / 1000)
+  const row = await env.DB.prepare('SELECT requested_at, dispatched_at FROM refreshes WHERE site = ?').bind(site).first()
+  if (row?.dispatched_at && now - row.dispatched_at < REFRESH_SECS) {
+    return json({ status: 'later', error: '刚请求过', retry_at: row.dispatched_at + REFRESH_SECS }, 429)
+  }
+  await env.DB.prepare(
+    'INSERT INTO refreshes (site, requested_at) VALUES (?, ?) ON CONFLICT (site) DO UPDATE SET requested_at = excluded.requested_at',
+  )
+    .bind(site, now)
+    .run()
+  const wait = Math.max(0, (await getState(env, 'refresh_dispatched')) + REFRESH_GAP - now)
+  ctx.waitUntil(dispatchRefreshes(env))
+  return json({ status: 'queued', eta_minutes: Math.ceil(wait / 60) + 5 })
+}
+
+/** One short crawl run for every blog asked for and not yet sent, when the limits allow. */
+async function dispatchRefreshes(env) {
+  const now = Math.floor(Date.now() / 1000)
+  if (now - (await getState(env, 'refresh_dispatched')) < REFRESH_GAP) return
+  const hour = Math.floor(now / 3600)
+  const used = (await getState(env, 'refresh_hour')) === hour ? await getState(env, 'refresh_count') : 0
+  if (used >= REFRESHES_PER_HOUR) return
+  const { results } = await env.DB.prepare(
+    'SELECT site FROM refreshes WHERE dispatched_at IS NULL OR dispatched_at < requested_at ORDER BY requested_at LIMIT ?',
+  )
+    .bind(SITES_PER_RUN)
+    .all()
+  if (!results.length) return
+  const sites = results.map((r) => r.site)
+  await env.DB.batch([
+    ...sites.map((s) => env.DB.prepare('UPDATE refreshes SET dispatched_at = ? WHERE site = ?').bind(now, s)),
+  ])
+  await setState(env, 'refresh_dispatched', now)
+  await setState(env, 'refresh_hour', hour)
+  await setState(env, 'refresh_count', used + 1)
+  await dispatch(env, { crawl: 'true', sites: sites.join(',') })
+}
+
+/** Starts the crawl workflow (.github/workflows/pages.yml) of the code repository. */
+async function dispatch(env, inputs) {
+  const res = await fetch(
+    // GITHUB_API: only to try it out locally against a stand-in.
+    `${env.GITHUB_API || 'https://api.github.com'}/repos/${env.GITHUB_REPO}/actions/workflows/pages.yml/dispatches`,
+    {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${env.GITHUB_TOKEN}`,
+        accept: 'application/vnd.github+json',
+        'x-github-api-version': '2022-11-28',
+        'user-agent': 'blogscroll-worker',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ ref: env.GITHUB_REF || 'main', inputs }),
+    },
+  )
+  if (!res.ok) console.error('dispatch failed', res.status, await res.text())
+  return res.ok
 }

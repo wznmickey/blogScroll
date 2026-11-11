@@ -9,7 +9,8 @@
 - 每篇文章有且只有一个**分类**（两级：「技术 › AI」「旅行」……），可以有多个**标签**（作者自己的加上自动提取的）；两者分开显示、分开筛选
 - 「喜欢」「收藏」、浏览历史和「刷到过」（在屏幕上停留过的卡片，点没点开都算），连同「关注」，都存在本机浏览器里（无需账号）；在「我的」页查看、搜索，并可以**备份成文件、再恢复**（合并或覆盖）
 - **多设备同步**（「设置」最上面）：开启后得到一个同步码，在别的设备上输入、打开配对链接或扫二维码，关注、喜欢、收藏、历史、刷到过、看到哪里、频道栏、设置和自己添加的来源就自动保持一致：打开网站、切回标签页时和每两分钟读一次，改动几秒后写回。数据在浏览器里压缩、加密后才上传，服务器看不到内容；删除、取消关注也会同步（见「读者自己的数据」）
-- **自己的订阅**（「设置 → 来源 → 我添加的来源」）：RSS / Atom 地址、博客首页（自动找它的 RSS）、OPML 订阅列表（地址或文件）。文章在首页新出现的「订阅」频道和各自的页面里，只有自己看得到；本站已经收录的博客直接帮你关注。需要能代为读取 RSS 的服务器（自建服务器，或 Cloudflare 上的静态版）
+- **自己的订阅**（「设置 → 来源 → 我添加的来源」）：RSS / Atom 地址、博客首页（自动找它的 RSS）、OPML 订阅列表（地址或文件）。和本站收录的博客一样集中抓取：保留全部历史、自动分类和标签，也出现在推荐、最新、分类和「订阅」频道里，但**只有添加的人看得到**（服务器只记下 RSS 地址，不知道是谁加的）；本站已经收录的博客直接帮你关注。需要自建服务器，或 Cloudflare 上的静态版
+- 每个博主页的主页链接旁有「刷新」：访客可以让本站现在就去读一次这个博客（同一博客 15–30 分钟最多一次，对方要求等待时不提前）
 - 按时间排的频道（最新、关注、分类按最新）记得上次看到哪里：之后的新文章标「新」，并可以「从上次看到的地方继续」
 - 搜索一次覆盖文章、博主、分类和标签，以及自己的收藏、喜欢、浏览历史和刷到过的文章；输入时下拉提示
 - 文章详情旁边有博主简介（来自关于页）和「相似文章」
@@ -27,9 +28,10 @@ backend/    Rust 服务端（feed-server）
   src/fulltext.rs  全文抓取，扩展点（默认关闭）
   src/http.rs      所有对外请求都经过这里（限速、条件请求）
   src/cache.rs     本站自己的 HTTP 缓存（API 内存缓存 + ETag，静态资源缓存头）
-  src/readers.rs   读者的同步（加密的副本，按版本写）和代为读取他们自己的 RSS
+  src/readers.rs   读者的同步（加密的副本，按版本写）、代读和登记他们自己的 RSS、按需刷新
+  src/sources/readers.rs  读者自己添加的 RSS 作为一个来源目录（只给他们自己看）
 frontend/   Vue 前端
-worker/     Cloudflare Worker：静态版的同步和代读 RSS（同 readers.rs）
+worker/     Cloudflare Worker：静态版的同步、代读和登记 RSS、刷新（同 readers.rs），并按时启动抓取
 shell.nix   开发环境（cargo、gcc、node）
 ```
 
@@ -86,7 +88,7 @@ docker compose up -d          # http://127.0.0.1:8080，前面再挂 Caddy / ngi
 
 两个工作流，抓取和发布分开：
 
-- `.github/workflows/pages.yml`（Crawl）每 3 小时：恢复上次的数据库 → 同步成员列表（每天一次）→ 只抓到期的 RSS → 存回缓存（和备份）→ 调用发布。
+- `.github/workflows/pages.yml`（Crawl）每 3 小时：恢复上次的数据库 → 合并私有仓库的备份 → 同步成员列表（每天一次）和读者自己添加的 RSS → 只抓到期的 RSS → 备份回私有仓库、存回缓存 → 调用发布。发布到 Cloudflare 后，由 Worker 的定时器每 `CRAWL_EVERY_HOURS` 小时启动它（见「发布到 Cloudflare」），和这个仓库多久推送一次代码无关；GitHub 自己的定时只在 Worker 4 小时内没启动过时才跑，作为后备。访客点「刷新」时，Worker 启动一次只读那几个博客的短运行。
 - `.github/workflows/publish.yml`（Publish site）：用缓存里最新的数据库构建静态版并发布到 Pages，不抓取，几分钟完成。除了抓完以后，每次推送到 main 且 CI 测试通过也会运行，所以改代码不用等下一轮抓取；也可以手动运行。
 
 默认关闭，开启步骤：
@@ -122,9 +124,11 @@ docker compose up -d          # http://127.0.0.1:8080，前面再挂 Caddy / ngi
    - Secrets：`CLOUDFLARE_API_TOKEN` = 上面的 token
    - Variables：`CLOUDFLARE_ACCOUNT_ID` = Workers & Pages 页面右侧的 Account ID；`SITE_URL` = 网站地址（如 `https://blogscroll.example.com`，用于 canonical 和 sitemap）
 3. Actions → Publish site → Run workflow。第一次会建好 Worker `blogscroll` 和数据库 `blogscroll`（表由 Worker 第一次用到时自己建），先在 `https://blogscroll.<你的子域>.workers.dev` 看看。
-4. 换域名（域名的 DNS 在 Cloudflare 上时）：DNS 里删掉指向 `<你>.github.io` 的那条 CNAME，再到 Workers & Pages → blogscroll → Settings → Domains & Routes → Add → Custom domain 填同一个域名，Cloudflare 会自己加好记录和证书（中间一两分钟打不开）。之后 GitHub 的 Settings → Pages 里去掉自定义域名；不想再发到 Pages 就加 Variable `GITHUB_PAGES` = `false`。
+4. 换域名（域名的 DNS 在 Cloudflare 上时）：DNS 里删掉指向 `<你>.github.io` 的那条 CNAME，再到 Workers & Pages → blogscroll → Settings → Domains & Routes → Add → Custom domain 填同一个域名，Cloudflare 会自己加好记录和证书（中间一两分钟打不开）。之后 GitHub 的 Settings → Pages 里去掉自定义域名；不想再发到 Pages 就加 Variable `PUBLISH_TO_PAGES` = `false`。
 
-之后每次发布（抓取后、推送通过 CI 后、手动）都会同时更新两边。抓取仍在 Actions（或另一台机器的 `feed-server watch`）里，不在 Cloudflare 上。Worker 取 RSS 时用 Variable `FEED_USER_AGENT` 作为 User-Agent。本地试：`cd worker && npx wrangler@4.148.0 dev`（先按上面「本地预览静态版」构建好 `frontend/dist`）。
+5. 让 Worker 启动抓取（定时抓取、访客的「刷新」、读者新加的 RSS 都靠它）：GitHub → Settings → Developer settings → Fine-grained tokens → Generate new token，Repository access 只选本仓库，Permissions 里 **Actions: Read and write**；再到 Cloudflare 的 Workers & Pages → blogscroll → Settings → Variables and Secrets → Add，类型 Secret，名字 `GITHUB_TOKEN`，值填这个 token。之后 Worker 每 3 小时（Worker 的变量 `CRAWL_EVERY_HOURS`，0 = 不定时抓取）启动一次抓取。不设这个 token 时网站照常，只是没有「刷新」按钮，抓取仍靠 GitHub 自己的定时。
+
+之后每次发布（抓取后、推送通过 CI 后、手动）都会同时更新两边。抓取仍在 Actions（或另一台机器的 `feed-server watch`）里，Worker 只负责按时启动它，不在 Cloudflare 上抓。Worker 取 RSS 时用 Variable `FEED_USER_AGENT` 作为 User-Agent。读者自己添加的 RSS 登记在 Worker 的数据库里，抓取工作流用 `CLOUDFLARE_API_TOKEN` 读出这张表（写成 `deploy/readers.txt`）再抓。本地试：`cd worker && npx wrangler@4.148.0 dev`（先按上面「本地预览静态版」构建好 `frontend/dist`）。
 
 ### 搜索引擎
 
@@ -224,7 +228,7 @@ sites/<博客地址>.json  一个博客一个文件：博客信息、所属目�
 **只追加、不覆盖。** 备份程序这边保证：
 
 - 推送是 `git push origin HEAD`：明确写出的 refspec、不带 `+`，所以不会强推，git 配置里写了强推的 refspec 也不影响；
-- 每次备份前先 `git fetch`，快进接上远端的新提交（比如你在 GitHub 上改了 README，或另一处推过）。本地还有没推上去的提交、和远端分叉时，把它们留在本地分支 `unpushed` 上，工作区换成远端的最新版本再做这一轮备份——那些提交里的内容都在数据库里，合并后会重新写进去；推送时如果正好有别处抢先推了，同样在对方之上重做，最多三次；
+- 每次备份前先 `git fetch`，快进接上远端的新提交（比如你在 GitHub 上改了 README，或另一处推过）。本地还有没推上去的提交、和远端分叉时，把它们留在本地分支 `unpushed` 上，工作区换成远端的最新版本再做这一轮备份——那些提交里的内容都在数据库里，合并后会重新写进去；推送时如果正好有别处抢先推了，随机等 5–10 分钟（`[backup] conflict_wait_minutes`，免得两边一直撞车），再取对方推上去的最新快照、合并、提交、推送，最多三次；
 - `README.md` 只在第一次生成，之后归你编辑，备份不会改回去（还是旧版自动生成的原文时会换成新说明）；
 - 合并只增不减，新快照的博客数或文章数比上一次少 10% 以上时不提交（只可能是 bug 或大量博主退出），确认是有意的再加 `--allow-shrink`；合并进数据库是一个事务，要么全部写入，要么什么都不写；
 - ssh 以 BatchMode 运行，遇到陌生主机密钥或要输口令时直接失败，不会卡在终端里等输入（你自己配了 `core.sshCommand` 或 `GIT_SSH_COMMAND` 时用你的）。
@@ -282,11 +286,18 @@ feed-server watch --git-dir data/backup --remote git@github-blogscroll-backup:<�
 - 「这台设备停止同步」只影响这台；「删除服务器上的数据」让所有设备都停止，各设备上的数据都还在。400 天没人写的副本会被清掉。
 - 需要 https（或 localhost）和服务器支持：自建服务器、Cloudflare 上的静态版有；GitHub Pages 上的静态版没有，那里只能用备份文件。
 
-**自己添加的来源**（「设置 → 来源 → 我添加的来源」）存在浏览器里、随同步和备份走；读到的文章只缓存在本机。浏览器不能直接读别的网站，由本站的服务器代读（`/api/fetch`）：只转交 RSS / Atom / JSON Feed 和 OPML（当作下载，不当网页），给网页只回答它链接的 RSS 地址；不访问内网和本机地址（每次跳转、每次解析域名后都检查）；同一个地址 15 分钟内只真正请求一次，所有读者共用；对方回 429 / 503 时照它的 `Retry-After` 等。每个来源最多半小时读一次，OPML 列表一天一次。
+**自己添加的来源**（「设置 → 来源 → 我添加的来源」）存在浏览器里、随同步和备份走。
+
+- 浏览器把自己所有的 RSS 地址登记到服务器（`POST /api/readers/feeds`，每天一次和每次增减时；只有地址，不带任何能认出读者的东西）。抓取端把它们当作一个来源目录「读者订阅」（`[sources.readers]`），和收录的博客一样抓取、存进私有备份仓库、做分析；只被这个目录列着的博客是**私有**的：不进任何公开的列表、统计、搜索、相似文章、导出和 sitemap。90 天没人再登记的 RSS 不再抓（已抓的文章留在备份里）。
+- 自己看得到：自建服务器上，浏览器的请求带着自己那些博客的编号（`own=`）；静态版导出时为每个登记的 RSS 写一个 `data/own/<地址的 SHA-256>.json`（最新 30 篇，博主页另有完整的文件），只有知道这个地址的浏览器才会去读。
+- 本站抓到之前（新加的一般几分钟内），以及不抓取的服务器上，由浏览器经本站代读最新的几篇，放在「订阅」频道。
+- Worker 只接受它代读过、确实是 RSS 的地址登记，总数最多 5000 个。
+
+浏览器不能直接读别的网站，由本站的服务器代读（`/api/fetch`）：只转交 RSS / Atom / JSON Feed 和 OPML（当作下载，不当网页），给网页只回答它链接的 RSS 地址；不访问内网和本机地址（每次跳转、每次解析域名后都检查）；同一个地址 15 分钟内只真正请求一次，所有读者共用；对方回 429 / 503 时照它的 `Retry-After` 等。每个来源最多半小时读一次，OPML 列表一天一次。
 
 ## 自选订阅：纯 RSS 来源
 
-除了博客目录，可以在 `config.toml` 里直接加 RSS（启动时读取，改完重启即可）：
+除了博客目录，可以在 `config.toml` 里直接加 RSS（启动时读取，改完重启即可），它们和收录的博客一样**公开**显示；只想自己看的，加在网站的「设置 → 来源 → 我添加的来源」里。从配置里去掉的来源，它的博客会离开网站（另有目录收录的除外），文章留在数据库和备份里：
 
 ```toml
 [[sources.feeds]]
@@ -413,4 +424,7 @@ pub trait Directory: Send + Sync {
 | `GET /api/meta` | 站点名、数据来源、统计 |
 | `GET /api/capabilities` | `{"sync":true,"fetch":true}`：这里能同步、能代读 RSS（纯静态托管没有这个地址） |
 | `GET` / `PUT` / `DELETE /api/sync` | 同步副本（加密的二进制）。`Authorization: Bearer <64 位十六进制>`；读时可带 `If-None-Match`（304），写时必须带 `If-Match: "<版本>"`（第一次 `If-None-Match: *`），版本对不上回 412，已删除回 410，最大 1.9 MB |
+| `POST /api/readers/feeds` | 登记读者自己的全部 RSS（`{"feeds": [...]}`），之后像收录的博客一样抓取；回答已经抓到的是哪个博客（`{"blogs": {"<地址>": 12}}`，Worker 上为空，用 `data/own/`） |
+| `POST /api/refresh` | 现在就读一次某个博客（`{"site": "example.com/blog"}` 或读者的 RSS 地址）：自建服务器当场抓（`done`），Worker 排队启动抓取工作流（`queued`，约 5 分钟）；太频繁或对方要求等待时 429（`later` + `retry_at`） |
+| …`/api/posts?own=12,13` | 再列出这些读者自己的博客（私有的只有这样才出现） |
 | `GET /api/fetch?url=` | 代读读者自己的 RSS：RSS / OPML 原样作为下载（`X-Kind: feed`，原来的类型在 `X-Feed-Type`），网页回 `{"feeds": [...]}`（`X-Kind: page`）；内网地址 403，对方限流 503 + `Retry-After` |

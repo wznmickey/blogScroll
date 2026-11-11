@@ -19,14 +19,27 @@
 #            whole file without .pub, from -----BEGIN to -----END;
 #            Variables → BACKUP_REPO = owner/name, e.g. you/blogscroll-data.
 # Backups only ever add, and never force-push; see "备份到 GitHub 私有仓库" in README.md.
+#
+# When it runs is not tied to this repository's commits: the Cloudflare
+# Worker's timer starts it every CRAWL_EVERY_HOURS (worker/; GitHub stops
+# schedules in repositories without commits for 60 days), and visitors'
+# refresh buttons start short runs for just those blogs (`sites`). GitHub's
+# own schedule below is a fallback that does nothing when the Worker started
+# a run in the last 4 hours.
+#
+# Every crawl takes the backup repository's snapshot in first, commits on top
+# of it and pushes; when another crawler pushed in between, it waits a random
+# 5-10 minutes and does it again (backup.rs).
 name: Crawl (GitHub Pages)
+run-name: ${{ inputs.sites && format('Refresh {0}', inputs.sites) || inputs.scheduled && 'Crawl (Worker timer)' || '' }}
 
 on:
   schedule:
     # Every 3 hours. Each run only fetches feeds that are due (304s for most).
     - cron: '17 */3 * * *'
-  # Started by hand, or by another machine that crawls more often
-  # (`feed-server watch`): with crawl off, only merge its backup and publish,
+  # Started by the Worker (timer, refreshes), by hand, or by another machine
+  # that crawls more often (`feed-server watch`): with crawl off, only merge
+  # its backup and publish,
   #   gh workflow run pages.yml -R <owner>/<repo> -f crawl=false
   workflow_dispatch:
     inputs:
@@ -34,6 +47,14 @@ on:
         description: Crawl before publishing (off = only merge the backup and publish)
         type: boolean
         default: true
+      sites:
+        description: Only read these blogs again (addresses or feed addresses, comma-separated)
+        type: string
+        default: ''
+      scheduled:
+        description: Started by the Worker's timer (counts as a scheduled run)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -42,17 +63,44 @@ permissions:
   id-token: write # for publish.yml
 
 concurrency:
-  group: pages-crawl
+  # Refreshes do not wait behind a long crawl; their pushes meet in the backup's retries.
+  group: ${{ inputs.sites && 'pages-refresh' || 'pages-crawl' }}
   cancel-in-progress: false
 
 jobs:
-  crawl:
+  # GitHub's schedule only stands in for the Worker's timer.
+  gate:
     if: vars.ENABLE_PAGES_CRAWL == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          run=true
+          if [ "$EVENT" = schedule ]; then
+            since=$(date -u -d '4 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+            recent=$(gh run list -R "$GITHUB_REPOSITORY" --workflow pages.yml --event workflow_dispatch -L 20 \
+              --json createdAt --jq "[.[] | select(.createdAt > \"$since\")] | length")
+            if [ "${recent:-0}" -gt 0 ]; then
+              echo "The Worker started a run in the last 4 hours; nothing to do."
+              run=false
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+  crawl:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 130
     env:
       FEED_CONFIG: ../deploy/config.actions.toml
       FEED_USER_AGENT: ${{ vars.FEED_USER_AGENT }}
+      HAS_CLOUDFLARE: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -97,13 +145,45 @@ jobs:
             echo "The backup repository has no snapshot yet."
           fi
 
+      # Readers' own feeds, as registered with the Worker (D1), for the
+      # crawler: deploy/readers.txt ([sources.readers] in config.actions.toml).
+      # When this fails the list stays as the database had it.
+      - name: Readers' own feeds
+        if: env.HAS_CLOUDFLARE == 'true'
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ACCOUNT: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          api="https://api.cloudflare.com/client/v4/accounts/$ACCOUNT/d1/database"
+          auth="Authorization: Bearer $CLOUDFLARE_API_TOKEN"
+          db=$(curl -sf -H "$auth" "$api?name=blogscroll" | jq -r '.result[] | select(.name == "blogscroll") | .uuid')
+          if [ -z "$db" ]; then echo "No database yet."; exit 0; fi
+          since=$(( $(date +%s) - 90 * 86400 ))
+          curl -sf -H "$auth" -H 'Content-Type: application/json' "$api/$db/query" \
+            -d "{\"sql\": \"SELECT url FROM reader_feeds WHERE last_at >= $since ORDER BY url\"}" \
+            | jq -r '.result[0].results[].url' > deploy/readers.txt.new
+          mv deploy/readers.txt.new deploy/readers.txt
+          echo "$(wc -l < deploy/readers.txt) feeds readers added"
+
       # Variable SCHEDULED_CRAWL = false: another machine does the crawling
       # (`feed-server watch`) and the scheduled runs only merge and publish.
       - name: Crawl due feeds
-        if: (github.event_name == 'workflow_dispatch' && inputs.crawl) || (github.event_name == 'schedule' && vars.SCHEDULED_CRAWL != 'false')
+        if: >-
+          !inputs.sites && (
+            (github.event_name == 'workflow_dispatch' && inputs.crawl && !inputs.scheduled) ||
+            ((github.event_name == 'schedule' || inputs.scheduled) && vars.SCHEDULED_CRAWL != 'false'))
         working-directory: backend
         # The first run discovers ~1300 feeds (about an hour); later runs take minutes.
         run: ./target/release/feed-server crawl --sync --all --limit 200 --max-minutes 100
+
+      # Visitors' refresh buttons, and readers' new feeds (the Worker sends them).
+      - name: Read the blogs asked for again
+        if: inputs.sites
+        working-directory: backend
+        env:
+          SITES: ${{ inputs.sites }}
+        run: ./target/release/feed-server crawl --sites "$SITES"
 
       # Merges again (another crawler may have pushed during the crawl), then
       # commits only when something changed; never force-pushes. A failure

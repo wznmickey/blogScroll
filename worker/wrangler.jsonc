@@ -18,9 +18,13 @@
   },
   // Made by the first deploy when missing; its id needs no writing down here.
   "d1_databases": [{ "binding": "DB", "database_name": "blogscroll" }],
-  // Drops sync copies nobody wrote for 400 days.
-  "triggers": { "crons": ["17 3 * * *"] },
-  // The publish workflow passes FEED_USER_AGENT (Actions variable) instead.
-  "vars": { "USER_AGENT": "blogScroll (RSS reader)" },
+  // Every five minutes: starts the crawl workflow when due (CRAWL_EVERY_HOURS,
+  // 0 = never) and for refreshes visitors asked for; once a day drops old
+  // entries. Starting runs needs the secret GITHUB_TOKEN (set it in the
+  // dashboard: Settings → Variables and Secrets).
+  "triggers": { "crons": ["*/5 * * * *"] },
+  // The publish workflow passes USER_AGENT (Variable FEED_USER_AGENT) and
+  // GITHUB_REPO (the repository it runs in) instead.
+  "vars": { "USER_AGENT": "blogScroll (RSS reader)", "GITHUB_REPO": "", "CRAWL_EVERY_HOURS": "3" },
   "observability": { "enabled": true }
 }
