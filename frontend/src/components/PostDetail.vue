@@ -94,28 +94,42 @@ function openBeside(e: MouseEvent, url: string, title: string) {
 }
 
 // While the reader pane is open, the sheet keeps its layout and slides left,
-// into the room the pane leaves (like the page behind it, see placePage);
-// smaller as well only when it would not fit there, down to MIN_SCALE, past
-// which the pane covers the rest. `box` is its place without the move, to
-// measure; the sheet itself is moved (translate / scale, beside its opening
-// animation's transform).
+// into the room the pane leaves (like the page behind it, see placePage),
+// smaller as well when it would not fit there. Where it would have to shrink
+// below SQUEEZE, it keeps only its text column instead (the picture goes to
+// the top of the text), which fits: the pane never covers the text or its
+// buttons. `box` is its place without the move, to measure; the sheet itself
+// is moved (translate / scale, beside its opening animation's transform).
 const GAP = 16
-const MIN_SCALE = 0.75
+const SQUEEZE = 0.8
 const box = ref<HTMLElement>()
 const aside = ref({ x: 0, scale: 1 })
+const narrow = ref(false)
 const resized = new ResizeObserver(() => placeSheet())
 function placeSheet() {
   const paneW = readerOpen.value ? readerShare.value * window.innerWidth : 0
-  const r = box.value?.getBoundingClientRect()
-  if (!r || !paneW || !r.width) {
+  const el = box.value
+  const r = el?.getBoundingClientRect()
+  if (!el || !r || !paneW || !r.width) {
+    narrow.value = false
     aside.value = { x: 0, scale: 1 }
     return
   }
+  const zoom = parseFloat(getComputedStyle(el).zoom) || 1
   const room = document.documentElement.clientWidth - paneW
-  const scale = Math.min(1, Math.max(MIN_SCALE, (room - 2 * GAP) / r.width))
+  // The whole sheet's width, as its styles give it (below).
+  const whole = Math.min((hasCover.value ? 1120 : 1000) * zoom, window.innerWidth - 48)
+  const squeezed = (room - 2 * GAP) / whole < SQUEEZE
+  if (squeezed !== narrow.value) {
+    // Its width changes: placed again once it has (ResizeObserver).
+    narrow.value = squeezed
+    return
+  }
+  const scale = Math.min(1, (room - 2 * GAP) / r.width)
   const left = Math.max(GAP, (room - r.width * scale) / 2)
-  // Scaled about its centre, its left edge moves in by half what it loses.
-  aside.value = { x: left - r.left - (r.width * (1 - scale)) / 2, scale }
+  // Scaled about its centre, its left edge moves in by half what it loses;
+  // the move is in the box's zoomed pixels (text size).
+  aside.value = { x: (left - r.left - (r.width * (1 - scale)) / 2) / zoom, scale }
 }
 watch([readerOpen, readerShare], placeSheet)
 const asideStyle = computed(() =>
@@ -139,7 +153,7 @@ function ahead(url: string, title: string, delay?: number) {
 
 <template>
   <div class="overlay" @click.self="emit('close')">
-    <div ref="box" class="box" :class="{ 'no-media': !hasCover }" @click.self="emit('close')">
+    <div ref="box" class="box" :class="{ 'no-media': !hasCover, narrow }" @click.self="emit('close')">
       <div
         class="sheet"
         :class="{ 'no-media': !hasCover }"
@@ -189,6 +203,14 @@ function ahead(url: string, title: string, delay?: number) {
             </header>
 
             <div class="scroll">
+              <img
+                v-if="narrow && hasCover"
+                :src="post.cover!"
+                alt=""
+                referrerpolicy="no-referrer"
+                class="banner"
+                @error="coverFailed = true"
+              />
               <h1 class="title">{{ post.title }}</h1>
               <div v-if="detail?.content_html" class="content" v-html="detail.content_html" />
               <template v-else>
@@ -326,13 +348,40 @@ function ahead(url: string, title: string, delay?: number) {
   animation: fade 0.18s ease-out;
 }
 .box {
-  /* Text size (settings). */
+  /* Text size (settings). Lengths in here are zoomed with it, so the room
+     the window leaves (less the overlay's padding) is divided back: the
+     sheet never gets wider or taller than the window, whatever the size. */
   zoom: var(--zoom, 1);
-  width: min(1120px, 100%);
-  height: min(860px, 100%);
+  width: min(1120px, (100vw - 48px) / var(--zoom, 1));
+  height: min(860px, (100vh - 48px) / var(--zoom, 1));
+  height: min(860px, (100dvh - 48px) / var(--zoom, 1));
 }
 .box.no-media {
-  width: min(1000px, 100%);
+  width: min(1000px, (100vw - 48px) / var(--zoom, 1));
+}
+/* Beside the reader pane in a narrow room: the text column alone. */
+.box.narrow {
+  width: min(440px, (100vw - 48px) / var(--zoom, 1));
+}
+.narrow .media {
+  display: none;
+}
+.narrow .panel {
+  flex: 1 1 auto;
+  border-left: 0;
+}
+/* Clear of the close button. */
+.narrow .panel-head {
+  padding-left: 62px;
+}
+.banner {
+  display: block;
+  width: 100%;
+  max-height: 260px;
+  margin-bottom: 14px;
+  border-radius: 12px;
+  object-fit: cover;
+  background: var(--surface);
 }
 .sheet {
   position: relative;
