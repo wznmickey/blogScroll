@@ -13,12 +13,11 @@
 //! posts/{id}.json   = GET /api/posts/{id}, only for blogs whose authors allowed full text
 //!                   or their comment widget (otherwise a card says all there is)
 //! details.json      [ids of the posts above]
-//! own/{hash}.json   { feed, blog, posts: the newest OWN_RECENT } for each feed
-//!                   readers added themselves (sources/readers.rs), named after
-//!                   the SHA-256 of the feed's address as they registered it:
-//!                   only their browsers know which to read
-//! own/blogs/{id}.json  as blogs/{id}.json, for those of them no directory of
-//!                   the site lists (they are in no other file)
+//! own/{hash}.json   { feed, blog, posts: all of them } for each feed readers
+//!                   added themselves (sources/readers.rs), named after the
+//!                   SHA-256 of the feed's address as they registered it: only
+//!                   their browsers know which to read. Those no directory of
+//!                   the site lists are in no other file.
 //! ```
 //!
 //! With a site URL, the pages around it are filled in for search engines
@@ -75,7 +74,7 @@ pub async fn export(app: Router, pool: &SqlitePool, out: &Path, opts: &ExportOpt
     }
     std::fs::create_dir_all(tmp.join("blogs"))?;
     std::fs::create_dir_all(tmp.join("posts"))?;
-    std::fs::create_dir_all(tmp.join("own/blogs"))?;
+    std::fs::create_dir_all(tmp.join("own"))?;
 
     write(&tmp.join("meta.json"), &get(&app, "/api/meta").await?)?;
     write(&tmp.join("tags.json"), &get(&app, "/api/tags").await?)?;
@@ -152,8 +151,8 @@ pub async fn export(app: Router, pool: &SqlitePool, out: &Path, opts: &ExportOpt
     write(&tmp.join("details.json"), &json!(details))?;
 
     // Readers' own feeds, each in a file only they look for.
-    let own: Vec<(i64, String, bool)> = sqlx::query_as(
-        "SELECT b.id, d.external_id, b.private FROM directory_entries d JOIN blogs b ON b.id = d.blog_id
+    let own: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT b.id, d.external_id FROM directory_entries d JOIN blogs b ON b.id = d.blog_id
          WHERE d.directory = ? AND d.active = 1 AND b.excluded = 0 AND b.flagged IS NULL
          ORDER BY b.id",
     )
@@ -161,7 +160,7 @@ pub async fn export(app: Router, pool: &SqlitePool, out: &Path, opts: &ExportOpt
     .fetch_all(pool)
     .await?;
     let mut own_posts: std::collections::HashMap<i64, (Value, Vec<Value>)> = std::collections::HashMap::new();
-    for (id, feed, private) in &own {
+    for (id, feed) in &own {
         if !own_posts.contains_key(id) {
             let blog = get(&app, &format!("/api/blogs/{id}")).await?;
             let posts = paged(&app, usize::MAX, |c| {
@@ -171,20 +170,12 @@ pub async fn export(app: Router, pool: &SqlitePool, out: &Path, opts: &ExportOpt
                 )
             })
             .await?;
-            // Its page, when the site has none for it.
-            if *private {
-                write(
-                    &tmp.join(format!("own/blogs/{id}.json")),
-                    &json!({ "blog": blog, "posts": posts }),
-                )?;
-            }
             own_posts.insert(*id, (blog, posts));
         }
         let (blog, posts) = &own_posts[id];
-        let recent = &posts[..posts.len().min(OWN_RECENT)];
         write(
             &tmp.join(format!("own/{}.json", own_file(feed))),
-            &json!({ "feed": feed, "blog": blog, "posts": recent }),
+            &json!({ "feed": feed, "blog": blog, "posts": posts }),
         )?;
     }
 
@@ -309,10 +300,6 @@ pub fn own_file(feed: &str) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(feed.as_bytes()))
 }
-
-/// Posts of each reader's own feed in its file: the feeds and 推荐 need no
-/// more, and a reader may have hundreds of feeds. Its page has them all.
-const OWN_RECENT: usize = 30;
 
 /// Cloudflare reads at most 2000 static rules from _redirects.
 const MAX_REDIRECTS: usize = 1900;

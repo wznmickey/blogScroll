@@ -69,11 +69,16 @@ async function file<T>(name: string): Promise<T> {
 
 const shard = (i: number) => file<PostCard[]>(`feed-${i}.json`)
 const allBlogs = () => file<BlogSummary[]>('blogs.json')
-/** A blog's page; the reader's own feeds that only they have are under own/. */
-const blogFile = (id: number) => file<BlogFile>(`blogs/${id}.json`).catch(() => file<BlogFile>(`own/blogs/${id}.json`))
+/** A blog's page; for the reader's own feeds that only they have, their file under own/. */
+const blogFile = (id: number) =>
+  file<BlogFile>(`blogs/${id}.json`).catch(async (e) => {
+    const own = (await ownFiles()).find((f) => f.blog.id === id)
+    if (!own) throw e
+    return { blog: own.blog, posts: own.posts }
+  })
 
 // The reader's own feeds, crawled like the site's blogs: each in a file named
-// after the SHA-256 of its address (export.rs `own_file`), with its newest
+// after the SHA-256 of its address (export.rs `own_file`), with all its
 // posts; none until the crawler has it.
 interface OwnFile {
   feed: string
