@@ -57,6 +57,7 @@ const codeShown = ref(false)
 const qr = ref('')
 const copied = ref(false)
 const code = computed(() => (syncStatus.value.on ? syncCode() : null))
+const host = location.host
 async function begin(c: string) {
   syncError.value = ''
   try {
@@ -228,9 +229,14 @@ function toggleDirectory(id: string) {
         <p class="hint">
           关注、喜欢、收藏、历史、刷到过、看到哪里、频道栏、这些设置和你添加的来源，在用同一个同步码的设备之间自动保持一致。数据先在浏览器里加密再上传，服务器看不到内容；不需要注册。
         </p>
+        <p class="hint">
+          同步码存在当前这个网址（{{ host }}）的服务器上：不同的网址是各自独立的两套，比如本地服务器和公开网站之间不互通；两台设备要打开同一个网址。
+        </p>
         <p v-if="!capabilities" class="hint">正在检查这里的服务器…</p>
         <p v-else-if="!capabilities.sync" class="hint">这里的服务器不提供同步（例如放在 GitHub Pages 上的静态版）。</p>
-        <p v-else-if="!syncSupported()" class="hint">这个浏览器不能在本地加密，或网址不是 https，所以不能同步。</p>
+        <p v-else-if="!syncSupported()" class="hint warn">
+          这个浏览器不能在本地加密，所以不能同步：网址要是 https（或本机的 localhost / 127.0.0.1，用局域网 IP 打开的 http 不行），浏览器也要够新（iOS 要 16.4 以上）。
+        </p>
         <template v-else-if="!syncStatus.on">
           <p v-if="syncStatus.gone" class="hint warn">另一台设备删除了服务器上的同步数据，同步已停止；这台设备上的数据都还在。</p>
           <div v-if="joinOffer" class="offer">
