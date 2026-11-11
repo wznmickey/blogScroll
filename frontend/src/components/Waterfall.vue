@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch, type ComponentPublicInstance } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, provide, ref, shallowRef, watch, type ComponentPublicInstance } from 'vue'
 import { meta, rememberPosts } from '../api'
+import { sequence } from '../postNav'
 import { prefs } from '../channels'
 import { COVER_DEFAULT, textCoverRatio } from '../format'
 import type { Page, PostCard } from '../types'
@@ -221,6 +222,16 @@ function retry() {
 }
 
 defineExpose({ refresh: () => (reset(), loadMore()) })
+
+// A card opened here: the next and previous posts are this list's (postNav.ts).
+provide('openedFrom', () => {
+  sequence.value = {
+    items: () => items,
+    more: async () => {
+      if (!done.value) await loadMore()
+    },
+  }
+})
 </script>
 
 <template>

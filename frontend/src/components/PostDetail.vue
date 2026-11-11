@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { api, cachedPost, categoryName, rememberPosts } from '../api'
+import { options } from '../options'
+import { direction, sequence } from '../postNav'
+import { postClosed, postOpened, track } from '../telemetry'
 import { blogPath, fullDate, hostOf, hue, initial } from '../format'
 import { recordVisit } from '../library'
 import { openInReader, readerIntent, readerIntentEnd, readerOpen, readerShare, warmUp } from '../reader'
@@ -37,12 +40,13 @@ const WHY_LABELS = {
   blog: '你关注 / 读过的博主',
   seen: '已经看过',
   shown: '刷到过没点开',
+  heat: '其他读者在看',
 } as const
 const why = computed(() => {
   const w = card.value?.why
   if (!w) return null
   const parts = (Object.keys(WHY_LABELS) as (keyof typeof WHY_LABELS)[])
-    .map((k) => ({ label: WHY_LABELS[k], days: Math.round(w[k] * 10) / 10 }))
+    .map((k) => ({ label: WHY_LABELS[k], days: Math.round((w[k] ?? 0) * 10) / 10 }))
     .filter((p) => p.days !== 0)
   const sum = parts.reduce((s, p) => s + p.days, 0)
   return { age: w.age_days, parts, effective: Math.round((w.age_days - sum) * 10) / 10 }
@@ -50,7 +54,92 @@ const why = computed(() => {
 const days = (d: number) => `${d > 0 ? '提前' : '推后'} ${Math.abs(d)} 天`
 
 const route = useRoute()
+const router = useRouter()
 const related = ref<PostCard[]>([])
+/** 热度 out of 100, when shown (settings). */
+const heat = computed(() => (options.value.showHeat && post.value?.heat ? Math.round(post.value.heat * 100) : null))
+
+// ---- The next and previous post: wheel, swipe, ↑ ↓ (postNav.ts) ----
+
+/** How it came in: from below (next), from above (previous), or opened. */
+const entrance = direction.value
+direction.value = 0
+const neighbor = (step: 1 | -1) => {
+  const list = sequence.value?.items() ?? []
+  const i = list.findIndex((p) => p.id === props.id)
+  return i < 0 ? undefined : list[i + step]
+}
+const next = ref<PostCard | undefined>(neighbor(1))
+/** Opened from a list (not a search result, say): there is a way on. */
+const inSequence = !!sequence.value?.items().some((p) => p.id === props.id)
+const edge = ref<'first' | 'last' | null>(null)
+let moving = false
+async function go(step: 1 | -1) {
+  if (moving || !sequence.value || !inSequence) return
+  let to = neighbor(step)
+  if (!to && step === 1 && sequence.value.more) {
+    moving = true
+    await sequence.value.more()
+    moving = false
+    to = neighbor(1)
+  }
+  if (!to) {
+    edge.value = step === 1 ? 'last' : 'first'
+    setTimeout(() => (edge.value = null), 1500)
+    return
+  }
+  moving = true
+  direction.value = step
+  rememberPosts([to])
+  router.replace({ path: route.path, query: { ...route.query, p: String(to.id) } })
+}
+
+// Wheel: where the text has no more to scroll that way, a firm turn moves on
+// (once: a trackpad keeps sending after the fingers stop).
+const scrollEl = ref<HTMLElement>()
+let wheelSum = 0
+let wheelIdle = 0
+let wheelQuietUntil = 0
+function onWheel(e: WheelEvent) {
+  if (Math.abs(e.deltaY) < Math.abs(e.deltaX)) return
+  const down = e.deltaY > 0
+  const el = scrollEl.value
+  const inText = !!el && el.contains(e.target as Node)
+  if (inText && el && (down ? el.scrollTop + el.clientHeight < el.scrollHeight - 2 : el.scrollTop > 0)) {
+    wheelSum = 0
+    return
+  }
+  e.preventDefault()
+  if (Date.now() < wheelQuietUntil) return
+  wheelSum += e.deltaY
+  clearTimeout(wheelIdle)
+  wheelIdle = window.setTimeout(() => (wheelSum = 0), 250)
+  if (Math.abs(wheelSum) >= (inText ? 220 : 90)) {
+    wheelSum = 0
+    wheelQuietUntil = Date.now() + 900
+    void go(down ? 1 : -1)
+  }
+}
+
+// Swipe (phones: the whole sheet scrolls): past its end, up for the next; past its top, down for the previous.
+let touch: { y: number; atEnd: boolean; atTop: boolean } | null = null
+function onTouchStart(e: TouchEvent) {
+  const s = e.currentTarget as HTMLElement
+  const el = s.scrollHeight > s.clientHeight + 2 ? s : scrollEl.value
+  if (!el) return
+  touch = {
+    y: e.touches[0].clientY,
+    atEnd: el.scrollTop + el.clientHeight >= el.scrollHeight - 2,
+    atTop: el.scrollTop <= 0,
+  }
+}
+function onTouchEnd(e: TouchEvent) {
+  if (!touch) return
+  const dy = touch.y - (e.changedTouches[0]?.clientY ?? touch.y)
+  if (dy > 80 && touch.atEnd) void go(1)
+  else if (dy < -80 && touch.atTop) void go(-1)
+  touch = null
+}
 const brokenThumbs = reactive(new Set<number>())
 const relatedLink = (id: number) => ({ path: route.path, query: { ...route.query, p: String(id) } })
 
@@ -61,6 +150,7 @@ onMounted(async () => {
   placeSheet()
   document.documentElement.style.overflow = 'hidden'
   if (card.value) recordVisit(card.value)
+  if (card.value) postOpened(card.value.url)
   api
     .related(props.id, 6)
     .then((r) => {
@@ -70,7 +160,10 @@ onMounted(async () => {
     .catch(() => {})
   try {
     detail.value = await api.post(props.id)
-    if (!card.value) recordVisit(detail.value)
+    if (!card.value) {
+      recordVisit(detail.value)
+      postOpened(detail.value.url)
+    }
   } catch {
     error.value = true
   }
@@ -81,15 +174,25 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', placeSheet)
   resized.disconnect()
   document.documentElement.style.overflow = ''
+  postClosed()
 })
 
 function onKey(e: KeyboardEvent) {
-  if (e.key === 'Escape') emit('close')
+  if (e.key === 'Escape') return emit('close')
+  if ((e.target as HTMLElement)?.closest?.('input, textarea, select, [contenteditable]')) return
+  if (e.key === 'ArrowDown' || e.key === 'j') {
+    e.preventDefault()
+    void go(1)
+  } else if (e.key === 'ArrowUp' || e.key === 'k') {
+    e.preventDefault()
+    void go(-1)
+  }
 }
 
 // On a wide screen the original opens beside the feed, and this moves aside.
 function openBeside(e: MouseEvent, url: string, title: string) {
   const p = post.value
+  if (p && url === p.url) track('read', p.url)
   if (p && openInReader({ url, title, blog: p.blog, post: p }, e)) e.preventDefault()
 }
 
@@ -152,11 +255,14 @@ function ahead(url: string, title: string, delay?: number) {
 </script>
 
 <template>
-  <div class="overlay" @click.self="emit('close')">
+  <div class="overlay" :class="{ moved: entrance !== 0 }" @click.self="emit('close')">
     <div ref="box" class="box" :class="{ 'no-media': !hasCover, narrow }" @click.self="emit('close')">
       <div
         class="sheet"
-        :class="{ 'no-media': !hasCover }"
+        :class="{ 'no-media': !hasCover, 'from-below': entrance === 1, 'from-above': entrance === -1 }"
+        @wheel="onWheel"
+        @touchstart.passive="onTouchStart"
+        @touchend="onTouchEnd"
         :style="asideStyle"
         role="dialog"
         aria-modal="true"
@@ -179,7 +285,7 @@ function ahead(url: string, title: string, delay?: number) {
               <BlogAvatar :name="post.blog.name" :icon="post.blog.icon" :size="30" />
               <span>{{ post.blog.name }}</span>
             </RouterLink>
-            <FollowButton :blog-id="post.blog.id" small />
+            <FollowButton :blog-id="post.blog.id" :blog-key="post.blog.key" small />
           </header>
 
           <div class="media">
@@ -199,10 +305,10 @@ function ahead(url: string, title: string, delay?: number) {
                 <BlogAvatar :name="post.blog.name" :icon="post.blog.icon" :size="36" />
                 <span>{{ post.blog.name }}</span>
               </RouterLink>
-              <FollowButton :blog-id="post.blog.id" />
+              <FollowButton :blog-id="post.blog.id" :blog-key="post.blog.key" />
             </header>
 
-            <div class="scroll">
+            <div ref="scrollEl" class="scroll">
               <img
                 v-if="narrow && hasCover"
                 :src="post.cover!"
@@ -252,6 +358,7 @@ function ahead(url: string, title: string, delay?: number) {
               <p class="date">
                 {{ post.undated ? '发布日期未知' : fullDate(post.published_at ?? post.sort_at) }}
                 <template v-if="post.author && post.author !== post.blog.name"> · {{ post.author }}</template>
+                <span v-if="heat" class="heat" :title="`比 ${heat}% 的文章更受读者关注（最近 30 天）`"> · 热度 {{ heat }}</span>
               </p>
               <p v-if="error" class="note">详情加载失败，可直接阅读原文。</p>
 
@@ -303,6 +410,13 @@ function ahead(url: string, title: string, delay?: number) {
                   </li>
                 </ul>
               </section>
+
+              <!-- What comes next where the post came from: scroll on, or click. -->
+              <button v-if="next" type="button" class="next" @click="go(1)">
+                <span class="next-hint">继续往下：下一篇</span>
+                <span class="next-title">{{ next.title }}</span>
+                <span class="next-blog">{{ next.blog.name }}</span>
+              </button>
             </div>
 
             <footer class="actions">
@@ -330,6 +444,15 @@ function ahead(url: string, title: string, delay?: number) {
           <button class="btn btn-ghost" @click="emit('close')">返回</button>
         </div>
         <div v-else class="missing"><span class="spinner" /></div>
+        <div v-if="inSequence" class="steps" aria-label="上一篇 / 下一篇">
+          <button type="button" title="上一篇（↑ 或 K）" aria-label="上一篇" @click="go(-1)">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m6 15 6-6 6 6" /></svg>
+          </button>
+          <button type="button" title="下一篇（↓ 或 J）" aria-label="下一篇" @click="go(1)">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m6 9 6 6 6-6" /></svg>
+          </button>
+        </div>
+        <p v-if="edge" class="edge">{{ edge === 'last' ? '已经是最后一篇了' : '已经是第一篇了' }}</p>
       </div>
     </div>
   </div>
@@ -745,9 +868,104 @@ function ahead(url: string, title: string, delay?: number) {
     opacity: 0;
   }
 }
+/* Moved to the next / previous post: no new dimming, the sheet comes in from that side. */
+.overlay.moved {
+  animation: none;
+}
+.sheet.from-below {
+  animation: from-below 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.sheet.from-above {
+  animation: from-above 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@keyframes from-below {
+  from {
+    opacity: 0.4;
+    transform: translateY(40%);
+  }
+}
+@keyframes from-above {
+  from {
+    opacity: 0.4;
+    transform: translateY(-40%);
+  }
+}
+.steps {
+  position: absolute;
+  top: 50%;
+  /* At the picture's right edge, beside the text column. */
+  right: calc(420px + 12px);
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transform: translateY(-50%);
+}
+.steps button {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.35);
+  color: #fff;
+  opacity: 0.6;
+  transition: opacity 0.15s;
+}
+.steps button:hover {
+  opacity: 1;
+}
+.narrow .steps {
+  display: none;
+}
+.edge {
+  position: absolute;
+  bottom: 84px;
+  left: 50%;
+  z-index: 3;
+  margin: 0;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.7);
+  color: #fff;
+  font-size: 13px;
+  transform: translateX(-50%);
+}
+.next {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  margin: 24px 0 4px;
+  padding: 12px 14px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  text-align: left;
+}
+.next:hover {
+  border-color: var(--accent);
+}
+.next-hint {
+  color: var(--text-3);
+  font-size: 12px;
+}
+.next-title {
+  font-weight: 600;
+  line-height: 1.4;
+}
+.next-blog {
+  color: var(--text-3);
+  font-size: 12px;
+}
+.heat {
+  color: #f97316;
+}
 @media (prefers-reduced-motion: reduce) {
-  .sheet {
+  .sheet,
+  .sheet.from-below,
+  .sheet.from-above {
     transition: none;
+    animation: none;
   }
 }
 @keyframes pop {
@@ -797,7 +1015,8 @@ function ahead(url: string, title: string, delay?: number) {
     animation: slide 0.22s ease-out;
   }
   .close,
-  .panel-head {
+  .panel-head,
+  .steps {
     display: none;
   }
   .mobile-bar {
