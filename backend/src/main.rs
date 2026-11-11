@@ -14,6 +14,7 @@ mod fulltext;
 mod html;
 mod http;
 mod profile;
+mod readers;
 mod rich;
 mod seo;
 mod sources;
@@ -362,8 +363,17 @@ async fn main() -> anyhow::Result<()> {
                 repo: cfg.server.repo.clone(),
                 repo_config: cfg.server.repo_config.clone(),
             };
+            if let Err(e) = readers::prune(&pool).await {
+                tracing::warn!(error = %e, "pruning old sync copies failed");
+            }
             let cache = Arc::new(ResponseCache::new(cfg.server.api_cache_entries));
-            let mut app: Router = api::router(state).route_layer(from_fn_with_state(cache, cache::api_cache));
+            let mut app: Router = api::router(state)
+                .route_layer(from_fn_with_state(cache, cache::api_cache))
+                // Per reader, so outside the cache.
+                .merge(readers::router(
+                    pool.clone(),
+                    readers::FeedProxy::new(&cfg.crawler.user_agent)?,
+                ));
             if let Some(dir) = cfg.server.static_dir.as_ref().filter(|d| d.join("index.html").exists()) {
                 let spa = ServeDir::new(dir).fallback(ServeFile::new(dir.join("index.html")));
                 app = app.fallback_service(ServiceBuilder::new().layer(from_fn(cache::static_headers)).service(spa));
