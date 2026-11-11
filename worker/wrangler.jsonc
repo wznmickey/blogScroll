@@ -1,0 +1,26 @@
+// The static site on Cloudflare (Workers with static assets): the files the
+// publish workflow builds into frontend/dist, plus src/index.js for /api/*
+// (sync between a reader's devices, feeds they add themselves). Deployed by
+// .github/workflows/publish.yml; see "部署到 Cloudflare" in README.md.
+{
+  "name": "blogscroll",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "../frontend/dist",
+    "binding": "ASSETS",
+    // blog/example.com/ → blog/example.com/index.html, about → about.html.
+    "html_handling": "auto-trailing-slash",
+    // 404.html is the app: it shows routes without a page of their own (/me).
+    "not_found_handling": "404-page",
+    // Everything else never reaches the Worker (and costs no requests).
+    "run_worker_first": ["/api/*"]
+  },
+  // Made by the first deploy when missing; its id needs no writing down here.
+  "d1_databases": [{ "binding": "DB", "database_name": "blogscroll" }],
+  // Drops sync copies nobody wrote for 400 days.
+  "triggers": { "crons": ["17 3 * * *"] },
+  // The publish workflow passes FEED_USER_AGENT (Actions variable) instead.
+  "vars": { "USER_AGENT": "blogScroll (RSS reader)" },
+  "observability": { "enabled": true }
+}

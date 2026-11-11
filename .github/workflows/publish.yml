@@ -1,11 +1,18 @@
 # Static mode, part 2: build the site from the newest crawled database and
-# publish it to GitHub Pages. No crawling here, so it takes minutes:
+# publish it: to Cloudflare once its token is set (the files, plus worker/
+# for sync between a reader's devices and feeds they add themselves), and to
+# GitHub Pages unless the variable GITHUB_PAGES = false. No crawling here, so
+# it takes minutes:
 #   - after each push to main whose tests passed (CI), so code changes go out
 #     without waiting for the next crawl;
 #   - at the end of every crawl (pages.yml);
 #   - by hand (Actions → Publish site → Run workflow).
 # Off until ENABLE_PAGES_CRAWL = true, like the crawl (see pages.yml).
-name: Publish site (GitHub Pages)
+#
+# Cloudflare (see "发布到 Cloudflare" in README.md):
+#   Secrets   → CLOUDFLARE_API_TOKEN  (Workers Scripts: Edit, D1: Edit)
+#   Variables → CLOUDFLARE_ACCOUNT_ID, SITE_URL = https://<the site's address>
+name: Publish site
 
 on:
   workflow_run:
@@ -38,6 +45,8 @@ jobs:
     env:
       FEED_CONFIG: ../deploy/config.actions.toml
       FEED_USER_AGENT: ${{ vars.FEED_USER_AGENT }}
+      TO_CLOUDFLARE: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+      TO_GITHUB_PAGES: ${{ vars.GITHUB_PAGES != 'false' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -87,6 +96,7 @@ jobs:
           fi
 
       - id: pages
+        if: env.TO_GITHUB_PAGES == 'true'
         uses: actions/configure-pages@v6
 
       - name: Build static site
@@ -98,18 +108,31 @@ jobs:
           npm ci
           npm run build
 
-      # Data for the app, plus pages for search engines (blog/<id>.html,
+      # Data for the app, plus pages for search engines (blog/<key>/,
       # sitemap.xml, ...) built around the app's index.html.
       - name: Export data and pages
         working-directory: backend
         run: >-
           ./target/release/feed-server export
           --out ../frontend/dist/data
-          --site-url "${{ steps.pages.outputs.base_url }}"
+          --site-url "${{ vars.SITE_URL || steps.pages.outputs.base_url }}"
 
-      - uses: actions/upload-pages-artifact@v5
+      - if: env.TO_GITHUB_PAGES == 'true'
+        uses: actions/upload-pages-artifact@v5
         with:
           path: frontend/dist
 
       - id: deploy
+        if: env.TO_GITHUB_PAGES == 'true'
         uses: actions/deploy-pages@v5
+
+      # The same files on Cloudflare, with the Worker for /api/*. The first
+      # deploy also makes its database (D1); the Worker makes its table.
+      - name: Publish to Cloudflare
+        if: env.TO_CLOUDFLARE == 'true'
+        working-directory: worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_SEND_METRICS: 'false'
+        run: npx --yes wrangler@4.148.0 deploy ${FEED_USER_AGENT:+--var "USER_AGENT:$FEED_USER_AGENT"}

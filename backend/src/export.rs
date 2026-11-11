@@ -19,7 +19,8 @@
 //! (see `seo.rs`): index.html, blogs.html, about.html, blog/{key}/index.html
 //! (and blog/{id}.html, which sends old links on),
 //! 404.html (the app for every other route, not indexed), sitemap.xml and
-//! robots.txt.
+//! robots.txt; for Cloudflare (worker/), _redirects (old blog links, as real
+//! redirects) and _headers (built assets kept for a year).
 //!
 //! Requests go through the API router in-process, so the files have exactly the
 //! shapes (and the same privacy rules) as the live API.
@@ -219,18 +220,33 @@ fn write_pages(
     if blog_dir.exists() {
         std::fs::remove_dir_all(&blog_dir)?;
     }
+    // Where the site lives on its host (/ on Cloudflare, /repo/ on GitHub Pages).
+    let base = url::Url::parse(site.url).map_or_else(|_| String::new(), |u| u.path().trim_end_matches('/').to_string());
+    let mut redirects = String::new();
+    let mut moved = 0;
     for (blog, posts) in blog_pages {
         let p = seo::blog(&site, blog, &shown(posts));
-        // Links from before pages were named after the blog's address.
+        // Links from before pages were named after the blog's address: a page
+        // that sends readers on, and on Cloudflare a real redirect (up to its
+        // limit of 2000 rules).
         if p.path.ends_with('/') {
             std::fs::create_dir_all(&blog_dir)?;
             std::fs::write(
                 blog_dir.join(format!("{}.html", blog["id"])),
                 seo::moved(&site, &p.path),
             )?;
+            if moved < MAX_REDIRECTS && !p.path.contains(char::is_whitespace) {
+                redirects.push_str(&format!("{base}/blog/{} {base}/{} 301\n", blog["id"], p.path));
+                moved += 1;
+            }
         }
         page(p)?;
     }
+    std::fs::write(dir.join("_redirects"), redirects)?;
+    std::fs::write(
+        dir.join("_headers"),
+        format!("{base}/assets/*\n  Cache-Control: public, max-age=31536000, immutable\n"),
+    )?;
     let mut map: Vec<(String, Option<i64>)> = vec![
         (String::new(), posts.first().and_then(|p| p["sort_at"].as_i64())),
         ("blogs".into(), None),
@@ -241,6 +257,9 @@ fn write_pages(
     std::fs::write(dir.join("robots.txt"), seo::robots(&site))?;
     Ok(())
 }
+
+/// Cloudflare reads at most 2000 static rules from _redirects.
+const MAX_REDIRECTS: usize = 1900;
 
 async fn get(app: &Router, uri: &str) -> anyhow::Result<Value> {
     let resp = app.clone().oneshot(Request::get(uri).body(Body::empty())?).await?;
@@ -338,6 +357,9 @@ mod tests {
         assert!(page("sitemap.xml").contains("<loc>https://you.github.io/blogScroll/blog/b1.example/</loc>"));
         assert!(page("404.html").contains("noindex"));
         assert!(page("sitemap.xml").contains("<loc>https://you.github.io/blogScroll/blogs</loc>"));
+        // For Cloudflare: real redirects, under the site's path.
+        assert!(page("_redirects").contains("/blogScroll/blog/1 /blogScroll/blog/b1.example/ 301\n"));
+        assert!(page("_headers").starts_with("/blogScroll/assets/*\n"));
         // A second export uses the untouched app, not the filled-in index.html.
         export(crate::api::router(crate::api::tests::seeded().await), &out, &opts)
             .await

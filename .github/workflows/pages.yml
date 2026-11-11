@@ -1,5 +1,6 @@
-# Static mode, part 1: crawl on a schedule, then publish (publish.yml). The
-# site's code is published on its own after each tested push, without a crawl.
+# Static mode, part 1: crawl on a schedule, then publish (publish.yml: to
+# Cloudflare and/or GitHub Pages). The site's code is published on its own
+# after each tested push, without a crawl.
 #
 # Off until you opt in, so pushing the repo never starts crawling by surprise:
 #   1. Settings → Pages → Source: "GitHub Actions"
