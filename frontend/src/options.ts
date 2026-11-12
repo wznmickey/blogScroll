@@ -40,7 +40,7 @@ export const WEIGHT_INFO: { key: keyof Weights; label: string; hint: string; max
   { key: 'noise', label: '随机打散', hint: '每篇随机加 0 到这么多天，同一时间的文章才不会总是一样的顺序', max: 60, step: 1 },
   { key: 'sameBlog', label: '同一博主', hint: '同一个博主每多一篇，往后放多少天，免得一个人刷屏', max: 30, step: 1 },
   { key: 'perBlog', label: '每位博主最多', hint: '每个博主最多出现几篇（反推荐最多 3 篇）', max: 30, step: 1 },
-  { key: 'heat', label: '其他读者在看', hint: '其他读者打开、喜欢、收藏、读得久的文章往前提多少天（反推荐往后放）', max: 60, step: 1 },
+  { key: 'heat', label: '其他读者在看', hint: '其他读者打开、喜欢、收藏、读得久的文章往前提多少天（只用于推荐，反推荐不看）', max: 60, step: 1 },
 ]
 
 export interface BlockedBlog {

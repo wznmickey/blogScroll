@@ -1237,7 +1237,8 @@ impl Weights {
     /// 推荐 as set; 反推荐 the other way round: what is close to their
     /// reading, in their usual categories or from blogs they already know
     /// moves down, and fewer posts per blog take part, so the feed opens onto
-    /// areas and blogs they have not been to.
+    /// areas and blogs they have not been to. Others' reading has no part in
+    /// it: it is about this reader's own ground.
     fn leaning(&self, explore: bool) -> Leaning {
         let base = Leaning {
             interest: self.interest,
@@ -1253,13 +1254,12 @@ impl Weights {
         if !explore {
             return base;
         }
-        // And what others read most, last: less trodden ground first.
         Leaning {
             interest: -self.interest,
             category: -2.0 * self.category,
             blog: -4.0 * self.blog,
             per_blog: self.per_blog.min(3),
-            heat: -self.heat,
+            heat: 0.0,
             ..base
         }
     }
@@ -2337,6 +2337,11 @@ pub(crate) mod tests {
             Weights::parse("40,12,5,60,10,14,5,8").unwrap().leaning(true).blog,
             -20.0,
             "as the old 反推荐"
+        );
+        // Others' reading has no part in 反推荐.
+        assert_eq!(
+            Weights::parse("40,12,5,60,10,14,5,8,30").unwrap().leaning(true).heat,
+            0.0
         );
         let (_, v) = get_json(&st, "/api/interest?like=1,2").await;
         assert!(v["terms"].is_object() && v["categories"].is_object());

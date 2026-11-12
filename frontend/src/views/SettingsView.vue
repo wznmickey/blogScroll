@@ -330,7 +330,7 @@ function toggleDirectory(id: string) {
         </label>
         <label class="check">
           <input v-model="options.useOthers" type="checkbox" /> 推荐时参考其他读者在看什么
-          <small>其他读者打开、喜欢、收藏、读得久的文章在「推荐」里往前提（多少天见上面的「其他读者在看」），「反推荐」里往后放。</small>
+          <small>其他读者打开、喜欢、收藏、读得久的文章在「推荐」里往前提（多少天见上面的「其他读者在看」）；「反推荐」不看这一项。</small>
         </label>
         <label class="check">
           <input v-model="options.showHeat" type="checkbox" /> 显示热度

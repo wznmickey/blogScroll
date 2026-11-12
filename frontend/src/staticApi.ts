@@ -305,7 +305,7 @@ async function discover(q: PostQuery, limit: number): Promise<Page<PostCard>> {
   )
 }
 
-/** 推荐 as set; 反推荐 the other way round (as `Weights::leaning` on the server). */
+/** 推荐 as set; 反推荐 the other way round, without others' reading (as `Weights::leaning` on the server). */
 function leaning(w: Weights, explore: boolean): Weights {
   if (!explore) return w
   return {
@@ -314,8 +314,7 @@ function leaning(w: Weights, explore: boolean): Weights {
     category: -2 * w.category,
     blog: -4 * w.blog,
     perBlog: Math.min(w.perBlog, 3),
-    // And what others read most, last.
-    heat: -w.heat,
+    heat: 0,
   }
 }
 
