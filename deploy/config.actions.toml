@@ -38,3 +38,9 @@ note = "站长本人的博客"
 # Which feeds there are: readers.md in the backup repository.
 [sources.readers]
 file = "readers.txt"
+
+# 自选订阅：shuheng@mo，Quartz 做的笔记站；站点公布的 RSS 在非 www 域名上。
+[[sources.feeds]]
+url = "https://shuheng-mo.com/index.xml"
+homepage = "https://www.shuheng-mo.com/"
+kind = "blog"
