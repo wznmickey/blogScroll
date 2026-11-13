@@ -38,3 +38,10 @@ note = "站长本人的博客"
 # Which feeds there are: readers.md in the backup repository.
 [sources.readers]
 file = "readers.txt"
+
+# 自选订阅：冷汐。
+[[sources.feeds]]
+url = "https://lengxiqwq.com/atom.xml"
+name = "冷汐"
+homepage = "https://lengxiqwq.com/"
+kind = "blog"
