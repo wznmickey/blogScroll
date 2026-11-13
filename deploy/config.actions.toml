@@ -38,3 +38,11 @@ note = "站长本人的博客"
 # Which feeds there are: readers.md in the backup repository.
 [sources.readers]
 file = "readers.txt"
+
+# 自选订阅：陈星宇 (Xingyu Chen) 的研究笔记与随笔。
+# RSS 自己的标题是「关于 on 陈星宇 (Xingyu Chen)」，所以这里显式给站名。
+[[sources.feeds]]
+url = "https://cxy0714.github.io/index.xml"
+name = "陈星宇 (Xingyu Chen)"
+homepage = "https://cxy0714.github.io/"
+kind = "blog"
