@@ -38,3 +38,10 @@ note = "站长本人的博客"
 # Which feeds there are: readers.md in the backup repository.
 [sources.readers]
 file = "readers.txt"
+
+# 自选订阅：huyan / 刘峥岩，产品、工程与数字叙事。
+[[sources.feeds]]
+url = "https://huyan.me/feed.xml"
+name = "huyan / 刘峥岩"
+homepage = "https://huyan.me/"
+kind = "blog"
