@@ -59,6 +59,14 @@ fallback_url = "https://backup.api.travellings.cn/list.json"
 # RUN = all good, LOST = site up but webring badge missing.
 live_statuses = ["RUN", "LOST"]
 
+# 中文独立博客列表 (github.com/timqian/chinese-independent-blogs): its CSV,
+# with the jsDelivr mirror when GitHub is unreachable. For blogs 开往 lists
+# too, it only fills in what is missing (a feed), never names or addresses.
+[sources.independent]
+enabled = true
+url = "https://raw.githubusercontent.com/timqian/chinese-independent-blogs/master/blogs-original.csv"
+fallback_url = "https://cdn.jsdelivr.net/gh/timqian/chinese-independent-blogs@master/blogs-original.csv"
+
 # Any RSS / Atom / JSON feed, not only blogs. Read at every start.
 # kind: blog | news | newsletter | podcast | video | forum | other
 # Without `name`, the feed's own title is used; give `homepage` to merge
@@ -135,3 +143,10 @@ exclude = [
 # remote = "git@github.com:you/blogscroll-data.git"  # cloned into git_dir if it is not a repository yet
 # every_hours = 6                                # while serving; 0 = only `feed-server backup`
 # push = true
+
+# Logs always go to stderr. `serve` and `watch` also write one file a day
+# here (feed-server.2026-11-21.log). `feed-server status` sums up how
+# crawling goes.
+[log]
+dir = "data/logs"   # relative to where the server runs, like [database] path
+keep_days = 14      # 0 = no log files

@@ -12,12 +12,13 @@ pub struct Config {
     pub sources: SourcesConfig,
     pub policy: PolicyConfig,
     pub backup: BackupConfig,
+    pub log: LogConfig,
 }
 
 impl Config {
+    /// The defaults when there is no file (main.rs says so once logging is up).
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         if !path.exists() {
-            tracing::warn!(path = %path.display(), "config file not found, using defaults");
             let mut cfg = Self::default();
             cfg.apply_env();
             return Ok(cfg);
@@ -381,6 +382,25 @@ pub struct Grant {
 pub struct FeedOverride {
     pub site: String,
     pub feed: String,
+}
+
+/// Log files of `serve` and `watch` (logging.rs); stderr always gets the logs.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LogConfig {
+    /// Relative to where the server runs, like `[database] path`.
+    pub dir: PathBuf,
+    /// Files (one a day) kept; 0 = no log files.
+    pub keep_days: usize,
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            dir: "data/logs".into(),
+            keep_days: 14,
+        }
+    }
 }
 
 /// Commits a text snapshot of what was crawled to a git repository (e.g. a

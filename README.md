@@ -145,6 +145,27 @@ docker compose up -d          # http://127.0.0.1:8080，前面再挂 Caddy / ngi
 
 GitHub Pages 的项目页（`你.github.io/blogScroll/`）不在域名根目录，`robots.txt` 不生效；在 Google Search Console、Bing Webmaster Tools 里添加网站后，手动提交 `https://你.github.io/blogScroll/sitemap.xml`。用自定义域名时 `robots.txt` 会自动指向 sitemap。
 
+## 看日志、查问题
+
+先看「运行状况」，它一眼能看出抓取是不是在正常工作；具体原因再去翻日志。
+
+| 哪一部分 | 运行状况 | 日志 |
+|---|---|---|
+| 自己的服务器（`serve` / `watch`） | `feed-server status`（和服务器用同一个配置） | 终端里（stderr），另外每天一个文件：`data/logs/feed-server.2026-11-21.log`，保留 14 天；Docker 用 `docker compose logs -f`，文件在数据卷的 `/data/logs` 里 |
+| GitHub Actions 的定时抓取 | 每次运行页面最下面的 Summary（同样是 `feed-server status`） | 运行页面里各步骤的输出 |
+| Cloudflare Worker（同步、代读 RSS、按时启动抓取） | — | Cloudflare 控制台 → Workers & Pages → blogscroll → Logs；或者在 `worker/` 里运行 `npx wrangler tail` 实时看 |
+| 读者的浏览器 | 「设置 → 诊断信息」：版本、运行方式、服务器提供什么、同步状态、本机存储用了多少 | 同一处的「最近的问题」：没处理的错误、组件渲染失败、存储写不进、同步失败。「复制全部」可以整段发给站长 |
+
+`feed-server status` 会先列出需要注意的情况，例如 6 小时内没检查过任何 RSS（抓取可能停了）、失败的博客超过三成、很多博客逾期未查、目录或备份好几天没更新；然后是最常见的失败原因，同一种错误合在一起数。
+
+日志只写到 stderr，命令的结果写到 stdout，所以 `feed-server readers > readers.md`、`feed-server status > status.md` 不会混进日志。日志详细程度用 `RUST_LOG` 调，例如 `RUST_LOG=debug`、`RUST_LOG=feed_server::crawler=debug`。日志文件的位置和保留天数在配置里改：
+
+```toml
+[log]
+dir = "data/logs"   # 和 [database] path 一样，相对于运行目录
+keep_days = 14      # 0 = 不写日志文件
+```
+
 ## 抓取策略：只读 RSS，不给别人添麻烦
 
 - **只用 RSS 里的内容**。默认只保存标题、约 240 字摘要、头图链接和标签；即使 RSS 是全文输出，也不保存全文。详情页引导读者去原站。

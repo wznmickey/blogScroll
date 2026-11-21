@@ -3,6 +3,7 @@
 // browser; included in backups.
 
 import { ref, watch } from 'vue'
+import { noteProblem } from './diagnostics'
 import { options } from './options'
 import { hasOwn } from './sources'
 import type { TagsInfo } from './types'
@@ -145,8 +146,9 @@ watch(
   (p) => {
     try {
       localStorage.setItem(KEY, JSON.stringify(p))
-    } catch {
+    } catch (e) {
       // Applies to this visit only.
+      noteProblem('保存频道设置', e)
     }
   },
   { deep: true },

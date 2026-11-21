@@ -13,12 +13,14 @@ mod feed;
 mod fulltext;
 mod html;
 mod http;
+mod logging;
 mod profile;
 mod readers;
 mod rich;
 mod seo;
 mod sources;
 mod stats;
+mod status;
 mod util;
 
 use std::path::PathBuf;
@@ -32,7 +34,6 @@ use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
-use tracing_subscriber::EnvFilter;
 
 use crate::api::{AppState, DirectoryInfo};
 use crate::cache::ResponseCache;
@@ -61,6 +62,10 @@ enum Command {
     /// List the feeds readers added themselves (设置 → 来源 → 我添加的来源)
     /// and how crawling them goes; the same table as readers.md in the backup.
     Readers,
+    /// How crawling goes, from the database: when feeds were last read, how
+    /// many fail and why, the directories, the backup (Markdown; the crawl
+    /// workflow puts it on each run's page).
+    Status,
     /// Crawl on and on without serving: feeds as they fall due, profiles,
     /// the daily directory sync, and a backup every `[backup] every_hours`.
     /// For a second machine that crawls more often than the scheduled runs;
@@ -165,19 +170,13 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        // html5ever warns about every odd page it parses, and the TLS verifier
-        // logs each bad certificate as an error; both are per-site problems
-        // that the crawler records on the blog (last_error) anyway.
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                "info,sqlx=warn,tower_http=info,html5ever=error,rustls_platform_verifier=off".into()
-            }),
-        )
-        .init();
-
     let cli = Cli::parse();
     let cfg = Arc::new(Config::load(&cli.config)?);
+    let long_running = matches!(cli.command, None | Some(Command::Serve { .. } | Command::Watch { .. }));
+    let _log_guard = logging::init(&cfg.log, long_running);
+    if !cli.config.exists() {
+        tracing::warn!(path = %cli.config.display(), "config file not found, using defaults");
+    }
     let pool = db::connect(&cfg.database.path).await.context("opening database")?;
     // Before anything writes to the (empty) database.
     let merge_opts = backup::MergeOptions {
@@ -224,6 +223,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command.unwrap_or(Command::Serve { no_crawl: false }) {
         Command::Sync => crawler.sync_directories().await?,
         Command::Readers => print!("{}", sources::readers::report(&pool).await?),
+        Command::Status => print!("{}", status::report(&pool, &dir_info).await?),
         Command::Watch {
             git_dir,
             remote,

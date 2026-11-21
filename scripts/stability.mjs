@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Keeps STABILITY.md (稳定性分析) in step with the code: finds every place
-// that can panic, throw or end the program, and checks that each one is
-// quoted in the document, and that every quote is still the code as it is.
+// that can panic, throw or end the program, or that drops an error without a
+// word, and checks that each one is quoted in the document, and that every
+// quote is still the code as it is.
 //
 //   node scripts/stability.mjs              check (CI runs this; exit 1 when out of step)
 //   node scripts/stability.mjs --list       every place found, file:line [kind] code
@@ -150,6 +151,8 @@ const RUST_RULES = [
   [/\.(split_at|split_at_mut|split_off|insert_str|replace_range|truncate|drain)\s*\(/g, (m) => m[1]],
   [/\.insert\s*\([^,()]+,\s*'/g, () => 'insert'],
   [/\.(chunks|chunks_exact|windows)\s*\(\s*(?!\d+\s*\))/g, (m) => m[1]],
+  // A result thrown away: an error here is never seen.
+  [/\blet _ =/g, () => 'let _ ='],
 ]
 
 function rustSites(file) {
@@ -200,10 +203,21 @@ function scriptSites(text, kind, offset) {
   const at = (node, k) => sites.push({ line: offset + sf.getLineAndCharacterOfPosition(node.getStart(sf)).line, kind: k })
   const visit = (node) => {
     if (ts.isThrowStatement(node)) at(node, 'throw')
+    // An error dropped without a word: an empty catch, or a .catch that does nothing with it.
+    else if (ts.isCatchClause(node) && !node.block.statements.length) at(node, 'catch {}')
     else if (ts.isNonNullExpression(node)) at(node, 'non-null !')
     else if (ts.isCallExpression(node)) {
       const callee = node.expression.getText(sf)
+      const f = node.arguments[0]
       if (THROWING_CALLS.has(callee)) at(node, callee)
+      else if (
+        ts.isPropertyAccessExpression(node.expression) &&
+        node.expression.name.text === 'catch' &&
+        f &&
+        (ts.isArrowFunction(f) || ts.isFunctionExpression(f)) &&
+        (ts.isBlock(f.body) ? !f.body.statements.length : !ts.isCallExpression(f.body))
+      )
+        at(node.expression.name, '.catch 忽略')
       else if (ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === 'json' && !node.arguments.length)
         at(node, '.json()')
     } else if (ts.isNewExpression(node)) {

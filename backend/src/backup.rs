@@ -51,7 +51,7 @@ const VERSION: u32 = 2;
 const SITES: &str = "sites";
 const LEGACY_BLOGS: &str = "blogs";
 const GIT_TIMEOUT: Duration = Duration::from_secs(300);
-const LAST_BACKUP_KEY: &str = "last_backup";
+pub const LAST_BACKUP_KEY: &str = "last_backup";
 /// After a failed scheduled backup, try again this much later.
 const RETRY_SECS: i64 = 3600;
 /// Another crawler pushing between our fetch and our push: start again on

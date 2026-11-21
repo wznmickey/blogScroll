@@ -1,6 +1,6 @@
 # 稳定性分析
 
-这份文档列出会上线运行的代码里，所有可能让程序 panic、抛出异常或直接退出的地方。每一处都引用了代码，并说明三件事：为什么这样写、什么情况下会出事、要不要改。
+这份文档列出会上线运行的代码里，所有可能让程序 panic、抛出异常或直接退出的地方，以及出错后悄悄吞掉、没人知道的地方。另外还有一些不会崩溃、却会让系统运行失常的情况，比如资源越用越多、平台的配额、过期的 token，作为人工条目列在对应的代码下面。每一处都引用了代码，并说明三件事：为什么这样写、什么情况下会出事、要不要改。
 
 测试代码不算在内：测试里的 `unwrap` 本来就是要在意外时立刻失败。
 
@@ -38,11 +38,13 @@ node ../scripts/stability.mjs --summary    # 按各条目的结论生成「要�
 | | `process::exit` `process::abort` | 进程立即结束（目前没有） |
 | | 下标 `v[i]`、切片 `s[a..b]` | 越界时 panic；字符串切在一个字的中间时也 panic。不算 `x[..]`，也不算 serde_json 的 `v["key"]`（缺了只是 null） |
 | | `truncate` `split_at` `split_off` `insert_str` `replace_range` `drain`、`String` 的 `insert(i, 'c')`，以及参数不是数字常量的 `chunks` / `windows` | 越界、不在字符边界、或块大小为 0 时 panic |
+| | `let _ =` | 丢掉结果：出错了也没人知道 |
 | TypeScript / Vue（`frontend/src`，包括模板里的表达式）和 Worker（`worker/src`） | `throw` | 没人接住，就是未处理的错误 |
 | | 非空断言 `x!` | 运行时不检查；x 真是 null 时，接下来的访问抛 TypeError |
 | | `JSON.parse` `new URL` `decodeURIComponent` `decodeURI` `atob` `btoa`，以及参数是变量的 `new RegExp` | 输入格式不对时抛出 |
 | | `.json()` | 响应不是 JSON 时 reject |
 | | 直接访问 `localStorage` / `sessionStorage` | 存储被禁用时抛 SecurityError，写满时抛 QuotaExceededError |
+| | 空的 `catch {}`，以及什么也不做的 `.catch(() => …)` | 吞掉错误：出错了也没人知道。会把原因记进「设置 → 诊断信息」的不算 |
 
 **不在检查范围内的**：
 - **Rust 的整数溢出**：release 构建用默认配置，溢出时回绕，不 panic。debug 构建会 panic。
@@ -248,6 +250,20 @@ while !name.is_char_boundary(name.len()) || name.ends_with('%') {
 - **为什么这样写**：文件系统只允许 255 字节的文件名，过长的博客地址截到 180 字节，再接一段哈希保证不重名。
 - **什么时候会出事**：不会：`name` 只由 ASCII 字母数字、`.`、`-`、`_` 和 `%XX` 组成，全是单字节，任何位置都是字符边界。而且只在 `name.len() > 200` 时才截。下一行的 `is_char_boundary` 检查是多余的保险。
 - **要不要改**：不用改——`name` 全是 ASCII。
+
+### 删掉旧版本留下的空目录（let _ =）
+
+```rust
+for path in json_files(&dir.join(LEGACY_BLOGS))? {
+std::fs::remove_file(path)?;
+stats.changed += 1;
+}
+let _ = std::fs::remove_dir(dir.join(LEGACY_BLOGS));
+```
+
+- **为什么这样写**：旧版本把每个博客写在 `LEGACY_BLOGS` 目录里。现在把里面的文件搬走以后，顺手删掉这个目录。目录本来就不存在（新的备份仓库），或者里面还有别人放的文件时，`remove_dir` 会报错；这两种情况都不该让备份失败，所以不看结果。
+- **什么时候会出事**：不会：删不掉只是留下一个目录，git 不跟踪空目录，备份的内容不受影响。
+- **要不要改**：不用改——失败无害，也不值得记日志。
 
 ## `backend/src/cache.rs`
 
@@ -471,6 +487,54 @@ fn slower(&self, current: i64) -> i64 {
 - **什么时候会出事**：`Ord::clamp` 在 `min > max` 时无条件 panic（`assert!(min <= max)`，release 也一样），而 `Config::load` 不检查这两个值的大小关系。比如运营者只把 `max_refresh_secs` 改成 3600（默认 `min_refresh_secs` 是 7200），那么第一个返回 304 或内容没变的 feed（`unchanged`），或一次没有新文章的抓取（`ingest`），就会触发。`serve` 下爬虫任务就此结束，直到重启都不再抓取；`crawl` / GitHub Actions 每次都在这里退出。
 - **要不要改**：建议改（中）——在 `Config::load` 里校验 `min_refresh_secs <= max_refresh_secs`（不满足就报错），或在这里改成 `.max(min).min(max)`，不再 panic。
 
+### 读博主资料失败后，照样记下「读过了」（let _ =）
+
+```rust
+if let Err(e) = self.refresh_profile(&b, None).await {
+tracing::debug!(blog = %b.homepage_url, error = %e, "profile refresh failed");
+let _ = db::touch_profile(&self.pool, b.id, now()).await;
+}
+```
+
+```rust
+Err(e) => {
+tracing::debug!(blog = %blog.homepage_url, error = %e, "profile refresh failed");
+let _ = db::touch_profile(&self.pool, blog.id, t).await;
+}
+```
+
+- **为什么这样写**：主页打不开、超时的时候，也要更新这个博客的 `profile_at`，否则它每一轮都会被重新挑出来再试，挤占别的博客。这一步写数据库失败时也没有更好的办法：下一轮挑到它就再试一次，所以不看结果。读资料失败只记 debug 级别的日志：每个博客失败的原因不重要，数量又大，默认的 info 级别不显示。
+- **什么时候会出事**：数据库写失败时，这个博客下一轮还会被选中重读资料，多发几次请求（同一主机 10 秒的间隔照样遵守）。数据库一直写不进时，抓取的其他步骤也会报错，日志里看得到。读资料失败本身，只有设了 `RUST_LOG=feed_server::crawler=debug` 才看得到。
+- **要不要改**：可以改（低）——把 `let _ =` 换成 `if let Err(e) = … { tracing::warn!(…) }`，数据库写失败时至少留下日志；读资料失败仍然记 debug 即可。
+
+### 评论系统不提供评论数，过一阵再看（let _ =）
+
+```rust
+if !sys.supports_counts() {
+// Nothing to ask; look again after the next profile refresh.
+let _ = db::save_comment_counts(&self.pool, blog.id, &[], t + profile_every.max(86400)).await;
+return;
+```
+
+- **为什么这样写**：这个博客用的评论系统没有评论数可查时，把下次检查推迟到下次读资料以后。所在的函数没有返回值，写失败也没有别处可交。
+- **什么时候会出事**：写失败时下次检查没有推迟，下一轮还会挑到它；但这一步不发任何请求，只是多一次数据库写，无害。
+- **要不要改**：不用改。
+
+## `backend/src/discovery.rs`
+
+### 从文件地址退回到它所在的目录（let _ =）
+
+```rust
+if last.contains('.') {
+let _ = u.path_segments_mut().map(|mut s| {
+s.pop().push("");
+});
+```
+
+- **为什么这样写**：找 RSS 时要从 `/blog/post.html` 退回到 `/blog/`。`path_segments_mut()` 只有在地址不能带路径时（`mailto:`、`data:` 这类）才返回 `Err(())`，`let _ =` 只是丢掉这个 `Result`。
+- **什么时候会出事**：不会：这里的地址都是博客主页，在收录时已经确认是 http(s)。万一不是，路径保持原样，只是多试一个候选地址。
+- **要不要改**：不用改。
+
 ## `backend/src/export.rs`
 
 ### 把最新文章分片写成文件（chunks）
@@ -681,6 +745,19 @@ let deadline = std::time::Instant::now() + std::time::Duration::from_secs(max_mi
 - **为什么这样写**：`crawl --all` 在时间预算内一轮轮地抓。`--max-minutes` 默认 90，GitHub Actions 传 100。
 - **什么时候会出事**：`Instant + Duration` 溢出时即使在 release 下也会 panic（overflow when adding duration to instant）。这要 `--max-minutes` 大到约 1.5×10^17 才会发生（`max_minutes * 60` 在 release 下还会回绕）。只有手动传荒唐的值才会触发，结果是这次命令行运行失败退出。
 - **要不要改**：可以改（低）——不会自然发生。要防的话改用 `max_minutes.saturating_mul(60)` 和 `Instant::now().checked_add(..)`，溢出时当作没有截止时间。
+
+### 按 Ctrl-C 时优雅退出（let _ =）
+
+```rust
+axum::serve(listener, app)
+.with_graceful_shutdown(async {
+let _ = tokio::signal::ctrl_c().await;
+})
+```
+
+- **为什么这样写**：在终端里按 Ctrl-C 时，等正在处理的请求结束再退出。
+- **什么时候会出事**：两种情况。① `ctrl_c()` 只有在装不上信号处理（很少见的受限环境）时才返回错误，但错误被 `let _ =` 丢掉后这个 async 块立刻结束，axum 当作「该关了」：服务器启动后马上退出，日志里只有一行 listening，没有原因。② 它只等 SIGINT，而 `docker compose stop` 发的是 SIGTERM：服务器不会优雅退出，10 秒后被强行结束。SQLite 有事务保护，数据不会坏，只是正在处理的请求会断开。
+- **要不要改**：可以改（低）——出错时记一条 warn 然后一直等（`std::future::pending::<()>().await`）；同时用 `tokio::signal::unix::signal(SignalKind::terminate())` 监听 SIGTERM。
 
 ## `backend/src/profile.rs`
 
@@ -946,6 +1023,18 @@ ATTR.captures_iter(attrs)
 - **什么时候会出事**：不会：第 1 组 `([\w:]+)` 不是可选的，匹配上就有值。
 - **要不要改**：不用改——必选组用下标，可选组用 `get`，写法正确。
 
+## `backend/src/status.rs`
+
+### 去掉错误信息里的网址（unwrap）
+
+```rust
+static ADDRESS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"https?://[^\s)]+").unwrap());
+```
+
+- **为什么这样写**：写死的常量正则。同一种错误发生在不同网站上时，去掉网址才能合在一起数。
+- **什么时候会出事**：不会：正则是合法的，`status` 的单元测试每次都会用到它；而且只在 `feed-server status` 命令里用。
+- **要不要改**：不用改。
+
 ## `backend/src/util.rs`
 
 ### 按字符数截断（slice）
@@ -1044,6 +1133,25 @@ async function get<T>(path: string, params: Params = {}): Promise<T> {
 - **什么时候会出事**：不会：`parent` 为 undefined 时 `child` 也是 undefined，走 `: c` 分支。这个函数在渲染时调用（HomeView、AppHeader、TrendingView、SettingsView 的模板），抛错会让组件渲染失败——但它不会抛。
 - **要不要改**：不用改。
 
+### 网站信息和标签信息读不到时不提示（.catch 忽略）
+
+```ts
+.then((m) => {
+meta.value = m
+document.title = m.site_name
+})
+.catch(() => {})
+```
+
+```ts
+.then((t) => (tagsInfo.value = upgradeTags(t)))
+.catch(() => {})
+```
+
+- **为什么这样写**：`loadMeta()`、`loadTags()` 在应用启动时调用，结果只用来补充页面：网站名、目录列表、标签的中文名。拿不到时页面用默认值照常显示，所以不打扰读者。
+- **什么时候会出事**：服务器暂时连不上，或者静态网站的数据文件缺失时，标题保持默认，设置里「本站的来源」是空的，标签显示原文。这次访问里不会再试，刷新页面才再试；原因也不会进「诊断信息」。
+- **要不要改**：可以改（低）——改成 `.catch((e) => noteProblem('读网站信息', e))`，出问题时在诊断信息里看得到原因。
+
 ## `frontend/src/backup.ts`
 
 ### 导出备份时复制当前设置（JSON.parse）
@@ -1097,16 +1205,46 @@ watch(
   (p) => {
     try {
       localStorage.setItem(KEY, JSON.stringify(p))
-    } catch {
+    } catch (e) {
       // Applies to this visit only.
+      noteProblem('保存频道设置', e)
     }
   },
   { deep: true },
 )
 ```
 
-- **为什么这样写**：`prefs` 是模块顶层的 `ref(load())`，应用启动导入模块时就运行（main.ts 先导入 sync.ts，它导入 channels.ts）。这里一旦抛错整个应用起不来（白屏），所以读取、解析、清洗全部包在 try 里，失败用默认频道栏；写入同样包住。另一个标签页改了设置时（`storage` 事件）也走 `load()`。
+- **为什么这样写**：`prefs` 是模块顶层的 `ref(load())`，应用启动导入模块时就运行（main.ts 先导入 sync.ts，它导入 channels.ts）。这里一旦抛错整个应用起不来（白屏），所以读取、解析、清洗全部包在 try 里，失败用默认频道栏；写入同样包住。另一个标签页改了设置时（`storage` 事件）也走 `load()`。写不进去时，把原因记进「设置 → 诊断信息」（diagnostics.ts），查问题时看得到。
 - **什么时候会出事**：存储被禁用（隐私设置、沙箱 iframe；Firefox 关掉 DOM 存储时 `localStorage` 是 null）时 `getItem`/`setItem` 抛错；值被手改或扩展写坏时 `JSON.parse` 抛错；存储满时 `setItem` 抛 QuotaExceededError。全部被 catch：读失败 → 默认频道栏；写失败 → 本次访问照常生效，刷新后回到上次存下的设置。不会白屏。
+- **要不要改**：不用改。
+
+## `frontend/src/diagnostics.ts`
+
+### 读写问题记录（JSON.parse、localStorage、catch {}）
+
+```ts
+function load(): Problem[] {
+try {
+const v = JSON.parse(localStorage.getItem(KEY) ?? '[]')
+return Array.isArray(v) ? v.filter((p) => typeof p?.message === 'string').slice(0, MAX) : []
+} catch {
+return []
+}
+}
+```
+
+```ts
+function save() {
+try {
+localStorage.setItem(KEY, JSON.stringify(problems.value))
+} catch {
+// Storage is the likely problem itself; kept for this visit.
+}
+}
+```
+
+- **为什么这样写**：问题记录在模块加载时读取（main.ts 第一个导入的就是它），读不出来必须不抛，否则整个应用白屏。写不进去时不能再记一条问题，否则会一直循环下去，只能留在内存里。
+- **什么时候会出事**：存储被禁用或写满时，记录只保留到关闭页面；页面上照常显示，「复制全部」照样能用。
 - **要不要改**：不用改。
 
 ## `frontend/src/feedParse.ts`
@@ -1233,7 +1371,7 @@ const lists: Record<ListName, Ref<Entry[]>> = {
 function store(name: ListName, entries: Entry[]) {
   try {
     localStorage.setItem(key(name), JSON.stringify(entries))
-  } catch {
+  } catch (failed) {
     // Storage full or blocked. Make room by shortening the least precious
     // lists (刷到过, then the history), once.
     for (const [victim, keep] of [['seen', 200], ['history', 50]] as const) {
@@ -1248,12 +1386,12 @@ function store(name: ListName, entries: Entry[]) {
       }
     }
     // Kept for this visit only.
+    noteProblem(`保存${LIST_LABELS[name]}`, failed)
   }
-}
 ```
 
-- **为什么这样写**：每次喜欢、收藏、打开、刷到过之后（`put`、`remove`、`clear`、`flushShown`、`restoreList`，都在点击或定时器里）把整张列表写回。`setItem` 在存储满（QuotaExceededError）或被禁用时会抛；这里全部接住，先把最不重要的刷到过缩到 200 条、再把历史缩到 50 条腾出空间重试，都不行就只留在内存里。
-- **什么时候会出事**：不会抛到外面，但存储满并不算稀奇：四张列表满额（收藏 2000、喜欢 1000、历史 500、刷到过 1000 条，每条带一份卡片快照，几百到一千多字符）就有约 4M 字符，而浏览器给每个网站的 localStorage 通常只有 5 MB 左右，同一份配额还要装读者自己订阅源的缓存（sources.ts 的 `sources:read`，最多 500 个源 × 20 篇）。满了之后有两个问题：① 写的是刷到过本身时，`name === victim` 跳过了 `seen`，转而把历史永久砍到 50 条，和注释说的「先牺牲最不重要的刷到过」相反——滚动时每 2 秒一次的 `flushShown` 就能把历史砍掉；② 两轮都失败时，新的喜欢和收藏只在内存里，刷新后消失，读者完全不知道。（存储被禁用时每次都走到这里，第一次写就把内存里的刷到过和历史截短，但那时本来就只在本次访问有效，影响很小。）
+- **为什么这样写**：每次喜欢、收藏、打开、刷到过之后（`put`、`remove`、`clear`、`flushShown`、`restoreList`，都在点击或定时器里）把整张列表写回。`setItem` 在存储满（QuotaExceededError）或被禁用时会抛；这里全部接住，先把最不重要的刷到过缩到 200 条、再把历史缩到 50 条腾出空间重试，都不行就只留在内存里。写不进去时，把原因记进「设置 → 诊断信息」（diagnostics.ts），查问题时看得到。
+- **什么时候会出事**：不会抛到外面，但存储满并不算稀奇：四张列表满额（收藏 2000、喜欢 1000、历史 500、刷到过 1000 条，每条带一份卡片快照，几百到一千多字符）就有约 4M 字符，而浏览器给每个网站的 localStorage 通常只有 5 MB 左右，同一份配额还要装读者自己订阅源的缓存（sources.ts 的 `sources:read`，最多 500 个源 × 20 篇）。满了之后有两个问题：① 写的是刷到过本身时，`name === victim` 跳过了 `seen`，转而把历史永久砍到 50 条，和注释说的「先牺牲最不重要的刷到过」相反——滚动时每 2 秒一次的 `flushShown` 就能把历史砍掉；② 两轮都失败时，新的喜欢和收藏只在内存里，刷新后消失；读者不会被提醒，只有打开「设置 → 诊断信息」才看得到「保存喜欢：QuotaExceededError」这样的记录。（存储被禁用时每次都走到这里，第一次写就把内存里的刷到过和历史截短，但那时本来就只在本次访问有效，影响很小。）
 - **要不要改**：建议改（中）——① `name` 是 `'seen'` 时先用更短的 `entries`（如前 200 条）重试，不去动历史；② 腾空间时先让可以重新读取的订阅源缓存（`sources:read`）让位，比如由 sources.ts 提供一个清缓存的函数在这里先调用；③ 仍然写不进去时设一个响应式标记（如 `storageFull`），在「我的」页提示「浏览器存储已满，新的喜欢/收藏不会保存，请下载备份并清理刷到过」。
 
 ### 历史和刷到过的记录开关（JSON.parse、localStorage）
@@ -1270,14 +1408,15 @@ function loadSettings(): Settings {
 
 const settingsRef = ref<Settings>(loadSettings())
 // …
-  try {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settingsRef.value))
-  } catch {
-    // Applies to this visit only.
-  }
+try {
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settingsRef.value))
+} catch (e) {
+  // Applies to this visit only.
+  noteProblem('保存历史记录的设置', e)
+}
 ```
 
-- **为什么这样写**：`settingsRef` 也在模块顶层初始化，读失败必须不抛，默认两个开关都打开；`v?.` 让存了 `null` 时也能用默认值。写入在 `setSettings` 里（MeView 的开关、恢复备份、同步），先改内存再写存储，写不进去只影响以后的访问。
+- **为什么这样写**：`settingsRef` 也在模块顶层初始化，读失败必须不抛，默认两个开关都打开；`v?.` 让存了 `null` 时也能用默认值。写入在 `setSettings` 里（MeView 的开关、恢复备份、同步），先改内存再写存储，写不进去只影响以后的访问。写不进去时，把原因记进「设置 → 诊断信息」（diagnostics.ts），查问题时看得到。
 - **什么时候会出事**：存储被禁用或值被写坏 → 两个开关回到默认的「开」；存储满时写失败 → 本次访问按新设置，刷新后回到旧设置。不会白屏，也不会打断点击。
 - **要不要改**：不用改。
 
@@ -1301,15 +1440,16 @@ watch(
   (o) => {
     try {
       localStorage.setItem(KEY, JSON.stringify(o))
-    } catch {
+    } catch (e) {
       // Applies to this visit only.
+      noteProblem('保存设置', e)
     }
   },
   { deep: true },
 )
 ```
 
-- **为什么这样写**：`options` 是模块顶层的 `ref(load())`，api.ts、telemetry.ts、sync.ts 在启动时都导入它，抛错就白屏；所以读、解析、`cleanOptions` 清洗都在 try 里，失败用默认设置。写入在深度 watch 里，同样包住。`storage` 事件也走 `load()`。
+- **为什么这样写**：`options` 是模块顶层的 `ref(load())`，api.ts、telemetry.ts、sync.ts 在启动时都导入它，抛错就白屏；所以读、解析、`cleanOptions` 清洗都在 try 里，失败用默认设置。写入在深度 watch 里，同样包住。`storage` 事件也走 `load()`。写不进去时，把原因记进「设置 → 诊断信息」（diagnostics.ts），查问题时看得到。
 - **什么时候会出事**：存储被禁用或值被写坏 → 默认设置（权重、屏蔽、字号等回到默认）；存储满时写失败 → 本次访问按新设置，刷新后回到上次存下的。都被 catch，不会白屏。
 - **要不要改**：不用改。
 
@@ -1328,15 +1468,16 @@ function load(): Record<string, Position> {
 
 let positions = load()
 // …
-  positions = Object.fromEntries(keep)
-  try {
-    localStorage.setItem(KEY, JSON.stringify(positions))
-  } catch {
-    // Kept for this visit only.
-  }
+positions = Object.fromEntries(keep)
+try {
+  localStorage.setItem(KEY, JSON.stringify(positions))
+} catch (e) {
+  // Kept for this visit only.
+  noteProblem('保存读到哪里', e)
+}
 ```
 
-- **为什么这样写**：`positions` 在模块顶层加载（sync.ts 启动时导入），读失败当作没有记录，免得白屏；`save` 在 `notePosition` 之后 1.5 秒的定时器里和 `pagehide` 时运行，写失败放弃，内存里的位置照用。最多 50 个信息流，数据很小。
+- **为什么这样写**：`positions` 在模块顶层加载（sync.ts 启动时导入），读失败当作没有记录，免得白屏；`save` 在 `notePosition` 之后 1.5 秒的定时器里和 `pagehide` 时运行，写失败放弃，内存里的位置照用。最多 50 个信息流，数据很小。写不进去时，把原因记进「设置 → 诊断信息」（diagnostics.ts），查问题时看得到。
 - **什么时候会出事**：存储被禁用或值被写坏 → 「从上次读到的地方继续」和「新文章」标记这次没有；存储满时写失败 → 下次访问没有这次的位置。都被 catch，不会白屏，也不会打断定时器。
 - **要不要改**：不用改。
 
@@ -1369,15 +1510,16 @@ function loadShare(): number {
 /** Share of the window's width the pane takes. */
 export const readerShare = ref(loadShare())
 // …
-  if (!save) return
-  try {
-    localStorage.setItem(SHARE_KEY, String(readerShare.value))
-  } catch {
-    // Kept for this visit only.
-  }
+if (!save) return
+try {
+  localStorage.setItem(SHARE_KEY, String(readerShare.value))
+} catch (e) {
+  // Kept for this visit only.
+  noteProblem('保存阅读窗格的宽度', e)
+}
 ```
 
-- **为什么这样写**：`readerShare` 是模块顶层 ref（App 导入 ReaderPane、PostDetail，它们导入 reader.ts），读必须不抛；`Number(null)` 是 0、坏值是 NaN，都不在 0.3–0.7 之间，用 0.5。写只在拖完分隔条时（ReaderPane 的 `endResize`，`save=true`）发生，值已经在内存的 ref 里。
+- **为什么这样写**：`readerShare` 是模块顶层 ref（App 导入 ReaderPane、PostDetail，它们导入 reader.ts），读必须不抛；`Number(null)` 是 0、坏值是 NaN，都不在 0.3–0.7 之间，用 0.5。写只在拖完分隔条时（ReaderPane 的 `endResize`，`save=true`）发生，值已经在内存的 ref 里。写不进去时，把原因记进「设置 → 诊断信息」（diagnostics.ts），查问题时看得到。
 - **什么时候会出事**：存储被禁用 → 默认一半宽，拖动照常；写失败 → 刷新后回到上次存下的宽度。不会白屏，不会打断拖动。
 - **要不要改**：不用改。
 
@@ -1397,13 +1539,13 @@ function blocked(): number[] {
 export function markBlocked(blogId: number) {
   try {
     localStorage.setItem(BLOCKED_KEY, JSON.stringify([blogId, ...blocked().filter((x) => x !== blogId)].slice(0, 500)))
-  } catch {
+  } catch (e) {
     // Applies to this visit only.
+    noteProblem('保存不能在窗格里打开的博客', e)
   }
-}
 ```
 
-- **为什么这样写**：`blocked()` 在每次点链接（`openInReader`）和指针停在链接上（`readerIntent`）时由 `canShow` 调用，抛错会让点击或悬停处理失败，所以读、解析都包住，坏值当作空表。`markBlocked` 在读者点阅读栏的「新标签页打开」（`giveUp`）时记下这个博客，写失败就放弃。
+- **为什么这样写**：`blocked()` 在每次点链接（`openInReader`）和指针停在链接上（`readerIntent`）时由 `canShow` 调用，抛错会让点击或悬停处理失败，所以读、解析都包住，坏值当作空表。`markBlocked` 在读者点阅读栏的「新标签页打开」（`giveUp`）时记下这个博客，写失败就放弃。写不进去时，把原因记进「设置 → 诊断信息」（diagnostics.ts），查问题时看得到。
 - **什么时候会出事**：不会抛到外面。存储被禁用或满时，注释说的「Applies to this visit only」其实不成立：名单每次都从存储读，内存里没有副本，所以这次访问里再点这个博客的链接，仍会先在阅读栏打开、显示不出来，读者得再点一次「新标签页打开」。
 - **要不要改**：可以改（低）——只在存储不可用时多点一次；想修可以加一个模块级的 `Set<number>`，`markBlocked` 同时记进去，`canShow` 一并检查。
 
@@ -1538,14 +1680,15 @@ return fallback
 
 ```ts
 function store(key: string, value: unknown) {
-try {
-localStorage.setItem(key, JSON.stringify(value))
-} catch {
-// Storage full or blocked: kept for this visit.
-}
+  try {
+    localStorage.setItem(key, JSON.stringify(value))
+  } catch (e) {
+    // Storage full or blocked: kept for this visit.
+    noteProblem(`保存自己的订阅（${key}）`, e)
+  }
 ```
 
-- **为什么这样写**：存储满了或被禁用时不抛错，数据留在内存里，这次访问照常能用。
+- **为什么这样写**：存储满了或被禁用时不抛错，数据留在内存里，这次访问照常能用。写不进去时，把原因记进「设置 → 诊断信息」（diagnostics.ts），查问题时看得到。
 - **什么时候会出事**：这一行不会抛。问题在于存储满时写入会被悄悄丢掉，而这里写的最大一项 `sources:read`（READ_KEY）只会变大不会变小：每个在浏览器里读的源最多缓存 20 张卡片，一张的 JSON 约 0.8K 字符（中文摘要 240 字）；删掉的源、后来被本站抓取的源，它们的条目都一直留在 reads 里。导入一个两三百个订阅的 OPML，单这一项就有三四百万字符，和浏览器给每个网站的 localStorage 额度（通常 5MB 左右）是同一个量级，还要加上 library.ts 最多 4500 条的喜欢、收藏、历史和刷到过。额度用完以后：这一项写不进去，旧值还占着地方；同一网站下的其他写入也会失败——library.ts 写不进时会先把「刷到过」砍到 200 条、历史砍到 50 条来腾地方，还不够的话，新的喜欢和收藏只在这次访问里有效，刷新就没了（没开同步时就是真丢了）；新加的来源（KEY）也写不进去，刷新后就不见了。
 - **要不要改**：建议改（中）——READ_KEY 只是可以重新读到的缓存，应该给读者自己的数据让地方：noteRead 时只保留还在 previewFeeds 里的源的条目；给序列化后的总长度设个上限（比如超过 1M 字符时每个源只留最近几条）；store(READ_KEY) 失败时 removeItem(READ_KEY)，不要让旧的大值一直占着空间。
 
@@ -1640,6 +1783,24 @@ return null
 - **什么时候会出事**：不会：在 try 里，坏地址返回 null，比如源没写主页（homepage 是 ''）时就是这样。调用方（SettingsView 的 onSite）拿到 null 就不去查。
 - **要不要改**：不用改——已经接住。
 
+### 向服务器登记自己的订阅（catch {}）
+
+```ts
+if (!res.ok) return
+const answer = await res.json()
+for (const [url, id] of Object.entries(answer?.blogs ?? {})) {
+if (Number.isInteger(id) && (id as number) > 0) noteCrawled(url, id as number)
+}
+store(REGISTERED_KEY, Date.now())
+} catch {
+// Next time.
+}
+```
+
+- **为什么这样写**：登记是为了让服务器（或 Worker）也去抓这些 RSS，并告诉浏览器哪些已经由网站在抓。失败（离线、服务器出错、回应不是 JSON）时什么也不用做：订阅列表一变，2 秒后会再登记，每天第一次打开也会登记一次。
+- **什么时候会出事**：一直失败时（例如服务器的 `/api/readers/feeds` 坏了），读者的订阅只由浏览器自己读：网站不会抓它们，它们也不会出现在「读者在订阅」里。读者看不出区别，只是旧文章少（浏览器每个源只留 20 篇），也没有任何提示或记录。
+- **要不要改**：可以改（低）——在 catch 里和 `!res.ok` 时调用 `noteProblem('登记自己的订阅', …)`（带上状态码），这样「诊断信息」里看得到。
+
 ## `frontend/src/staticApi.ts`
 
 ### 读取导出的 JSON 文件（throw、.json()）
@@ -1716,6 +1877,33 @@ const blogFile = (id: number) =>
 - **什么时候会出事**：不会：内层回调在 `.some` 里同步执行，就在检查之后，中间没有代码能改 `q.category`。
 - **要不要改**：不用改。
 
+### 网站替读者抓的订阅文件（.catch 忽略）
+
+```ts
+p = sha256(url)
+.then((h) => file<OwnFile>(`own/${h}.json`))
+.then((f) => {
+noteCrawled(url, f.blog.id)
+return f
+})
+.catch(() => null)
+```
+
+- **为什么这样写**：静态网站上，网站替读者抓过的订阅各有一个 `own/<哈希>.json`。还没抓过（刚登记，下一次发布之前）时文件不存在，返回 null，调用方改用浏览器自己读到的文章。
+- **什么时候会出事**：不会出错。但网络问题、文件损坏也会得到 null，同样当作「还没抓」，而且这个结果缓存在 `ownCache` 里，直到刷新页面。
+- **要不要改**：不用改——缺文件是常态，其他原因的结果也一样（用浏览器自己读的）。
+
+### 哪些文章有单独的详情文件（.catch 忽略）
+
+```ts
+const detailed = await file<number[]>('details.json').catch(() => [] as number[])
+if (detailed.includes(id)) return file<PostDetail>(`posts/${id}.json`)
+```
+
+- **为什么这样写**：只有允许全文或内嵌评论的博客，文章才有单独的文件，清单在 `details.json` 里。清单读不到时当作没有，改用列表里的摘要。
+- **什么时候会出事**：`details.json` 读不到时，允许全文的那些文章（目前只有站长自己的博客）只显示摘要，也没有内嵌评论；其他文章不受影响。
+- **要不要改**：不用改。
+
 ## `frontend/src/sync.ts`
 
 ### 读取同步状态（JSON.parse、localStorage）
@@ -1737,15 +1925,16 @@ return null
 
 ```ts
 function write(key: string, value: unknown) {
-try {
-if (value === null) localStorage.removeItem(key)
-else localStorage.setItem(key, JSON.stringify(value))
-} catch {
-// Storage blocked: this visit only.
-}
+  try {
+    if (value === null) localStorage.removeItem(key)
+    else localStorage.setItem(key, JSON.stringify(value))
+  } catch (e) {
+    // Storage blocked: this visit only.
+    noteProblem('保存同步状态', e)
+  }
 ```
 
-- **为什么这样写**：存储被禁用或满了时不抛错，不让同步流程中断。
+- **为什么这样写**：存储被禁用或满了时不抛错，不让同步流程中断。写不进去时，把原因记进「设置 → 诊断信息」（diagnostics.ts），查问题时看得到。
 - **什么时候会出事**：这两行不会抛。但注释里说的「这次访问照用」对 LINK_KEY 不成立：同步码只存在 localStorage 里，readLink() 每次都从存储读，内存里没有副本。存储被禁用（某些隐私设置、沙箱 iframe）或已经满了（见 sources.ts「写进本地存储」那条）时，读者点「开启同步」：startSync 的 write 悄悄失败，syncStatus 却被设成 on，界面显示「已开启」，同步码那里是空的；接着 syncNow 因为 readLink() 是 null 直接返回，什么都没同步，也没有任何提示。成功同步后如果是写 version 失败，就没有害处：下次多下载一次，再合并一遍。
 - **要不要改**：可以改（低）——startSync 写完以后检查 readLink()，读不回来就 `throw new Error('浏览器不让这个网站保存数据，没法同步')`，begin() 会把它显示出来。
 
@@ -1922,6 +2111,34 @@ setInterval(daily, 3600_000)
 - **什么时候会出事**：不会抛到外面。但存储被禁用时注释说的「This visit only」并不成立，因为内存里也没留：`stored` 总返回 null，于是 `statsId()` 每次发送（`flush`）都生成一个新的随机 id，`daily()` 每小时都认为今天还没来过，又发一次 `visit` 和全部 `setting`。服务器按 (day, who) 去重访客（stats.rs 的 `visitors` 表，Worker 同样），这样的读者开着页面会每小时被算成一位新访客，访客数和设置统计偏高一点。读者自己看不到任何问题。
 - **要不要改**：可以改（低）——在模块里留一份内存副本：如 `let memId: string | null = null` 让 `statsId` 先用它、生成后存进去；`let lastDay = ''` 让 `daily` 先比较它。这样存储不可用时也是「每次访问一个 id、一天一次 visit」。
 
+### 统计发不出去就算了（.catch 忽略）
+
+```ts
+fetch('/api/events', { method: 'POST', headers: { 'content-type': 'application/json' }, body, keepalive: true }).catch(
+() => {},
+)
+```
+
+- **为什么这样写**：匿名统计是尽力而为：失败不重试、不提示，免得打扰读者，也不值得占用诊断记录。
+- **什么时候会出事**：离线、或者被广告拦截插件拦下时，这一批计数丢失，热度略偏低；其他功能不受影响。
+- **要不要改**：不用改。
+
+## `frontend/src/components/BlogAboutCard.vue`
+
+### 博主资料读不到（catch {}）
+
+```vue
+try {
+detail.value = await blogDetail(id)
+} catch {
+// The card still shows the name and avatar from the post itself.
+}
+```
+
+- **为什么这样写**：卡片上已经有文章里带的博主名字和头像，详细资料只是补充；读不到时就保持简单的样子。
+- **什么时候会出事**：服务器出错，或者静态网站缺了这个博客的数据文件时，卡片上没有简介和社交链接，也没有提示。
+- **要不要改**：不用改。
+
 ## `frontend/src/components/CommentEmbed.vue`
 
 ### 把 giscus / utterances 的脚本放进评论框（non-null !）
@@ -1961,6 +2178,27 @@ observer.observe(root.value!)
 - **什么时候会出事**：不会：`onMounted` 只在挂载完成后调用一次，这时 `root.value` 一定是那个 div。
 - **要不要改**：不用改——根元素总是存在，`!` 只是告诉 TypeScript 这一点。
 
+## `frontend/src/components/DiagnosticsPanel.vue`
+
+### 统计本机存储用了多少（localStorage）
+
+```vue
+try {
+const out = []
+for (let i = 0; i < localStorage.length; i++) {
+const key = localStorage.key(i) ?? ''
+out.push({ key, chars: key.length + (localStorage.getItem(key)?.length ?? 0) })
+}
+return out.sort((a, b) => b.chars - a.chars)
+} catch {
+return null
+}
+```
+
+- **为什么这样写**：列出每一项占多少，用来判断存储是不是快满了。整段包在 try 里。
+- **什么时候会出事**：不会：存储被禁用时返回 null，面板上显示「读不到：浏览器不让这个网站保存数据」，这本身就是有用的诊断信息。
+- **要不要改**：不用改。
+
 ## `frontend/src/components/FeedCard.vue`
 
 ### 卡片封面图地址（non-null !）
@@ -1981,23 +2219,24 @@ observer.observe(root.value!)
 
 ```vue
 try {
-const id = Number(localStorage.getItem(KEY))
-return Number.isInteger(id) && id > 0 ? id : null
+  const id = Number(localStorage.getItem(KEY))
+  return Number.isInteger(id) && id > 0 ? id : null
 } catch {
-return null
+  return null
 }
 ```
 
 ```vue
 try {
-if (id) localStorage.setItem(KEY, String(id))
-else localStorage.removeItem(KEY)
-} catch {
-// Remembered for this visit only.
+  if (id) localStorage.setItem(KEY, String(id))
+  else localStorage.removeItem(KEY)
+} catch (e) {
+  // Remembered for this visit only.
+  noteProblem('保存「我的博客」', e)
 }
 ```
 
-- **为什么这样写**：「我的」页的博主标签（`/me?tab=blog`）记住上次选的博客，下次打开直接显示它的抓取情况。读和写都包在 try/catch 里。
+- **为什么这样写**：「我的」页的博主标签（`/me?tab=blog`）记住上次选的博客，下次打开直接显示它的抓取情况。读和写都包在 try/catch 里。写不进去时，把原因记进「设置 → 诊断信息」（diagnostics.ts），查问题时看得到。
 - **什么时候会出事**：浏览器禁止网站存数据（设置里屏蔽 Cookie 和网站数据、某些隐私模式）时访问 `localStorage` 抛 SecurityError，存储满了 `setItem` 抛 QuotaExceededError。这些都被接住：读取当作没记住，写入失败时只在这次访问里记得，下次要重新选。
 - **要不要改**：不用改——失败已经处理，影响只是下次要再选一次。
 
@@ -2037,6 +2276,22 @@ class="comments-go"
 - **什么时候会出事**：不会：这些是事件处理器，只在指针移入、获得焦点、按下、点击时执行，而那时元素已经在 `v-if="post"` 之内渲染出来了，`commentsLink` 至少是文章的原文地址。
 - **要不要改**：不用改——外层 `v-if="post"` 已经保证有值。
 
+### 相关文章读不到（.catch 忽略）
+
+```vue
+api
+.related(props.id, 6)
+.then((r) => {
+rememberPosts(r)
+related.value = r
+})
+.catch(() => {})
+```
+
+- **为什么这样写**：详情页下面的「相关文章」是附加内容，读不到时就不显示这一栏，不影响正文。
+- **什么时候会出事**：服务器出错，或者静态网站的 `related.json` 读不到时，没有相关文章，也没有提示。
+- **要不要改**：不用改。
+
 ## `frontend/src/components/Waterfall.vue`
 
 ### 观察瀑布流容器的宽度和底部哨兵（non-null !）
@@ -2064,6 +2319,16 @@ if (r.status === 'done') {
 - **什么时候会出事**：不会：有了 `.catch`，这个 promise 不会 reject。只有回应体正好是 JSON `null` 时，`r.status` 才会抛 TypeError，但整个 `refresh()` 外面有 try/catch，读者看到「没能刷新，稍后再试」，`refreshing` 也在 finally 里复位。后端和 Worker 都只回对象，不会回 `null`。
 - **要不要改**：不用改——非 JSON 的回应已经变成一条可读的提示。
 
+### 请求刷新后，浏览器先自己读一次（.catch 忽略）
+
+```vue
+justRead.value = (await readNow(feed, ref).catch(() => [])).filter((p) => p.sort_at > newest)
+```
+
+- **为什么这样写**：静态网站上，「刷新」只是请求下一次抓取，几分钟后网站才更新。为了马上看到新文章，浏览器同时自己读一次 RSS。读不到（对方网站不让读、代读服务出错）时，就不显示「刚读到」的部分，提示文字照常。
+- **什么时候会出事**：读不到时，读者只看到「已请求，约 N 分钟后网站更新」，没有新文章预览，也看不到原因。
+- **要不要改**：不用改。
+
 ## `frontend/src/views/BlogsView.vue`
 
 ### 观察博客列表底部哨兵（non-null !）
@@ -2075,6 +2340,29 @@ observer.observe(sentinel.value!)
 - **为什么这样写**：底部哨兵进入视野（提前 800px）就加载下一页博客。`<div ref="sentinel">` 在根元素里、没有 `v-if`，到 `onMounted` 时已赋值。
 - **什么时候会出事**：不会：`onMounted` 只在挂载后执行一次；页面被 `<KeepAlive>` 缓存（用了 `onActivated`）时也不会卸载，哨兵一直在。
 - **要不要改**：不用改——元素总是存在，`!` 只是告诉 TypeScript 这一点。
+
+## `frontend/src/views/SearchView.vue`
+
+### 博主、标签查询失败时，其余部分照常（catch {}）
+
+```vue
+blogOffset.value += page.items.length
+moreBlogs.value = !!page.next_cursor
+} catch {
+// The other sections still show.
+} finally {
+```
+
+```vue
+if (needle === q.value) tags.value = found
+} catch {
+// As above.
+}
+```
+
+- **为什么这样写**：搜索页同时查文章、博主、标签三部分，一部分失败时其余照常显示，不让一个错误清空整页。
+- **什么时候会出事**：博主或标签查询失败时那一栏是空的，看起来和「没有搜到」一样，读者不知道其实是出错了。
+- **要不要改**：可以改（低）——失败时在那一栏写「暂时查不到」，或者调用 `noteProblem('搜索', e)`。
 
 ## `frontend/src/views/SettingsView.vue`
 
@@ -2102,6 +2390,20 @@ observer.observe(sentinel.value!)
 - **为什么这样写**：`readText` 只对从文件导入、本站又没在抓取的列表（`file:` 地址）返回 null。元素自己的 `v-if` 先判断非空，再取 `.bad` 和 `.text`。
 - **什么时候会出事**：不会：元素自己的 `v-if` 先求值，为假时 `:class` 和插值都不执行。`readText` 只读响应式状态（`crawled`、`reads`），渲染是同步的，三次调用之间状态不会变，所以 `v-if` 为真时后两次也一定非空。如果真在这里拿到 null，`.bad` 会抛 TypeError，又没有全局 errorHandler，整个设置页都渲染不出来，不过按上面的理由走不到这一步。
 - **要不要改**：不用改——同一次渲染里结果不变，`v-if` 已经保护。如果以后 `readText` 的结果会在两次调用之间变化（依赖时间、有副作用），就改成每个来源先算一次再用。
+
+### 兴趣画像、来源对应的博客读不到（.catch 忽略）
+
+```vue
+profile.value = hasSignals.value ? await api.interest(s).catch(() => null) : null
+```
+
+```vue
+return key ? api.blogByKey(key).catch(() => null) : null
+```
+
+- **为什么这样写**：「推荐眼中的你」读不到时就不显示画像。添加来源时会查一下本站是不是已经收录了这个博客（收录了就改成关注它）；查不到就当没收录，照常加成自己的订阅。
+- **什么时候会出事**：前者只是少一块说明。后者在服务器出错时，已经收录的博客会被加进「我添加的」，变成重复：同一个 RSS 由网站和浏览器各读一次。不影响使用。
+- **要不要改**：不用改。
 
 ## `worker/src/index.js`
 
@@ -2135,6 +2437,10 @@ throw e
 ```js
 try {
 const u = new URL(href, base)
+if (/^https?:$/.test(u.protocol) && !found.some((f) => f.url === u.href)) found.push({ rank, url: u.href })
+} catch {
+// Not an address.
+}
 ```
 
 - **为什么这样写**：`/api/fetch` 拿到的是网页时，从 `<link rel="alternate">` 里找 RSS 地址；`href` 可能是相对地址，所以以页面的最终地址为基准解析。

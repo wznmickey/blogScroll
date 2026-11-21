@@ -12,6 +12,7 @@ import { addChannel, COLUMN_CHOICES, HIDE_CHOICES, prefs } from '../channels'
 import { follows, isFollowing, toggleFollow } from '../follow'
 import { recentIds } from '../library'
 import { capabilities } from '../server'
+import DiagnosticsPanel from '../components/DiagnosticsPanel.vue'
 import {
   addOwn,
   crawled,
@@ -475,6 +476,11 @@ function toggleDirectory(id: string) {
             {{ n }}
           </button>
         </p>
+      </section>
+
+      <section id="diagnostics">
+        <h2>诊断信息</h2>
+        <DiagnosticsPanel />
       </section>
 
       <p class="footer"><RouterLink to="/about">关于本站</RouterLink></p>

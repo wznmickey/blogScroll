@@ -3,6 +3,7 @@
 // (an issue, or a pull request editing the site's config on GitHub).
 import { computed, ref, watch } from 'vue'
 import { api, meta } from '../api'
+import { noteProblem } from '../diagnostics'
 import { blogPath, fullDate, hostOf, relativeTime } from '../format'
 import type { BlogDetail, BlogSummary } from '../types'
 import BlogAvatar from './BlogAvatar.vue'
@@ -25,8 +26,9 @@ function choose(id: number | null) {
   try {
     if (id) localStorage.setItem(KEY, String(id))
     else localStorage.removeItem(KEY)
-  } catch {
+  } catch (e) {
     // Remembered for this visit only.
+    noteProblem('保存「我的博客」', e)
   }
 }
 

@@ -4,6 +4,7 @@
 // Scripts come only from these pinned CDN builds, never from the blog itself,
 // and load only when the comment area scrolls into view.
 import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { noteProblem } from '../diagnostics'
 import type { EmbedConfig } from '../types'
 
 const props = defineProps<{ config: EmbedConfig }>()
@@ -123,7 +124,7 @@ async function mount() {
     }
     state.value = 'ready'
   } catch (e) {
-    console.warn('comment widget failed', e)
+    noteProblem('评论区', e)
     state.value = 'error'
   }
 }

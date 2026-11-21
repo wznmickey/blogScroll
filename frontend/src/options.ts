@@ -3,6 +3,7 @@
 // how many pins, text size. Kept in this browser; included in backups.
 
 import { ref, watch } from 'vue'
+import { noteProblem } from './diagnostics'
 
 /** 推荐's weights, in days of freshness (as on the server, `Weights` in api.rs). */
 export interface Weights {
@@ -136,8 +137,9 @@ watch(
   (o) => {
     try {
       localStorage.setItem(KEY, JSON.stringify(o))
-    } catch {
+    } catch (e) {
       // Applies to this visit only.
+      noteProblem('保存设置', e)
     }
   },
   { deep: true },

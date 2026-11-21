@@ -119,6 +119,7 @@ jobs:
           restore-keys: feed-db-
 
       - name: Build crawler
+        id: build
         working-directory: backend
         run: cargo build --release --locked
 
@@ -196,6 +197,13 @@ jobs:
           ./target/release/feed-server backup
           --git-dir "$RUNNER_TEMP/backup"
           --remote "git@github.com:${{ vars.BACKUP_REPO }}.git"
+
+      # How crawling goes (feed-server status), on this run's page.
+      - name: Status
+        if: always() && steps.build.outcome == 'success'
+        continue-on-error: true
+        working-directory: backend
+        run: ./target/release/feed-server status >> "$GITHUB_STEP_SUMMARY"
 
       - name: Save crawler database
         if: always()

@@ -4,6 +4,7 @@
 // can resume from the oldest. Kept in this browser; included in backups.
 
 import { report } from './changes'
+import { noteProblem } from './diagnostics'
 
 export interface Mark {
   sort_at: number
@@ -67,8 +68,9 @@ function save() {
   positions = Object.fromEntries(keep)
   try {
     localStorage.setItem(KEY, JSON.stringify(positions))
-  } catch {
+  } catch (e) {
     // Kept for this visit only.
+    noteProblem('保存读到哪里', e)
   }
 }
 

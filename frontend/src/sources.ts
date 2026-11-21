@@ -13,6 +13,7 @@
 
 import { computed, ref, watch } from 'vue'
 import { report } from './changes'
+import { noteProblem } from './diagnostics'
 import { hasLongExcerpt, hostOf } from './format'
 import { parseOpmlFile, parseSource, type ListedFeed, type ParsedFeed, type ParsedItem } from './feedParse'
 import { fetchRemote, FetchFailed, loadCapabilities } from './server'
@@ -96,8 +97,9 @@ function load<T>(key: string, fallback: T): T {
 function store(key: string, value: unknown) {
   try {
     localStorage.setItem(key, JSON.stringify(value))
-  } catch {
+  } catch (e) {
     // Storage full or blocked: kept for this visit.
+    noteProblem(`保存自己的订阅（${key}）`, e)
   }
 }
 

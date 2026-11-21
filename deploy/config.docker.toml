@@ -8,6 +8,10 @@ static_dir = "/app/web"
 [database]
 path = "/data/feed.db"
 
+# In the volume, so they outlive the container (docker compose logs has them too).
+[log]
+dir = "/data/logs"
+
 [crawler]
 # Better: set FEED_USER_AGENT with a way to contact you.
 user_agent = "blogScroll/0.1 (RSS reader; low frequency; honours ETag, Cache-Control and Retry-After)"

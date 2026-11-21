@@ -16,6 +16,7 @@ import { ref, watch } from 'vue'
 import { onChange } from './changes'
 import { cleanPrefs, prefs } from './channels'
 import { follows, restoreFollows } from './follow'
+import { noteProblem } from './diagnostics'
 import { cleanEntries, entries, LIST_NAMES, restoreList, setSettings, settings, type Entry } from './library'
 import { cleanOptions, options } from './options'
 import { allPositions, cleanPositions, restorePositions } from './positions'
@@ -61,8 +62,9 @@ function write(key: string, value: unknown) {
   try {
     if (value === null) localStorage.removeItem(key)
     else localStorage.setItem(key, JSON.stringify(value))
-  } catch {
+  } catch (e) {
     // Storage blocked: this visit only.
+    noteProblem('保存同步状态', e)
   }
 }
 
@@ -300,6 +302,7 @@ export async function syncNow(): Promise<void> {
     }
     failures++
     syncStatus.value = { ...syncStatus.value, error: (e as Error).message || '同步失败' }
+    noteProblem('同步', e)
     schedule(Math.min(10 * 60_000, 15_000 * 2 ** failures))
   } finally {
     running = false

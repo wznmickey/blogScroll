@@ -5,6 +5,7 @@
 // button, still get a new tab.
 
 import { computed, ref, watch } from 'vue'
+import { noteProblem } from './diagnostics'
 import type { BlogRef, PostCard } from './types'
 
 export interface ReaderPage {
@@ -50,8 +51,9 @@ export function setReaderShare(share: number, save: boolean) {
   if (!save) return
   try {
     localStorage.setItem(SHARE_KEY, String(readerShare.value))
-  } catch {
+  } catch (e) {
     // Kept for this visit only.
+    noteProblem('保存阅读窗格的宽度', e)
   }
 }
 
@@ -68,8 +70,9 @@ function blocked(): number[] {
 export function markBlocked(blogId: number) {
   try {
     localStorage.setItem(BLOCKED_KEY, JSON.stringify([blogId, ...blocked().filter((x) => x !== blogId)].slice(0, 500)))
-  } catch {
+  } catch (e) {
     // Applies to this visit only.
+    noteProblem('保存不能在窗格里打开的博客', e)
   }
 }
 

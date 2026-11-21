@@ -20,7 +20,7 @@ use crate::profile;
 use crate::sources::{Directory, DirectoryFetch};
 use crate::util::{jitter, now};
 
-const LAST_SYNC_KEY: &str = "last_directory_sync";
+pub const LAST_SYNC_KEY: &str = "last_directory_sync";
 /// A feed whose text is at least this long is treated as full text.
 const FULL_FEED_MIN_CHARS: usize = 500;
 /// Article pages fetched per blog per crawl, for full-text blogs only.

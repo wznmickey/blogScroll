@@ -6,6 +6,7 @@
 
 import { computed, readonly, ref, type Ref } from 'vue'
 import { report } from './changes'
+import { noteProblem } from './diagnostics'
 import { track } from './telemetry'
 import type { PostCard } from './types'
 
@@ -85,7 +86,7 @@ function load(name: ListName): Entry[] {
 function store(name: ListName, entries: Entry[]) {
   try {
     localStorage.setItem(key(name), JSON.stringify(entries))
-  } catch {
+  } catch (failed) {
     // Storage full or blocked. Make room by shortening the least precious
     // lists (刷到过, then the history), once.
     for (const [victim, keep] of [['seen', 200], ['history', 50]] as const) {
@@ -100,6 +101,7 @@ function store(name: ListName, entries: Entry[]) {
       }
     }
     // Kept for this visit only.
+    noteProblem(`保存${LIST_LABELS[name]}`, failed)
   }
 }
 
@@ -134,8 +136,9 @@ export function setSettings(patch: Partial<Settings>, quiet = false) {
   if (!quiet) report({ kind: 'changed' })
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settingsRef.value))
-  } catch {
+  } catch (e) {
     // Applies to this visit only.
+    noteProblem('保存历史记录的设置', e)
   }
 }
 
