@@ -49,6 +49,9 @@ jobs:
       - run: npm ci
       - name: Unit tests (sync merging)
         run: npm test
+      # Every place that can panic or throw is in STABILITY.md, quoted as it is now.
+      - name: STABILITY.md matches the code
+        run: node ../scripts/stability.mjs
       - name: Build (server mode)
         run: npm run build
       - name: Build (static mode, as for GitHub Pages)

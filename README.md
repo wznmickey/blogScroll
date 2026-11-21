@@ -34,8 +34,11 @@ backend/    Rust 服务端（feed-server）
   src/sources/readers.rs  读者自己添加的 RSS 作为一个来源目录（只给他们自己看）
 frontend/   Vue 前端
 worker/     Cloudflare Worker：静态版的同步、代读和登记 RSS、刷新（同 readers.rs），并按时启动抓取
+scripts/stability.mjs  检查 STABILITY.md 和代码一致（CI 里跑）
 shell.nix   开发环境（cargo、gcc、node）
 ```
+
+[STABILITY.md](STABILITY.md)（稳定性分析）列出代码里每一处可能 panic、抛出异常或退出的写法：为什么这样写、什么情况下会出事、要不要改。改代码时一起更新，`node scripts/stability.mjs` 会检查两者是否一致。
 
 ## 运行
 
