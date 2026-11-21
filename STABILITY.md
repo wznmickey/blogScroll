@@ -73,10 +73,17 @@ node ../scripts/stability.mjs --summary    # 按各条目的结论生成「要�
 
 ## 要改的地方
 
-没有「建议改（高）」的地方：正常运行时，外部输入（RSS、网站、读者）都触发不了 panic 或白屏。代码里也没有 `unsafe`，没有 `process::exit`。下面几处值得改，其余是「不用改」或「可以改（低）」，改法写在各条目里。
+正常运行时，外部输入（RSS、网站、读者）都触发不了 panic 或白屏，代码里也没有 `unsafe` 和 `process::exit`。值得改的是下面这些，大多不是崩溃，而是「出了问题没人知道」或者「坏了以后自己恢复不了」。其余条目是「不用改」或「可以改（低）」，改法写在各条目里。
 
 | 级别 | 文件 | 条目 | 怎么改 |
 |---|---|---|---|
+| 高 | `backend/src/sources/travellings.rs` | 开往返回空列表或大批异常状态时，博客整批下线（人工） | 开往的接口「成功」地返回空列表、字段改了名，或者它的检测服务把大批成员标成超时，只在开往里的约 1,200 个博客就会一起从网站上消失，至少一天，没有任何报警。列表为空时报错（会转去试备用地址）；活着的成员比上次少一半以上时，不保存这次结果，记一条 warn |
+| 中 | `.github/workflows/publish.yml` | 缓存和备份都拿不到时，会发布一个空网站（人工） | 数据库缓存 7 天没用就被 GitHub 删掉；这时如果合并备份也失败（这一步允许失败），导出的是空数据库，空网站会覆盖正常的网站。导出前检查数据库里的博客数，太少就让发布失败，保留线上的旧版本 |
+| 中 | `.github/workflows/pages.yml` | 第三方 action 被仓库策略禁掉时，每次运行都失败而没人知道（人工） | 这次真的发生了：仓库只允许自己名下的 action 后，每次抓取都在启动时失败，Worker 启动成功、GitHub 的后备定时又被它压住，几天没人发现。让 Worker 在启动抓取后检查上一次运行的结果，或者检查线上 `data/index.json` 的生成时间，太旧就在网站上提示 |
+| 中 | `worker/src/index.js` | 启动抓取失败只写日志，token 过期没人知道（人工） | Worker 用的 fine-grained token 一年左右就过期，过期后「刷新」按钮照样说「约 N 分钟后更新」，实际什么也没发生，统计也停了，只有 Worker 日志里有记录。连续失败时在 `/api/capabilities` 里关掉刷新，并在 `feed-server status` / 诊断信息里显示 |
+| 中 | `.github/workflows/pages.yml` | 排队中的运行会被下一个顶掉（人工） | 同一组里只能有一个排队的运行，新的会把旧的顶掉。访客的刷新批次已经记成「发出了」，被顶掉就丢了。刷新用自己的并发组，或者 Worker 发出前确认上一批已经开始 |
+| 中 | `worker/wrangler.jsonc` | 在 Cloudflare 后台改的变量，下一次发布就没了（人工） | 每次发布 `wrangler deploy` 都会用配置文件里的值盖掉后台改过的普通变量，README 却让人去后台改 `CRAWL_EVERY_HOURS`。改成从 GitHub 的变量传入，或者在配置里写 `keep_vars: true` |
+| 中 | `backend/src/backup.rs` | 单个博客的备份文件没有大小上限（人工） | 文章从不删除，一个高产的 RSS（比如读者订阅的新闻源）的备份文件总有一天超过 GitHub 的 100 MB 上限，之后每次备份推送都被拒，而这一步允许失败，没人知道。给单个文件设上限，超过时只备份最近的文章并记 warn |
 | 中 | `backend/src/crawler.rs` | 轮询间隔夹在配置的上下限之间（人工） | 只把 `max_refresh_secs` 设得比 `min_refresh_secs` 小（比如只写 `max_refresh_secs = 3600`，默认的下限是 7200），第一次遇到没更新的 RSS 就 panic，抓取停掉。在 `Config::load` 里校验上下限，或改成 `.max(min).min(max)` |
 | 中 | `frontend/src/library.ts` | 写回列表，存储满时腾地方（localStorage） | 存储满时腾地方的顺序反了：写「刷到过」失败时会把历史永久砍到 50 条；两次重试都失败时，新的喜欢、收藏只留在内存里，刷新就丢，也不提示。改成先缩短正在写的「刷到过」、先清可以重新读取的订阅缓存，还写不进就在「我的」页提示 |
 | 中 | `frontend/src/sources.ts` | 写进本地存储（localStorage） | 自己订阅的预览缓存（`sources:read`）只增不减，导入几百个 RSS 后可能占满浏览器存储，连带上一条的问题。只保留还在预览的源、限制总大小，写不进时清掉它 |
@@ -265,6 +272,60 @@ let _ = std::fs::remove_dir(dir.join(LEGACY_BLOGS));
 - **什么时候会出事**：不会：删不掉只是留下一个目录，git 不跟踪空目录，备份的内容不受影响。
 - **要不要改**：不用改——失败无害，也不值得记日志。
 
+### 备份时把整份快照和整个数据库读进内存（人工）
+
+```rust
+pub async fn write_snapshot(pool: &SqlitePool, dir: &Path, allow_shrink: bool) -> anyhow::Result<SnapshotStats> {
+let mut files = read_snapshot(dir)?;
+for (key, mut mine) in read_database(pool).await? {
+```
+
+- **为什么这样写**：备份只增不减：先读出仓库里每个 `sites/*.json` 和数据库里的每个博客、每篇文章，按地址合并，再逐个文件比较，只写有变化的。整份读进来最简单，也不会漏。
+- **什么时候会出事**：文章从不删除（`max_posts_per_blog` 默认 0），快照和数据库只会越来越大。每次备份时内存里同时有两份全部文章（`read_snapshot` 一份，`read_database` 一份），合并后还要逐个 `to_string_pretty`；文章到几十万篇时，峰值内存可能上 GB。`restore` 也是整份读入，而每次备份都先做一遍 `restore`。另外 `read_snapshot`、`write_if_changed` 用的是 `std::fs`，JSON 的解析和生成也直接在这个 async 函数里做，没有放进 `spawn_blocking`。`serve` 配了备份时每 `every_hours`（默认 6 小时）做一次，这几秒到几十秒里会占住一个 tokio 工作线程。单核 VPS 上只有一个工作线程，这段时间网站的所有请求都要等。平时没人会注意到，除非内存不够被 OOM 杀掉；容器设了 `restart: unless-stopped`，重启后下一次备份还会这样。
+- **要不要改**：可以改（低）——把读快照、合并和写文件整个放进 `spawn_blocking`；文章多了以后改成一个博客一个博客地处理，每次只读这个博客的数据库记录和它的快照文件。
+
+### 单个博客的备份文件没有大小上限（人工）
+
+```rust
+let sites = dir.join(SITES);
+std::fs::create_dir_all(&sites)?;
+for (key, file) in &files {
+stats.changed += usize::from(write_if_changed(&sites.join(file_name(key)), &pretty(file)?)?);
+}
+```
+
+- **为什么这样写**：一个博客一个文件，提交时只改动有变化的博客，diff 也能逐行看。
+- **什么时候会出事**：每个文件里是这个博客抓到过的每一篇文章（标题、摘要、`excerpt_html`、关键词，允许全文的还有正文）。备份只增不减，文件也只会变大。普通博客没问题，但读者可以添加任何 RSS，配置里也能加新闻站。一个每天几百条的源，按每条 1–3 KB 算，一两年就会超过 GitHub 单个文件 100 MB 的上限（50 MB 起就有警告）。从那以后每次 `git push` 都被 GitHub 拒绝（GH001 Large files detected）。这个文件每次备份都会重新生成，所以之后所有备份都推不上去。Actions 的备份步骤设了 `continue-on-error`，运行照样显示成功；`serve` 只是每小时记一条 warn。而且推送失败会被当成冲突，每次多等 10–20 分钟（见「推送失败一律当作冲突重试」）。没人会注意到，直到需要从备份恢复时，才发现备份停在了几个月前。
+- **要不要改**：建议改（中）——写文件前检查大小，超过比如 40 MB 就按年份拆成 `sites/<site>/<year>.json`；或者给新闻、论坛这类非博客的源设一个默认的 `max_posts_per_blog`。推送失败的信息里有 `GH001` 时直接报错，并写进 `feed-server status`。
+
+### git 被中途杀掉后留下锁文件，备份从此失败（人工）
+
+```rust
+let mut cmd = Command::new("git");
+cmd.args(COMMITTER)
+.args(args)
+.current_dir(dir)
+.env("GIT_TERMINAL_PROMPT", "0")
+.kill_on_drop(true);
+```
+
+- **为什么这样写**：每个 git 命令最多等 `GIT_TIMEOUT`（5 分钟）；超时后 future 被丢弃，`kill_on_drop` 把 git 进程杀掉，免得一个卡住的推送挂住整个备份任务。
+- **什么时候会出事**：git 在 `add`、`commit` 时会建 `.git/index.lock`，正常结束才删掉。被 SIGKILL 杀掉时，锁文件就留在了原地。有两种情况会这样：一是命令超时被 `kill_on_drop` 杀掉；二是服务器在备份进行中被停掉，`docker stop` 或重启时，`feed-server` 不处理 SIGTERM（见 main.rs「按 Ctrl-C 时优雅退出」），10 秒后整个容器连同 git 被 SIGKILL。此后每次备份都报 “Unable to create '…/index.lock': File exists”。`serve`、`watch` 的备份目录是持久的，所以备份从此一直失败，日志里每小时一条 warn，直到有人手动删掉这个文件。Actions 每次重新克隆，不受影响。
+- **要不要改**：可以改（低）——备份开始前检查 `.git/index.lock`：比 `GIT_TIMEOUT` 还旧就删掉并记一条 warn；同时让 `serve`、`watch` 处理 SIGTERM。
+
+### 推送失败一律当作冲突重试（人工）
+
+```rust
+if push && let Err(e) = git(dir, &["push", "--quiet", "--set-upstream", "origin", "HEAD"], b).await {
+if attempt < PUSH_ATTEMPTS {
+let [lo, hi] = cfg.conflict_wait_minutes;
+let wait = crate::util::random_between(lo * 60, hi * 60);
+```
+
+- **为什么这样写**：两个抓取程序（Actions 和家里的 `watch`）同时推送时，后推的那个会被拒绝。这时等一个随机时间，拿进对方的快照再推，最多试 3 次。
+- **什么时候会出事**：不管推送因为什么失败，都走这条路：部署密钥被删、仓库改名、权限变了、文件超过 GitHub 的大小上限、网络断了。这些情况等多久都不会好，但每次都要等两轮 5–10 分钟，每轮还要再合并、再写一遍整份快照。Actions 里这一步排在最多 100 分钟的抓取之后，再加上这 10–20 分钟，离 job 130 分钟的超时就不远了（见 pages.yml 那条）。而这一步设了 `continue-on-error`，运行显示成功，没人会注意到。
+- **要不要改**：可以改（低）——只在 stderr 里是「非快进被拒」（`[rejected]`、`non-fast-forward`、`fetch first`）时才等待重试，其他错误立即返回。
+
 ## `backend/src/cache.rs`
 
 ### 响应缓存的锁（unwrap）
@@ -300,6 +361,28 @@ remaining * 5
 - **为什么这样写**：`HeaderValue::from_str` 遇到控制字符等非法字节才会报错，这两个头的内容都是自己格式化出来的。
 - **什么时候会出事**：不会：ETag 是 `W/"` 加 16 位十六进制数再加 `"`。Cache-Control 是固定文字加两个整数：`remaining` 最多 600 秒，乘 5 也不会溢出。两者都是可见 ASCII。
 - **要不要改**：不用改——内容不含任何外部输入。
+
+### 刷新博客之后，列表还是缓存里的旧内容（人工）
+
+```rust
+fn ttl(path: &str) -> Duration {
+let secs = if path.starts_with("/api/posts/") {
+600
+} else if path == "/api/meta" || path == "/api/tags" || path.starts_with("/api/blogs/") {
+300
+} else {
+60
+};
+```
+
+```rust
+// Browsers may reuse it for whatever is left of our own TTL.
+let remaining = entry.expires.saturating_duration_since(Instant::now()).as_secs();
+```
+
+- **为什么这样写**：不带个人参数的 GET 请求在内存里缓存 1–10 分钟，浏览器也按剩下的时间缓存，再加 5 倍的 stale-while-revalidate，省掉重复的数据库查询。新文章本来就是几小时抓一次，晚几分钟看到无所谓。
+- **什么时候会出事**：服务器版的博客页上，读者点「刷新」：`/api/refresh` 当场抓完，回复「读到 3 篇新文章」，页面随即重新请求这个博客的文章列表。可这个请求和刚才的一模一样：在 `max-age` 之内，浏览器直接用自己缓存的结果；过了 `max-age`，按 stale-while-revalidate 也会先显示旧的；就算请求到了服务器，`ResponseCache` 里还有最多 60 秒前的结果。于是读者看到提示说有新文章，列表里却没有。博客资料（`/api/blogs/…`，缓存 5 分钟）里的「上次抓取」也还是旧的。前端只在 `queued` 分支里先显示浏览器自己读到的文章，`done` 分支没有这一步。
+- **要不要改**：可以改（低）——刷新抓到新文章后，清掉缓存里这个博客相关的条目（把 `ResponseCache` 也交给 readers 的路由；最简单是整个清空）。前端在 `done` 之后重新请求时加 `cache: 'no-cache'` 或一个会变的参数。
 
 ## `backend/src/clean.rs`
 
@@ -438,6 +521,20 @@ fn pathname_term(path: &str) -> String {
 - **什么时候会出事**：不会：`path` 来自 `Url::path()`，url 库会把非 ASCII 字符百分号编码，路径全是 ASCII，每个字节都是字符边界；`len < 2` 时先返回，所以 `[1..]` 不越界；`i` 是 `rfind('.')` 的位置，`i + 1 ≤ p.len()`。它在 HTTP 接口 `get_post`（api.rs 生成评论嵌入配置）里运行，就算出错也只断开一个请求。
 - **要不要改**：不用改——下标都有保证。
 
+## `backend/src/config.rs`
+
+### 爬虫的数值设置都不检查（人工）
+
+```rust
+let mut cfg: Config = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+cfg.apply_env();
+cfg.server.columns = cfg.server.columns.clamp(1, 12);
+```
+
+- **为什么这样写**：`deny_unknown_fields` 让拼错的键在启动时就报错。数值只有 `columns` 夹了范围，其余照写的用。
+- **什么时候会出事**：几个值写成 0 或写反时不会报错，程序照常启动，只是悄悄做错事（`min_refresh_secs` 和 `max_refresh_secs` 写反的情况已在 crawler.rs 单独列出）。`request_timeout_secs = 0` 时 reqwest 的超时是 0，每个请求马上超时，所有博客都记成失败，一路退避到一周一次。`directory_sync_secs = 0` 时每个 tick（30 秒）都重新拉一次目录；`discovery_retry_secs = 0` 时，没找到 RSS 的博客每个 tick 都重新探测一遍。这两种都会频繁打扰开往和这些博客。`refresh_secs` 小于 `min_refresh_secs` 时，抓到新文章后下一次只隔 `refresh_secs`（`ingest` 直接用它，不受下限约束）。`per_host_interval_secs = 0` 时，同一主机的请求不再间隔。这些只能从日志里，或者对方站长的抱怨里发现。
+- **要不要改**：可以改（低）——在 `Config::load` 里统一校验：超时和各种间隔必须大于 0（或者有合理的下限），`refresh_secs` 在 `[min_refresh_secs, max_refresh_secs]` 之间，不满足就启动失败。
+
 ## `backend/src/crawler.rs`
 
 ### 只保留最新的 N 条（truncate）
@@ -519,6 +616,75 @@ return;
 - **为什么这样写**：这个博客用的评论系统没有评论数可查时，把下次检查推迟到下次读资料以后。所在的函数没有返回值，写失败也没有别处可交。
 - **什么时候会出事**：写失败时下次检查没有推迟，下一轮还会挑到它；但这一步不发任何请求，只是多一次数据库写，无害。
 - **要不要改**：不用改。
+
+### Retry-After 不设上限（人工）
+
+```rust
+FetchError::Status { retry_after, .. } => retry_after.map(|d| d.as_secs() as i64),
+```
+
+```rust
+fn backoff(&self, blog: &BlogRow, retry_after: Option<i64>) -> i64 {
+let base = blog.refresh_secs.max(self.c().min_refresh_secs as i64);
+let exp = base
+.saturating_mul(1 << blog.failures.clamp(0, 10))
+.min(MAX_BACKOFF_SECS);
+jitter(exp.max(retry_after.unwrap_or(0)), 10, blog.id)
+}
+```
+
+- **为什么这样写**：对方回 429/503 并带 `Retry-After` 时，至少按对方说的时间等；自己的指数退避最长一周。
+- **什么时候会出事**：`Retry-After` 只当下限、没有上限，有两种出错的情况。第一种，值很大但没有溢出：对方配置错了，比如把毫秒当成秒，`Retry-After: 3600000` 就是 41 天，这个博客就停这么久。`crawl --retry` 特意跳过 429/503；服务器版的刷新按钮会说「N 分钟后可以再刷新」，N 可能有几万；只能手动改数据库。第二种，值接近 `i64::MAX`（有的服务器用它表示「永远别来」）：`jitter` 里的 `secs * percent` 回绕成负数，于是原样返回；接着 `t + backoff` 也溢出，得到一个很大的负数，`next_check_at` 永远早于现在。结果正好相反：这个博客每一轮都到期，`serve` 和 `watch` 每 30 秒请求它一次；`crawl --all` 每轮都有到期的博客，要一直转到 `--max-minutes` 才停（见下一条）。release 构建不会 panic，debug 构建会在 `jitter` 里 panic。两种情况都没人会注意到，除非对方站长来投诉。
+- **要不要改**：可以改（低）——把 `retry_after` 夹到一个上限，比如 30 天，和 `MAX_BACKOFF_SECS` 一个量级；`next_check_at` 用 `saturating_add` 算。
+
+### crawl --all 可能一直转到截止时间（人工）
+
+```rust
+while std::time::Instant::now() < deadline {
+let s = self.crawl_due(round.max(1)).await?;
+if s.checked == 0 {
+break;
+}
+tracing::info!(?s, "crawl round finished");
+total.add(&s);
+}
+while std::time::Instant::now() < deadline && self.enrich_due(ENRICH_ROUND).await? > 0 {}
+```
+
+```rust
+let Some(sys) = system.filter(|_| count_every > 0 && blog.comments_next_at <= t) else {
+return;
+};
+```
+
+- **为什么这样写**：Actions 的定时运行在时间预算内一轮一轮地抓，直到没有到期的博客，然后把到期的博主资料和评论数也补完。截止时间只在两轮之间检查，这样一轮里的博客总能抓完。
+- **什么时候会出事**：两个循环都要等「处理过的博客不再到期」才会结束。只要有一个博客处理完还是到期，循环就要转到截止时间。第二个循环的例子：`due_for_enrich` 选的是 `comment_system` 不为空、`comments_next_at` 已到的博客；可 `comment_system` 存的如果是这个版本不认识的评论系统（家里的 `watch` 和 Actions 版本不同，通过备份互相合并时就会这样），解析结果是 None，`enrich` 在上面第二段代码处直接返回，`comments_next_at` 没变。这个博客永远到期，循环每次查一遍数据库、什么也不做，一直空转到 `--max-minutes`（100 分钟）。`feed-server enrich --all` 没有截止时间，就成了死循环。第一个循环的例子：`next_check_at` 被写成过去时间的博客（见上一条 Retry-After 溢出），每一轮都会被选中。另外，截止时间只在两轮之间检查，一轮 200 个博客碰上大量超时、找 RSS 的探测（同一主机隔 10 秒）和读资料，可能要十几二十分钟，会越过截止时间这么久。后果都是 Actions 的运行变长、网站晚更新、离 130 分钟的超时更近；日志里只能看到不停重复的记录。
+- **要不要改**：可以改（低）——`enrich` 里 `comment_system` 解析失败时也把 `comments_next_at` 推后（或者清掉它，等下次读资料时重新识别）；两个循环在「这一轮的博客和上一轮完全一样」时停下；把截止时间也传给 `crawl_blogs`，过了截止时间就不再开始新的博客。
+
+### 解析 feed 和网页的 CPU 活在异步线程上（人工）
+
+```rust
+let parsed = match feed::parse(body, feed_url) {
+```
+
+- **为什么这样写**：抓取主要是在等网络，一次解析通常很快；提取关键词（分词）这种明显吃 CPU 的已经放进了 `spawn_blocking`。
+- **什么时候会出事**：`feed::parse` 要处理的正文最大 4 MB（`max_body_bytes`），要解析 XML，还要给每一条生成并清理摘要 HTML。同样直接在异步任务里跑的还有：找 RSS 和读资料时用 scraper 解析整页 HTML（`discovery`、`profile::from_home`、`comments::detect`、`fulltext::main_content`），`store_items` 事务里的 `feed_full_text`（`html::sanitize`）和 `analyze::derive`，以及 readers.rs 的 `/api/fetch` 遇到网页时调用的 `html::feed_links`。碰上大的输入，一次可能占住工作线程几百毫秒到一两秒。`serve` 里抓取和网站共用一个 tokio 运行时，工作线程数等于 CPU 核数，单核 VPS 上这段时间所有 API 请求都在排队。第一次抓取，或者规则变了要全部重抓时最明显。表现只是网站偶尔变慢，没人会想到是抓取引起的。
+- **要不要改**：可以改（低）——把 `feed::parse` 和对整页 HTML 的解析放进 `spawn_blocking`（输入是 `Bytes` 或 `String`，可以直接 move 进去）；或者让 `serve` 的抓取跑在单独的运行时里。
+
+## `backend/src/db.rs`
+
+### 别的写操作占着数据库超过 10 秒时（人工）
+
+```rust
+.journal_mode(SqliteJournalMode::Wal)
+.foreign_keys(true)
+.busy_timeout(Duration::from_secs(10));
+let pool = SqlitePoolOptions::new().max_connections(8).connect_with(opts).await?;
+```
+
+- **为什么这样写**：WAL 模式下读和写互不阻塞，同一时刻只能有一个写事务；别人正在写时，最多等 10 秒。
+- **什么时候会出事**：有的写事务很长。`backup::restore` 为了「全有或全无」，把整份快照的合并放在一个事务里，`serve` 每次定时备份都要先做一遍；另一台机器推上来的改动多时（比如它升级了解析器，每篇文章的 `excerpt_html` 都变了），要更新几十万行。`store_items` 在事务里还要做 HTML 清理和打标签。手动对 `serve` 正在用的数据库跑 `feed-server restore`、`analyze`、`backup` 也一样。这时其他写操作等满 10 秒就报 `database is locked`：读者的 `/api/sync` 上传、`/api/events` 回 500，前端稍后重试。抓取里的 `store_items` 失败时，`crawl_blog` 把它当成这个博客的错误记下来：`failures` 加一、按指数退避，`last_error` 写的是数据库的报错，算到了无辜的博客头上。`record_failure` 本身也可能因为同样的原因写不进去，那就只有一条 error 日志。
+- **要不要改**：可以改（低）——`busy_timeout` 提到 30–60 秒；`restore` 改成分批提交，比如每 200 个博客一个事务（合并做两遍和做一遍结果一样，中途失败下次从头再来也无害）；`crawl_blog` 遇到 SQLite 的 BUSY/LOCKED 错误时，不算作博客的失败。
 
 ## `backend/src/discovery.rs`
 
@@ -724,6 +890,20 @@ headers.insert(header::ACCEPT, HeaderValue::from_str(accept).unwrap());
 - **什么时候会出事**：不会：所有调用方传的都是常量（本文件的 `ACCEPT_FEED` / `ACCEPT_HTML` / `ACCEPT_JSON` / `ACCEPT_IMAGE`，independent.rs 的 `ACCEPT_CSV`），都是可见 ASCII；`ACCEPT_FEED` 里的 `\` 续行会连同换行和缩进一起去掉。discovery.rs 的测试实际用 `ACCEPT_HTML` 和 `ACCEPT_FEED` 发过请求。
 - **要不要改**：不用改——值都是常量；以后若有调用方传运行时字符串，再改成 `&'static str` 加 `HeaderValue::from_static`，或把错误转成 `FetchError`。
 
+### 排队时，同一主机的两次请求可能挨得很近（人工）
+
+```rust
+slots.insert(host.to_string(), start + self.per_host_interval);
+start
+};
+tokio::time::sleep_until(start).await;
+}
+```
+
+- **为什么这样写**：先为主机预约一个时间（上一个预约加 10 秒），睡到那时再去拿全局并发许可（默认 4 个）。等预约时间时不占许可，别的主机的请求可以先走。
+- **什么时候会出事**：间隔是按「预约的时间」算的，不是按请求真正发出的时间。一轮抓取有 64 个任务抢 4 个许可，许可要排队（tokio 的信号量先来先得）。比如同一主机的 A 预约在第 0 秒、B 预约在第 10 秒；A 排在队尾，等到第 40 秒才拿到许可，B 第 10 秒排进队、正好在 A 后面，两次请求实际只隔一两秒，甚至同时发出。一个任务里接连访问同一站点（RSS、首页、关于页、头像、全文页）也一样：上一个请求排队排晚了，下一个的预约时间早已过去，不用再等。所以 README 里说的「同一主机两次请求间隔 ≥ 10 秒」，在抓取繁忙时并不成立。共用一个主机名的博客平台会收到成串的请求，可能招来 429 和退避。这很难发现。
+- **要不要改**：可以改（低）——为每个主机记下「上一次真正发出」的时间：拿到许可后再检查一次，不够间隔就放回许可，按实际时间重新预约。
+
 ## `backend/src/main.rs`
 
 ### restore 已在前面处理（unreachable!）
@@ -884,6 +1064,28 @@ let list = &e.events[..e.events.len().min(200)];
 - **什么时候会出事**：不会：上限取了 `min(len)`，Vec 切片不会越界。请求体整体还受 `DefaultBodyLimit`（1.9 MB）限制。
 - **要不要改**：不用改——长度已取 min。
 
+### 订阅源代理的缓存按条数算，满了就全部清掉（人工）
+
+```rust
+const MAX_FEED_BYTES: usize = 4 * 1024 * 1024;
+const FEED_TTL: Duration = Duration::from_secs(15 * 60);
+const FAILURE_TTL: Duration = Duration::from_secs(10 * 60);
+const CACHED_FEEDS: usize = 256;
+```
+
+```rust
+if cache.len() >= CACHED_FEEDS {
+cache.retain(|_, (at, a)| at.elapsed() < a.ttl());
+if cache.len() >= CACHED_FEEDS {
+cache.clear();
+}
+}
+```
+
+- **为什么这样写**：同一个源一刻钟内只替所有读者抓一次。最多存 256 条，满了先去掉过期的，还是满就整个清空，代码最简单。
+- **什么时候会出事**：有两个问题。一是内存只按条数限制，每条里存着整个 feed 正文（最大 4 MB），256 条最多约 1 GB。`/api/fetch` 不需要登录，谁都能用 256 个不同的地址把它填满（同一个大文件加上不同的查询参数就行）；同时进行的抓取也没有数量上限，每个都在内存里攒最多 4 MB。小内存的 VPS 可能因此被 OOM 杀掉。二是读者多了以后，一刻钟内被请求的源超过 256 个，几乎每次插入都会触发 `clear()`，「大家共用一次抓取」就不成立了：对方网站和本站的流量都会翻倍，但从外面看不出来。
+- **要不要改**：可以改（低）——按总字节数限制（比如 64 MB），满了淘汰最旧的几条，而不是全部清空；再用一个信号量限制同时进行的抓取数（比如 8 个）。
+
 ## `backend/src/rich.rs`
 
 ### 编译固定的正则表达式（unwrap）
@@ -1022,6 +1224,51 @@ ATTR.captures_iter(attrs)
 - **为什么这样写**：第 1 组是属性名；属性值在第 2 组（双引号）或第 3 组（单引号），这两个是可选的，所以用 `get`。
 - **什么时候会出事**：不会：第 1 组 `([\w:]+)` 不是可选的，匹配上就有值。
 - **要不要改**：不用改——必选组用下标，可选组用 `get`，写法正确。
+
+## `backend/src/sources/travellings.rs`
+
+### 开往返回空列表或大批异常状态时，博客整批下线（人工）
+
+```rust
+#[serde(default)]
+data: Vec<Member>,
+```
+
+```rust
+let alive = self.cfg.live_statuses.iter().any(|s| s.eq_ignore_ascii_case(&status));
+```
+
+- **为什么这样写**：开往的接口返回全部成员和开往每天检测的状态，只有 RUN 和 LOST 算活着。`data` 缺了就当空列表。
+- **什么时候会出事**：`save_directory` 会把这次列表里没有的成员标成不活跃，`alive` 为假的也一样；只被开往收录的博客随之从网站上消失、不再抓取。所以只要接口「成功」地返回了不完整的数据，就会整批下线。可能的情况有：接口返回 `{"success": true, "data": []}`（维护中、数据库出错）；字段改了名，`data` 换成别的名字，`serde(default)` 让它变成空列表而不是报错；开往自己的检测服务出了问题，一天里大批成员被标成 TIMEOUT 或 ERROR。这几种都不会转去试备用地址，也不报错。目录一天才同步一次，至少要到第二天才恢复；如果是字段改名，就一直不会恢复。中文独立博客列表（independent.rs）已经对空列表报错，这里没有。只能从网站上博客数突然变少看出来。
+- **要不要改**：建议改（高）——外面一个服务出点小问题，就能让网站少掉四成博客（约 1,200 个只在开往里的），而且没人报警。和 independent.rs 一样，列表为空时报错（这样会转去试备用地址）。再加一个类似 backup.rs `check_shrink` 的检查：这次活着的成员比上次少了一大截（比如一半）时，不保存这次的结果，记一条 warn，等下一次同步。
+
+## `backend/src/stats.rs`
+
+### 「今天」按 UTC 算（人工）
+
+```rust
+pub fn today() -> String {
+chrono::Utc::now().format("%Y-%m-%d").to_string()
+}
+```
+
+- **为什么这样写**：服务器、Worker（`dayOf`）和浏览器（telemetry.ts 里的 `toISOString().slice(0, 10)`）都用 UTC 日期，按天计数的口径一致，不受服务器所在时区影响。
+- **什么时候会出事**：读者几乎都在 UTC+8。「大家在看」页上的「今天 N 位访客」，在北京时间早上 8 点清零，凌晨 0 点到 8 点的访客都算在前一天。浏览器每天报一次「来过」也按 UTC 日期，早上 8 点前后各访问一次就算两天。静态版更明显：数字是导出那一刻的，页面可能几小时后才有人看，跨过 UTC 零点后显示的「今天」其实是前一天。只是显示上不准，不影响热度。
+- **要不要改**：可以改（低）——服务器、Worker、浏览器三处统一用一个固定时区（例如 Asia/Shanghai，可以在配置里改）；或者把文案改成「过去 24 小时」，按时间戳算。
+
+### 统计只增不减，每次合并备份都把所有日子重新导入（人工）
+
+```rust
+pub async fn import(pool: &SqlitePool, dir: &Path) -> anyhow::Result<usize> {
+let stats = dir.join("stats");
+let Ok(read) = std::fs::read_dir(&stats) else {
+return Ok(0);
+};
+```
+
+- **为什么这样写**：备份仓库里每天一个 `stats/<day>.json`（Worker 每小时提交一次）。合并备份时一律以文件为准：先删掉这一天，再插入，简单，也不会重复计数。
+- **什么时候会出事**：`restore` 每次都会调用它。Actions 每次抓取运行要合并两次，每次发布再合并一次，`serve` 每次定时备份也合并一次。文件每天多一个、从不删除，每次都要把所有日子读一遍，逐行删除再插入，耗时随天数线性增长。数据库里的 `stats` 表也从不清理，而 `refresh_heat` 的条件 `day >= ?` 不在主键的开头，每小时都要扫一遍整张表。热度只用最近 30 天（`HEAT_DAYS`），更早的日子每次都白导入一遍。几年后每次合并要多花几十秒，表现为 Actions 运行越来越慢，没人会专门注意。
+- **要不要改**：可以改（低）——只导入最近 `HEAT_DAYS` 天的文件和数据库里还没有的日子，或者记下每个文件的哈希，没变就跳过；给 `stats` 表加一个 `(day)` 索引。
 
 ## `backend/src/status.rs`
 
@@ -1904,6 +2151,23 @@ if (detailed.includes(id)) return file<PostDetail>(`posts/${id}.json`)
 - **什么时候会出事**：`details.json` 读不到时，允许全文的那些文章（目前只有站长自己的博客）只显示摘要，也没有内嵌评论；其他文章不受影响。
 - **要不要改**：不用改。
 
+### 静态版的数据，一个标签页只读一次（人工）
+
+```ts
+let indexPromise: Promise<Index> | null = null
+function index(): Promise<Index> {
+indexPromise ??= fetchJson<Index>(`${DATA}index.json`, { cache: 'no-cache' }).catch((e) => {
+```
+
+```ts
+.catch(() => null)
+ownCache.set(url, p)
+```
+
+- **为什么这样写**：`index.json` 每次都向服务器确认；其余文件带着导出时间 `?v=`，可以一直缓存。读过的文件放在 `files` 里，同一个标签页里不再重复下载。
+- **什么时候会出事**：`indexPromise` 成功之后再也不会清空，所以一个标签页从打开起就固定在那一次导出上。标签页开着过夜，或者手机浏览器一直留在后台时，之后几次发布的新文章都看不到，只有整页刷新才行。博客页点「刷新」后提示「已请求，约 N 分钟后网站更新」，可等网站真的更新了，这个页面读的还是旧数据，读者会以为刷新没成功。读者刚添加、网站还没抓到的源，`ownFile` 的结果 null 也缓存着，网站抓到以后这个标签页也不会去读它的文件。另外 `files` 只增不减：每打开一个博客页，这个博客的全部文章（`blogs/<id>.json`）就留在内存里，浏览几百个博客后可能占几十上百 MB。
+- **要不要改**：可以改（低）——页面重新可见时，或者距上次读 `index.json` 超过比如 10 分钟时，重新读一次；`generated_at` 变了就清空 `files` 和 `ownCache`。`files` 里的博客文件只保留最近用过的几十个。
+
 ## `frontend/src/sync.ts`
 
 ### 读取同步状态（JSON.parse、localStorage）
@@ -2072,6 +2336,20 @@ if (!res.ok) throw new Error(`没能删除（HTTP ${res.status}）`)
 - **为什么这样写**：这两个函数只由设置页的按钮调用，错误抛给 SettingsView 的 begin() 和 removeAll()，它们 catch 之后把消息放进 syncError，显示在同步那一节的下面。
 - **什么时候会出事**：读者把同步码输错或少输了几位，或者删除时服务器出错，都会看到提示。删除失败时，本机还在同步，可以再点一次。deleteSync 里的 fetch 本身没有包 try，断网时显示的是浏览器的英文报错（同样会被 removeAll 接住）。
 - **要不要改**：不用改——调用方接住了，并把消息给读者看。
+
+## `frontend/src/syncDoc.ts`
+
+### 合并靠各设备自己的时钟，删除记录 120 天后失效（人工）
+
+```ts
+export const REMOVED_DAYS = 120
+// …
+const gone = (col: string, key: string | number, at: number) => (marks[col]?.[String(key)] ?? -1) >= at
+```
+
+- **为什么这样写**：没有账户，服务器也看不懂内容，只能在浏览器里合并。每个关注、喜欢、收藏、来源都带着加入的时间，删除会留下「删除于」的记录，两边比时间：删除晚于加入，就删掉。删除记录只留 120 天，免得同步的副本越来越大。
+- **什么时候会出事**：有两种情况。一是时间用的是各设备自己的 `Date.now()`。如果一台设备的时钟快了几个小时（手动调过时间、双系统电脑把硬件时钟当本地时间、没开自动对时），在这几个小时里，它做的删除会压过别的设备上的重新添加：比如在时钟快的电脑上取消关注一个博客，过一会儿在手机上重新关注，下一次同步后又没了。它改的设置（`objects` 的 `at`）也总是赢。时钟慢的设备正好相反，它的删除会被别处更早的添加压回去。读者只会觉得同步「有时不听话」。二是一台很久没打开的设备（旧平板、不常用的电脑）过了 120 天再同步时：别的设备早就删掉的喜欢、收藏、关注和来源，它那里还有，而删除记录已经过期，合并后这些东西全都回来了，再同步到所有设备。
+- **要不要改**：可以改（低）——给时间戳加逻辑时钟：本地新记下的时间取 `max(Date.now(), 见过的最大时间 + 1)`，或者用服务器回复的 `Date` 头校正。设备的上次同步时间早于 `REMOVED_DAYS` 时，不合并它本地的旧内容，以服务器上的副本为准，并提示读者。
 
 ## `frontend/src/telemetry.ts`
 
@@ -2566,3 +2844,156 @@ const page = await env.ASSETS.fetch(new Request(new URL(`/blog/${site}/`, reques
 - **为什么这样写**：静态站里每个收录的博客都有 `/blog/<site>/` 页面；用 `ASSETS` 取一下，200 就说明是本站的博客（没有的页面按 `not_found_handling: "404-page"` 回 404）。
 - **什么时候会出事**：不会：`site` 已经过了正则（开头只有字母、数字、点、横线，后面的路径里没有空白、`?`、`#`），拼成以 `/` 开头的相对路径，以合法的请求地址为基准总能解析。万一抛了，也在 fetch 处理器的 try/catch 里，只是这一次请求 500。
 - **要不要改**：不用改——输入已经过正则检查，基准地址合法。
+
+### 启动抓取失败只写日志，token 过期没人知道（人工）
+
+```js
+if (every > 0 && now - (await getState(env, 'crawled')) >= every) {
+// Counted as started even if GitHub refused, so a broken token is not retried every five minutes.
+await setState(env, 'crawled', now)
+await dispatch(env, { crawl: 'true', scheduled: 'true' })
+}
+```
+
+```js
+if (!res.ok) console.error('dispatch failed', res.status, await res.text())
+return res.ok
+```
+
+- **为什么这样写**：抓取由 Worker 的定时器启动。GitHub 拒绝了也算启动过，免得 token 坏掉时每 5 分钟去撞一次；原因写进 Worker 的日志。
+- **什么时候会出事**：`GITHUB_TOKEN` 是细粒度 token，一般都设了过期时间。token 过期、被撤销，或者仓库改了名以后，每次 `dispatch` 都失败（401 或 404），影响有三处。定时抓取：Worker 不再启动它；好在 pages.yml 的 GitHub 定时任务会在「4 小时内没有 Worker 启动的运行」时顶上，网站照常每 3 小时更新；但公开仓库 60 天没有改动时，GitHub 会停掉定时任务，那以后就完全不抓了。读者的「刷新」：`/api/capabilities` 只看有没有设 token，按钮照常显示，点了回复「已请求，约 N 分钟后网站更新」，然后什么都不会发生；读者新加的源也要等下一次定时抓取。没设 `DATA_TOKEN` 时，统计推送用的也是这个 token，同样停了（见下面统计那条）。这些错误只出现在 Worker 的日志里，没人会去看。GitHub 会在 token 到期前发邮件，但邮件里不会说是哪个功能在用它。
+- **要不要改**：建议改（中）——把最近一次 `dispatch` 的结果（状态码和时间）存进 `state`。连续失败时 `/api/capabilities` 回 `refresh: false`，并在关于页或设置页提示，比如「抓取启动失败：GitHub 返回 401」。README 里提醒给 token 设长一点的有效期，并记下到期日。
+
+### 刷新请求先记成已发出再发，失败或被顶掉就丢了（人工）
+
+```js
+await env.DB.prepare('UPDATE refreshes SET dispatched_at = ? WHERE site IN (SELECT value FROM json_each(?))')
+.bind(now, JSON.stringify(sites))
+.run()
+// …
+await dispatch(env, { crawl: 'true', sites: sites.join(',') })
+```
+
+```js
+return json({ status: 'queued', eta_minutes: Math.ceil(wait / 60) + 5 })
+```
+
+- **为什么这样写**：一批最多 30 个博客合成一次短运行，最多每 3 分钟一次、每小时 12 次。发出前先记下 `dispatched_at`，同一个博客 30 分钟内不再接受刷新。
+- **什么时候会出事**：`dispatch` 的返回值没人检查。GitHub 拒绝时（token 过期、限流、5xx），这批博客已经记成「已发出」（`dispatched_at >= requested_at`），以后不会再发。读者看到的是「已请求」，30 分钟内再点是「刚请求过」。GitHub 接受了也不一定会跑：同一组里排队等待的运行会被后来的顶掉（见 pages.yml 那条），被顶掉的那一批同样不会再发。给读者的「约 N 分钟」是「等到下次能发的时间 + 5」，可一次短运行要构建、合并备份、抓取、备份、再构建、导出、部署，估计要十几分钟；就算网站更新了，已经打开的静态页也看不到（见 staticApi.ts 那条）。另外，两个刷新请求几乎同时到达时，两个 `dispatchRefreshes` 都会通过 3 分钟的检查，同一批博客会被发两次。
+- **要不要改**：可以改（低）——`dispatch` 失败时把这一批的 `dispatched_at` 改回原来的值；挑博客时把最近 20 分钟内发出过的也带上，这样被顶掉的那一次能由下一次补上；ETA 按实际的运行时长估，比如从 15 分钟起。
+
+### 统计只推今天和昨天，中断超过一天就永久缺几天（人工）
+
+```js
+for (const day of [dayOf(now - 86400), dayOf(now)]) {
+```
+
+```js
+env.DB.prepare('DELETE FROM stats WHERE day < ?').bind(dayOf(now - 7 * 86400)),
+```
+
+- **为什么这样写**：只有今天和昨天的计数还会变，所以每小时只提交这两天（和读者订阅数）。以前的每一天都已经在备份仓库里，D1 只留 7 天。
+- **什么时候会出事**：推送连续失败超过一天（token 过期或没有写权限、`DATA_REPO` 写错、GitHub 故障、`pushStats` 抛错）后再恢复，只会补推那时的「今天」和「昨天」。中间那几天虽然还在 D1 里，却再也不会提交，7 天后被删掉。备份仓库里就永远缺了这几天，热度和「大家在看」也少了这几天，没人会注意到。
+- **要不要改**：可以改（低）——提交 D1 里还留着的所有日子中内容变了的。用一条 `WHERE day >= ?` 取出 7 天的数据，哈希也一条查询取齐，免得 D1 查询数接近每次调用 50 条的上限（现在一次定时任务最多约 39 条）。
+
+### /api/fetch 在免费版上的两个限制（人工）
+
+```js
+const cached = await caches.default.match(key)
+// …
+ctx.waitUntil(caches.default.put(key, respond(a, 'public')))
+```
+
+```js
+if (kind === 'page') return { feeds: await feedLinks(body, url), url: url.href }
+```
+
+- **为什么这样写**：同一个地址一刻钟内只抓一次，所有读者共用（Cache API）；拿到网页时，用 HTMLRewriter 找页面里的 RSS 链接。正文最大 4 MB。
+- **什么时候会出事**：这两处都依赖 Cloudflare 的运行环境，出问题时不报错。第一，据 Cloudflare 的文档，Cache API 在 `*.workers.dev` 域名上不起作用：`put` 存不下，`match` 总是找不到。README 建议先在 workers.dev 上试；如果网站一直只用这个地址，「一刻钟一次、大家共用」就不成立，每个读者的每次预览都会去请求对方网站（只有浏览器自己按 `max-age` 缓存 15 分钟）。绑定自己的域名后才正常。第二，免费版每个请求只有 10 ms CPU。用 HTMLRewriter 解析几 MB 的网页、把 4 MB 的 feed 拼接拷贝，可能超出这个限制，请求以 1102 错误结束。失败的结果没有写进缓存，读者每重试一次就再抓一次。读者只会觉得预览慢，或者偶尔失败。
+- **要不要改**：可以改（低）——README 写明要绑定自己的域名，缓存才生效（或者改用 KV 或 D1 存这一刻钟的结果）；网页超过比如 1 MB 时只看前 1 MB（RSS 链接都在 `<head>` 里）。
+
+## `worker/wrangler.jsonc`
+
+### 在 Cloudflare 后台改的变量，下一次发布就没了（人工）
+
+```jsonc
+"vars": {
+"USER_AGENT": "blogScroll (RSS reader)",
+"GITHUB_REPO": "",
+"DATA_REPO": "",
+"CRAWL_EVERY_HOURS": "3"
+},
+```
+
+- **为什么这样写**：Worker 的变量写在这里，发布时由 wrangler 一起设置；仓库名、备份仓库和 User-Agent 由 publish.yml 用 `--var` 传入。
+- **什么时候会出事**：`wrangler deploy` 默认用这个文件里的 `vars` 替换后台的变量（这里没设 `keep_vars`）：后台加的普通变量会被删掉，同名的会被改回这里的值。README 说定时抓取的间隔是「Worker 的变量 `CRAWL_EVERY_HOURS`」，站长很自然会到后台把它改成 6，或者改成 0（家里已经有 `watch` 在抓，不想让同一批博客被抓两遍）。可是每次抓取结束都会发布一次，最多 3 小时后它就悄悄变回 "3"。`GITHUB_REF`、`DATA_BRANCH`（默认分支不叫 main 时需要设）这里没有列出，在后台设成普通变量的话，下一次发布也会被删掉，Worker 退回 `main`：启动抓取收到 422，统计推向不存在的分支，只在 Worker 日志里留下错误。另外，`CRAWL_EVERY_HOURS` 写成 "3h" 这类值时，`Number()` 得到 NaN，`every > 0` 为假，等于关掉了定时抓取，也不报错。只有 Secret（`GITHUB_TOKEN`、`DATA_TOKEN`）不受影响。
+- **要不要改**：建议改（中）——加上 `"keep_vars": true`，把 `CRAWL_EVERY_HOURS` 从这里拿掉（代码里已经默认 3），后台设的值就能保留下来；或者在 README 里写明这些变量只能改这个文件，或通过 GitHub 的 Variables 由 publish.yml 传入。`GITHUB_REF`、`DATA_BRANCH` 也写进文档。Worker 读到的 `CRAWL_EVERY_HOURS` 不是有效数字时，记一条日志并按 3 处理。
+
+## `.github/workflows/pages.yml`
+
+### 排队中的运行会被下一个顶掉（人工）
+
+```yaml
+concurrency:
+# Refreshes do not wait behind a long crawl; their pushes meet in the backup's retries.
+group: ${{ inputs.sites && 'pages-refresh' || 'pages-crawl' }}
+cancel-in-progress: false
+```
+
+- **为什么这样写**：同一组的运行一个接一个跑，不会有两个同时改同一份数据库缓存。刷新单独一组，不用排在两个小时的大抓取后面。
+- **什么时候会出事**：GitHub 的一个并发组里，只有一个运行在跑，最多一个在等。再来一个时，正在等的那个会被直接取消；`cancel-in-progress: false` 只保护正在跑的那个。一次刷新运行（构建、合并备份、抓取、备份、发布）估计要十几分钟，而 Worker 每 3 分钟就能再发一次（每小时最多 12 次）。读者稍多一点就会这样：A 在跑，B 在等，C 一来，B 就被取消了。Worker 已经把 B 那批博客记成「已发出」，不会再发（见 worker 那条），这些读者的刷新就丢了，读者新加的源也要等下一次定时抓取。抓取组也一样：大抓取在跑时，排队的定时抓取会被后来的运行（比如另一台机器发来的 `crawl=false`）顶掉，这一轮就没抓。这些只在 Actions 页面上表现为几个「cancelled」，没人会注意。
+- **要不要改**：建议改（中）——Worker 每次发刷新时，把最近 20 分钟内发出过的博客也一起带上（`dispatched_at > now - 1200`），被顶掉的那批由下一次补上；或者把 `REFRESH_GAP` 调到比一次运行的时长还长。
+
+### 第三方 action 被仓库策略禁掉时，每次运行都失败而没人知道（人工）
+
+```yaml
+- uses: actions/checkout@v7
+- uses: dtolnay/rust-toolchain@stable
+- uses: Swatinem/rust-cache@v2
+```
+
+- **为什么这样写**：用 `dtolnay/rust-toolchain` 装 Rust、`Swatinem/rust-cache` 缓存编译结果，是 Rust 项目的常见写法；publish.yml 里也一样。
+- **什么时候会出事**：仓库的 Actions 设置（Settings → Actions → General）只允许 GitHub 自己的 action，或者只允许列出来的几个时，用到这两个 action 的运行一启动就失败，一步都不执行。这真的发生过：抓取和发布连续失败了好几天都没人发现。Worker 每 3 小时照常 dispatch，GitHub 也照常接受（回 204），所以 Worker 的日志里没有错误。失败的运行也算「4 小时内有 Worker 启动的运行」，后备的定时任务就不跑（跑了也一样失败）。网站停在最后一次成功发布的样子，关于页上的「数据生成于」没人会去看。失败的运行最多给触发它的账号发一封通知邮件，而这种通知也可能被关掉了。更糟的是，连续 7 天没有运行用到数据库缓存时，GitHub 会把缓存删掉（见 publish.yml 那条）。
+- **要不要改**：建议改（中）——把这两个 action 换成 `run:` 步骤（runner 上已经有 rustup；缓存改用 GitHub 自己的 `actions/cache`，存 `~/.cargo` 和 `backend/target`），少依赖第三方。更重要的是加一个「网站多久没更新」的检查：比如 Worker 的定时任务读 `data/index.json` 的 `generated_at`，超过 12 小时就通过 `/api/capabilities` 告诉前端显示提示，或者调用 GitHub API 开一个 issue。
+
+### job 超时和 --max-minutes 之间的余量不够（人工）
+
+```yaml
+timeout-minutes: 130
+// …
+run: ./target/release/feed-server crawl --sync --all --limit 200 --max-minutes 100
+```
+
+- **为什么这样写**：抓取最多跑 100 分钟，剩下 30 分钟留给构建、合并备份、备份和保存缓存；超过 130 分钟由 GitHub 结束这个 job。
+- **什么时候会出事**：100 分钟只是「不再开始新一轮」的时间，正在进行的一轮还要做完（见 crawler.rs「crawl --all 可能一直转到截止时间」，可能要十几二十分钟）。rust-cache 失效时（工具链每 6 周更新一次，或者 Cargo.lock 变了），构建要十几分钟；没有数据库缓存时，要从备份仓库重建整个数据库；备份步骤推送被拒时，还要再等两轮 5–10 分钟（见 backup.rs 那条）。几项碰在一起就会超过 130 分钟，而这往往正是积压最多的时候：第一次运行、规则变了要全部重抓、缓存丢了。超时后 job 被取消，正在进行的抓取或备份被打断。如果连保存缓存的步骤也没来得及执行，下一次运行又从上一份缓存开始，同样的积压还得再来一遍。在 Actions 页面上看是一次失败的运行，网站照常发布。
+- **要不要改**：可以改（低）——按 `timeout-minutes` 减去其他步骤的实际耗时来定 `--max-minutes`（比如改成 80），或者把 `timeout-minutes` 提到 150；让抓取过了截止时间就不再开始新的博客。
+
+### 后备的定时任务把读者的刷新也当成 Worker 启动的（人工）
+
+```yaml
+recent=$(gh run list -R "$GITHUB_REPOSITORY" --workflow pages.yml --event workflow_dispatch -L 20 \
+--json createdAt --jq "[.[] | select(.createdAt > \"$since\")] | length")
+```
+
+- **为什么这样写**：GitHub 自己的定时任务只是 Worker 定时器的后备：4 小时内有 Worker 启动的运行，就什么也不做，免得同一批博客被抓两次。
+- **什么时候会出事**：这里数的是所有 `workflow_dispatch` 运行，不只是 Worker 定时器发的那种：读者的刷新运行（`sites`）、另一台机器发来的 `crawl=false`、手动运行，连失败了的运行都算。所以当 Worker 的定时启动出了问题、而刷新还正常时（比如 `CRAWL_EVERY_HOURS` 被改坏，见 wrangler.jsonc 那条），只要每 4 小时里有人点过一次刷新，完整的抓取就一次也不会跑，网站上只有被刷新的那几个博客在更新。
+- **要不要改**：可以改（低）——只数 Worker 定时器发的运行：用 `--json createdAt,displayTitle`，筛选 `displayTitle == "Crawl (Worker timer)"`（`run-name` 已经是这样命名的）。
+
+## `.github/workflows/publish.yml`
+
+### 缓存和备份都拿不到时，会发布一个空网站（人工）
+
+```yaml
+key: feed-db-publish-${{ github.run_id }}
+restore-keys: feed-db-
+```
+
+```yaml
+- name: Merge the backup into the database
+if: steps.key.outputs.ok == 'true'
+continue-on-error: true
+```
+
+- **为什么这样写**：发布时用最新的数据库缓存，再合并备份仓库，所以别的抓取程序的数据也能发布出去。合并失败不挡发布，至少还有缓存里的数据。
+- **什么时候会出事**：数据库缓存可能被 GitHub 删掉：7 天没有被访问（比如抓取和发布连续失败了一周，见 pages.yml 第三方 action 那条），或者仓库的缓存总量超过 10 GB。这时如果没配 `BACKUP_REPO`，或者克隆失败（部署密钥失效、GitHub 故障；这一步设了 `continue-on-error`），`feed-server export` 拿到的是一个刚建好的空数据库，照样导出、照样部署。结果网站上一篇文章都没有，直到下一次抓取跑完。没有备份仓库的话，那次抓取也是从零开始（找 RSS 要一个小时左右），以前的文章只剩各个 RSS 里还列着的最近几篇。推送代码后由 CI 触发的发布，最容易先碰上这种情况。读者一打开就能发现，但那时旧网站已经被覆盖了。
+- **要不要改**：建议改（中）——数据库里没有文章，或者博客数比线上那份（`data/blogs.json`）少了一大截时，`export` 报错退出，旧网站就保留下来；工作流里，没有命中缓存、也没有成功合并备份时，直接跳过发布。

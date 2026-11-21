@@ -412,7 +412,10 @@ if (!flag('--partial')) {
   for (const r of summary) if (!wanted.has(key(r))) problems.push(`「要改的地方」多了（条目不在了或级别变了）：${r.level} · ${r.file} · ${r.title}`)
 }
 const uncovered = new Map()
-for (const [file, list] of sites) {
+// Files with places, and files the document quotes (manual entries can be
+// about any file, a workflow or a config too: their quotes are checked as well).
+for (const file of new Set([...sites.keys(), ...[...doc.keys()].filter((f) => existsSync(join(ROOT, f)))])) {
+  const list = sites.get(file) ?? []
   if (flag('--partial') && !doc.has(file)) continue
   const source = readFileSync(join(ROOT, file), 'utf8')
     .split('\n')
