@@ -167,7 +167,7 @@ onBeforeUnmount(() => {
     </header>
     <ChipBar :chips="chips" :active="category" label="按分类筛选" class="filters" @select="(c) => setQuery({ category: c })" />
     <p v-if="dirtag" class="tag-note">
-      开往标签：{{ tagLabel(dirtag) }}
+      博客标签：{{ tagLabel(dirtag) }}
       <button type="button" @click="setQuery({ dirtag: '' })">清除</button>
     </p>
 

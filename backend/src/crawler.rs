@@ -215,8 +215,9 @@ impl Crawler {
                 }
                 Ok(DirectoryFetch::Fetched { entries, validators }) => {
                     let alive = entries.iter().filter(|e| e.alive).count();
+                    let refresh = self.c().refresh_secs as i64;
                     let saved =
-                        db::save_directory(&self.pool, dir.id(), &entries, self.c().refresh_secs as i64, now()).await?;
+                        db::save_directory(&self.pool, dir.id(), dir.fills_in(), &entries, refresh, now()).await?;
                     db::kv_set(&self.pool, &key, &serde_json::to_string(&validators)?).await?;
                     tracing::info!(directory = dir.id(), saved, alive, "directory synced");
                     any_ok = true;

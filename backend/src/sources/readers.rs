@@ -294,7 +294,7 @@ mod tests {
         );
         // The known feed keeps its blog (and its history).
         assert_eq!(entries[0].homepage.as_str(), "https://b2.example/");
-        crate::db::save_directory(pool, crate::db::READERS, &entries, 3600, now)
+        crate::db::save_directory(pool, crate::db::READERS, false, &entries, 3600, now)
             .await
             .unwrap();
         let own: i64 = sqlx::query_scalar("SELECT id FROM blogs WHERE feed_url = 'https://own.example/feed.xml'")
@@ -382,7 +382,7 @@ mod tests {
             .await
             .unwrap();
         let entries = readers.entries().await.unwrap().unwrap();
-        crate::db::save_directory(pool, crate::db::READERS, &entries, 3600, now + 1)
+        crate::db::save_directory(pool, crate::db::READERS, false, &entries, 3600, now + 1)
             .await
             .unwrap();
         let active: bool = sqlx::query_scalar("SELECT active FROM blogs WHERE id = ?")

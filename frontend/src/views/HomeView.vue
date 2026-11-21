@@ -258,7 +258,7 @@ const title = computed(() =>
           <RouterLink to="/settings#sources" class="link">管理</RouterLink>
         </span>
         <span v-if="state.dirtag" class="context">
-          开往标签：{{ tagLabel(state.dirtag) }}
+          博客标签：{{ tagLabel(state.dirtag) }}
           <button type="button" class="link" @click="go({ dirtag: '' })">清除</button>
         </span>
         <span class="spacer" />

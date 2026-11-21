@@ -100,10 +100,13 @@ pub async fn kv_set(pool: &SqlitePool, key: &str, value: &str) -> sqlx::Result<(
 
 /// Stores one directory's full member list. Members that disappeared from
 /// the list are marked inactive, and each blog's `active` flag is recomputed
-/// from all directories it belongs to.
+/// from all directories it belongs to. With `fill_in` (`Directory::fills_in`),
+/// a blog the site already has keeps its name, address and feed, and only
+/// gains what it lacks.
 pub async fn save_directory(
     pool: &SqlitePool,
     directory: &str,
+    fill_in: bool,
     entries: &[DirectoryEntry],
     refresh_secs: i64,
     now: i64,
@@ -120,13 +123,15 @@ pub async fn save_directory(
                                 kind, from_feed_meta)
              VALUES (?1, ?2, ?3, ?4, CASE WHEN ?4 IS NULL THEN NULL ELSE 'directory' END, ?5, ?6, ?6, ?7, ?8)
              ON CONFLICT(site_key) DO UPDATE SET
-                name = CASE WHEN ?8 THEN blogs.name ELSE excluded.name END,
-                homepage_url = CASE WHEN ?8 THEN blogs.homepage_url ELSE excluded.homepage_url END,
-                from_feed_meta = ?8,
-                kind = COALESCE(excluded.kind, blogs.kind),
+                name = CASE WHEN ?8 OR ?9 THEN blogs.name ELSE excluded.name END,
+                homepage_url = CASE WHEN ?8 OR ?9 THEN blogs.homepage_url ELSE excluded.homepage_url END,
+                from_feed_meta = CASE WHEN ?9 THEN blogs.from_feed_meta ELSE ?8 END,
+                kind = CASE WHEN ?9 THEN COALESCE(blogs.kind, excluded.kind) ELSE COALESCE(excluded.kind, blogs.kind) END,
                 feed_url = CASE WHEN excluded.feed_url IS NOT NULL AND blogs.feed_url_origin IS NOT 'manual'
+                                     AND NOT (?9 AND blogs.feed_url IS NOT NULL)
                                 THEN excluded.feed_url ELSE blogs.feed_url END,
                 feed_url_origin = CASE WHEN excluded.feed_url IS NOT NULL AND blogs.feed_url_origin IS NOT 'manual'
+                                            AND NOT (?9 AND blogs.feed_url IS NOT NULL)
                                        THEN 'directory' ELSE blogs.feed_url_origin END,
                 updated_at = excluded.updated_at
              RETURNING id",
@@ -139,6 +144,7 @@ pub async fn save_directory(
         .bind(now)
         .bind(&e.kind)
         .bind(e.name_from_feed)
+        .bind(fill_in)
         .fetch_one(&mut *tx)
         .await?;
 
@@ -897,13 +903,14 @@ mod tests {
         save_directory(
             &pool,
             "d",
+            false,
             &[entry("a", &["tech", "blog"]), entry("b", &["life"])],
             3600,
             100,
         )
         .await
         .unwrap();
-        save_directory(&pool, "d", &[entry("a", &["life"])], 3600, 200)
+        save_directory(&pool, "d", false, &[entry("a", &["life"])], 3600, 200)
             .await
             .unwrap();
 
@@ -924,10 +931,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_directory_that_fills_in_keeps_what_the_site_has() {
+        let pool = connect_memory().await;
+        // a: a member of the first directory whose feed was discovered; b: its
+        // feed not found yet; c: only in the second list.
+        save_directory(
+            &pool,
+            "first",
+            false,
+            &[entry("a", &["tech"]), entry("b", &[])],
+            3600,
+            100,
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE blogs SET feed_url = 'https://a.example/atom.xml', feed_url_origin = 'discovered' WHERE site_key = 'a.example'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let listed = |id: &str| DirectoryEntry {
+            name: format!("Listed {id}"),
+            feed_url: Some(Url::parse(&format!("https://{id}.example/old-feed")).unwrap()),
+            ..entry(id, &["编程"])
+        };
+        save_directory(
+            &pool,
+            "second",
+            true,
+            &[listed("a"), listed("b"), listed("c")],
+            3600,
+            200,
+        )
+        .await
+        .unwrap();
+
+        let rows: Vec<(String, String, Option<String>, Option<String>)> =
+            sqlx::query_as("SELECT site_key, name, feed_url, feed_url_origin FROM blogs ORDER BY 1")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let row = |k: &str, n: &str, f: &str, o: &str| (k.into(), n.into(), Some(f.into()), Some(o.into()));
+        assert_eq!(
+            rows,
+            [
+                row("a.example", "Blog a", "https://a.example/atom.xml", "discovered"),
+                row("b.example", "Blog b", "https://b.example/old-feed", "directory"),
+                row("c.example", "Listed c", "https://c.example/old-feed", "directory"),
+            ]
+        );
+        // Both directories' tags.
+        let tags: Vec<(String, String)> =
+            sqlx::query_as("SELECT directory, tag FROM blog_tags t JOIN blogs b ON b.id = t.blog_id WHERE b.site_key = 'a.example' ORDER BY 1")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            tags,
+            [("first".into(), "tech".into()), ("second".into(), "编程".into())]
+        );
+    }
+
+    #[tokio::test]
     async fn enrichment_selects_due_reachable_blogs() {
         let pool = connect_memory().await;
         let entries: Vec<DirectoryEntry> = ["a", "b", "c", "d"].iter().map(|id| entry(id, &[])).collect();
-        save_directory(&pool, "d", &entries, 3600, 100).await.unwrap();
+        save_directory(&pool, "d", false, &entries, 3600, 100).await.unwrap();
         // a: never checked; b: reachable, profile due; c: reachable but failing;
         // d: profile fresh, comment counts due.
         sqlx::query(
@@ -957,7 +1025,9 @@ mod tests {
     #[tokio::test]
     async fn undated_backlog_sorts_last_but_new_undated_posts_do_not() {
         let pool = connect_memory().await;
-        save_directory(&pool, "d", &[entry("a", &[])], 3600, 100).await.unwrap();
+        save_directory(&pool, "d", false, &[entry("a", &[])], 3600, 100)
+            .await
+            .unwrap();
         let item = |guid: &str, published: Option<i64>| crate::feed::ParsedItem {
             guid: guid.into(),
             url: Url::parse(&format!("https://a.example/{guid}")).unwrap(),
@@ -1016,7 +1086,9 @@ mod tests {
     #[tokio::test]
     async fn prune_keeps_newest_posts() {
         let pool = connect_memory().await;
-        save_directory(&pool, "d", &[entry("a", &[])], 3600, 100).await.unwrap();
+        save_directory(&pool, "d", false, &[entry("a", &[])], 3600, 100)
+            .await
+            .unwrap();
         for n in 0..10 {
             let item = crate::feed::ParsedItem {
                 guid: n.to_string(),

@@ -32,6 +32,9 @@ url = "https://wznmickey.com/about/"
 full = true
 note = "站长本人的博客"
 
+# Blog directories: 开往 ([sources.travellings]) and 中文独立博客列表
+# ([sources.independent]) are both on unless turned off (enabled = false).
+
 # Feeds readers added themselves (设置 → 来源 → 我添加的来源): crawled like the
 # rest, shown only to them. The crawl workflow writes this file from the
 # Worker's database before each run (address, first and last asked for).

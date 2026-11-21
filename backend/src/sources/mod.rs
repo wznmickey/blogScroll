@@ -12,6 +12,7 @@ use url::Url;
 use crate::config::Config;
 use crate::http::{PoliteClient, Validators};
 
+pub mod independent;
 pub mod manual;
 pub mod readers;
 pub mod travellings;
@@ -55,6 +56,12 @@ pub trait Directory: Send + Sync {
     fn tag_labels(&self) -> &'static [(&'static str, &'static str)] {
         &[]
     }
+    /// Lists many blogs another directory lists too: for those, only fills
+    /// in what the site does not know yet (a feed, a kind), and leaves the
+    /// name, address and the feed already read as they are.
+    fn fills_in(&self) -> bool {
+        false
+    }
     /// Read from local files, so it can be synced at every start.
     fn is_local(&self) -> bool {
         false
@@ -71,6 +78,9 @@ pub fn enabled(cfg: &Config, pool: &SqlitePool) -> Vec<Box<dyn Directory>> {
     let mut out: Vec<Box<dyn Directory>> = Vec::new();
     if cfg.sources.travellings.enabled {
         out.push(Box::new(travellings::Travellings::new(cfg.sources.travellings.clone())));
+    }
+    if cfg.sources.independent.enabled {
+        out.push(Box::new(independent::Independent::new(cfg.sources.independent.clone())));
     }
     if !cfg.sources.feeds.is_empty() || !cfg.sources.opml.is_empty() {
         out.push(Box::new(manual::Manual::new(

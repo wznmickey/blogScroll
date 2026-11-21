@@ -179,6 +179,8 @@ impl Default for CrawlerConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct SourcesConfig {
     pub travellings: TravellingsConfig,
+    /// 中文独立博客列表 (sources/independent.rs).
+    pub independent: IndependentConfig,
     /// Feeds you add yourself: news sites, podcasts, newsletters, any RSS.
     pub feeds: Vec<FeedSource>,
     /// Feed-reader exports (OPML); every feed in them is added like `feeds`.
@@ -252,6 +254,28 @@ impl Default for TravellingsConfig {
             api_url: "https://api.travellings.cn/all".into(),
             fallback_url: Some("https://backup.api.travellings.cn/list.json".into()),
             live_statuses: vec!["RUN".into(), "LOST".into()],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct IndependentConfig {
+    pub enabled: bool,
+    /// The list as CSV: name, address, feed, tags.
+    pub url: String,
+    /// The same file elsewhere, when the first is unreachable.
+    pub fallback_url: Option<String>,
+}
+
+impl Default for IndependentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            url: "https://raw.githubusercontent.com/timqian/chinese-independent-blogs/master/blogs-original.csv".into(),
+            fallback_url: Some(
+                "https://cdn.jsdelivr.net/gh/timqian/chinese-independent-blogs@master/blogs-original.csv".into(),
+            ),
         }
     }
 }

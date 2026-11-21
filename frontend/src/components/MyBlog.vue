@@ -102,6 +102,7 @@ const avatarSource = computed(() => {
 
 // Asking for changes.
 const repo = computed(() => meta.value?.repo ?? null)
+const directories = computed(() => meta.value?.directories ?? [])
 const editUrl = computed(() => (repo.value ? `${repo.value.url}/edit/main/${repo.value.config_path}` : ''))
 const issueUrl = computed(() => {
   const b = blog.value
@@ -176,7 +177,9 @@ async function copy() {
           </li>
         </ul>
         <p v-else-if="results" class="note">
-          没有找到。本站收录<a href="https://www.travellings.cn" target="_blank" rel="noopener">开往</a>的成员，以及站长另外订阅的博客<template
+          没有找到。本站收录<template v-for="(d, i) in directories" :key="d.id"
+            >{{ i ? '、' : '' }}<a :href="d.homepage" target="_blank" rel="noopener">{{ d.name }}</a></template
+          >里的博客<template
             v-if="repo"
             >；想被收录，可以<a :href="`${repo.url}/issues/new?title=${encodeURIComponent('申请收录')}`" target="_blank" rel="noopener"
               >在 GitHub 提 issue</a

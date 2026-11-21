@@ -2100,7 +2100,7 @@ pub(crate) mod tests {
                 name_from_feed: false,
             })
             .collect();
-        crate::db::save_directory(&pool, "travellings", &entries, 3600, 1000)
+        crate::db::save_directory(&pool, "travellings", false, &entries, 3600, 1000)
             .await
             .unwrap();
         let now = crate::util::now();
