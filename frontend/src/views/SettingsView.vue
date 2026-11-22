@@ -13,8 +13,10 @@ import { follows, isFollowing, toggleFollow } from '../follow'
 import { recentIds } from '../library'
 import { capabilities } from '../server'
 import DiagnosticsPanel from '../components/DiagnosticsPanel.vue'
+import { RSSHUB } from '../rsshub'
 import {
   addOwn,
+  addressOf,
   crawled,
   fromFile,
   lookUp,
@@ -148,6 +150,12 @@ const without = <T,>(list: T[], x: T) => list.filter((y) => y !== x)
 const sourceText = ref('')
 const adding = ref(false)
 const sourceNote = ref<{ text: string; bad?: boolean } | null>(null)
+/** An RSSHub address being typed: where it will be read from instead. */
+const rsshubAddress = computed(() => {
+  const typed = sourceText.value.trim()
+  const url = typed ? addressOf(typed) : ''
+  return url.startsWith(`${RSSHUB}/`) && !typed.startsWith(RSSHUB) ? url : ''
+})
 /** Blogs the site has already: followed instead. */
 async function onSite(found: Found) {
   const key = found.source.kind === 'feed' ? siteKey(found.source.homepage) : null
@@ -405,6 +413,7 @@ function toggleDirectory(id: string) {
         <h3>我添加的来源 <small>只有你看得到</small></h3>
         <p class="hint">
           RSS / Atom 地址、博客首页（会找到它的 RSS），或 OPML 订阅列表的地址或文件。本站已经收录的博客，会直接帮你关注。
+          RSSHub 的地址（rsshub.app 或 rsshub://）自动改用本站部署在 Vercel 上的实例。
           <template v-if="capabilities?.readers">
             其余的由本站像收录的博客一样抓取：保留全部历史、自动分类，也出现在推荐、最新和分类里，但只有你看得到（服务器只记下这些 RSS 地址，不知道是谁添加的）。在本站抓到之前，先由你的浏览器经本站读取最新的几篇，放在首页的「订阅」频道。
           </template>
@@ -415,6 +424,7 @@ function toggleDirectory(id: string) {
             <input v-model="sourceText" placeholder="https://example.com/feed.xml" :disabled="adding" spellcheck="false" />
             <button class="btn btn-ghost" :disabled="!sourceText.trim() || adding">{{ adding ? '读取中…' : '添加' }}</button>
           </form>
+          <p v-if="rsshubAddress" class="hint">将改用本站在 Vercel 上的 RSSHub：{{ rsshubAddress }}</p>
           <p class="row small">
             <label class="link file">
               导入 OPML 文件

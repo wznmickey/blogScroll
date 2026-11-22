@@ -16,6 +16,7 @@ import { report } from './changes'
 import { noteProblem } from './diagnostics'
 import { hasLongExcerpt, hostOf } from './format'
 import { parseOpmlFile, parseSource, type ListedFeed, type ParsedFeed, type ParsedItem } from './feedParse'
+import { viaOurRsshub } from './rsshub'
 import { fetchRemote, FetchFailed, loadCapabilities } from './server'
 import { sendingStats, statsId } from './telemetry'
 import type { BlogDetail, BlogRef, Page, PostCard, PostDetail } from './types'
@@ -59,10 +60,14 @@ const OTHER = { id: 'other', label: '其他' }
 const isAddress = (u: unknown): u is string => typeof u === 'string' && /^(https?:\/\/|file:)/.test(u) && u.length < 2000
 const str = (v: unknown, max = 200) => (typeof v === 'string' ? v.slice(0, max) : '')
 
+/** An address as kept: RSSHub ones moved to the site's own (rsshub.ts). */
+const kept = (u: unknown) => (typeof u === 'string' ? viaOurRsshub(u) : u)
+
 function cleanFeeds(v: unknown): ListedFeed[] {
   if (!Array.isArray(v)) return []
   return v
-    .filter((f) => isAddress(f?.url) && !f.url.startsWith('file:'))
+    .map((f) => ({ ...f, url: kept(f?.url) }))
+    .filter((f) => isAddress(f.url) && !f.url.startsWith('file:'))
     .map((f) => ({ url: f.url, title: str(f.title), homepage: str(f.homepage, 2000) }))
     .slice(0, MAX_FEEDS)
 }
@@ -73,12 +78,13 @@ export function cleanSources(v: unknown): OwnSource[] {
   const seen = new Set<string>()
   const out: OwnSource[] = []
   for (const s of v) {
-    if (!isAddress(s?.url) || seen.has(s.url) || (s.kind !== 'feed' && s.kind !== 'list')) continue
-    seen.add(s.url)
+    const url = kept(s?.url)
+    if (!isAddress(url) || seen.has(url) || (s.kind !== 'feed' && s.kind !== 'list')) continue
+    seen.add(url)
     out.push({
-      url: s.url,
+      url,
       kind: s.kind,
-      title: str(s.title) || hostOf(s.url),
+      title: str(s.title) || hostOf(url),
       homepage: str(s.homepage, 2000),
       at: Number.isFinite(s.at) ? s.at : 0,
       ...(s.kind === 'list' ? { feeds: cleanFeeds(s.feeds) } : {}),
@@ -416,13 +422,18 @@ export interface Found {
   feed?: ParsedFeed
 }
 
+/** What the reader typed, as the address to read: https:// added, RSSHub ones moved to the site's own. */
+export function addressOf(input: string): string {
+  const url = input.trim()
+  return viaOurRsshub(/^(https?|rsshub):\/\//i.test(url) ? url : `https://${url}`)
+}
+
 export async function lookUp(input: string): Promise<Found> {
-  let url = input.trim()
-  if (!/^https?:\/\//i.test(url)) url = `https://${url}`
+  let url = addressOf(input)
   let got = await fetchRemote(url)
   if (got.kind === 'page') {
     if (!got.feeds.length) throw new Error('这个网页上没有找到 RSS')
-    url = got.feeds[0]
+    url = viaOurRsshub(got.feeds[0])
     got = await fetchRemote(url)
     if (got.kind !== 'feed') throw new Error('这个网页上没有找到 RSS')
   }

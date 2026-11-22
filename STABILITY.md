@@ -1984,7 +1984,7 @@ failed(list.url, e)
 ```ts
 if (got.kind === 'page') {
 if (!got.feeds.length) throw new Error('这个网页上没有找到 RSS')
-url = got.feeds[0]
+url = viaOurRsshub(got.feeds[0])
 got = await fetchRemote(url)
 if (got.kind !== 'feed') throw new Error('这个网页上没有找到 RSS')
 }

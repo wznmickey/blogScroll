@@ -3,6 +3,8 @@
 // what a card needs: title, link, date, a plain excerpt, a picture, tags.
 // Pages parsed here (DOMParser) never run scripts or load anything.
 
+import { viaOurRsshub } from './rsshub'
+
 export interface ParsedItem {
   /** The feed's own id for it (guid / id), else its link. */
   guid: string
@@ -301,8 +303,9 @@ function parseOpml(doc: Document, base: string): ParsedList {
   const seen = new Set<string>()
   const feeds: ListedFeed[] = []
   for (const o of doc.getElementsByTagName('outline')) {
-    const url = absolute(o.getAttribute('xmlUrl') ?? o.getAttribute('xmlurl'), base)
-    // Feeds only an RSSHub server can read (rsshub://...) are left out.
+    const raw = o.getAttribute('xmlUrl') ?? o.getAttribute('xmlurl')
+    // RSSHub feeds (rsshub://…, rsshub.app) are read from the site's own RSSHub.
+    const url = absolute(raw && viaOurRsshub(raw), base)
     if (!url || seen.has(url)) continue
     seen.add(url)
     feeds.push({
